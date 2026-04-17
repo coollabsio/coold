@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{net::IpAddr, net::SocketAddr, path::PathBuf, time::Duration};
 
 use clap::Parser;
 
@@ -33,6 +33,21 @@ pub struct Config {
     /// `tracing_subscriber` env filter (e.g. `info`, `coold=debug`).
     #[arg(long, env = "COOLD_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
+
+    /// Bridge-gateway IP of the Podman mesh network (e.g. 10.210.5.1).
+    /// coold's embedded DNS server binds UDP+TCP :53 here.
+    /// Set by the init bootstrap via systemd drop-in. Optional — when absent,
+    /// the DNS server is skipped (useful for tests / agent-only deployments).
+    #[arg(long, env = "COOLD_BRIDGE_GATEWAY_IP")]
+    pub bridge_gateway_ip: Option<IpAddr>,
+
+    /// DNS zone served authoritatively by coold.
+    #[arg(long, env = "COOLD_DNS_ZONE", default_value = "coolify.internal")]
+    pub dns_zone: String,
+
+    /// Upstream resolver for queries outside `dns_zone`.
+    #[arg(long, env = "COOLD_DNS_UPSTREAM", default_value = "1.1.1.1:53")]
+    pub dns_upstream: SocketAddr,
 }
 
 fn parse_duration(s: &str) -> Result<Duration, String> {

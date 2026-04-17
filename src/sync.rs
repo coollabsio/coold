@@ -47,12 +47,23 @@ pub async fn run(config: Config) -> Result<()> {
         tokio::spawn(async move { run_reconcile_loop(ctx).await })
     };
 
+    let dns_handle = {
+        let config = ctx.config.clone();
+        let corrosion = ctx.corrosion.clone();
+        tokio::spawn(async move { crate::dns::run(config, corrosion).await })
+    };
+
     drop(tx);
 
     tokio::select! {
         _ = events_handle => warn!("events task exited"),
         _ = trigger_handle => warn!("event-trigger task exited"),
         _ = reconcile_handle => warn!("reconcile task exited"),
+        res = dns_handle => match res {
+            Ok(Ok(())) => warn!("dns task exited"),
+            Ok(Err(e)) => warn!(error = format!("{:#}", e), "dns task failed"),
+            Err(e) => warn!(error = %e, "dns task panicked"),
+        },
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }
 
@@ -124,15 +135,17 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
                 continue;
             }
         };
+        // Track every container attached to the mesh network regardless of
+        // run state — a stopped/exited container's bridge attachment remains
+        // in inspect until `podman rm`, so we keep reporting its state until
+        // removal. Routing consumers filter on state='running' AND
+        // health IN ('healthy','unknown').
         let Some(net_settings) = inspect.network_settings.as_ref() else {
             continue;
         };
         let Some(entry) = net_settings.networks.get(&ctx.config.mesh_network) else {
             continue;
         };
-        if entry.ip_address.is_empty() {
-            continue;
-        }
 
         let name = if !inspect.name.is_empty() {
             inspect.name.trim_start_matches('/').to_string()
@@ -143,6 +156,19 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
                 .unwrap_or_else(|| c.id.clone())
         };
 
+        let state_str = inspect
+            .state
+            .as_ref()
+            .map(|s| s.status.to_lowercase())
+            .unwrap_or_default();
+        let health_str = inspect
+            .state
+            .as_ref()
+            .and_then(|s| s.health.as_ref())
+            .map(|h| h.status.to_lowercase())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".into());
+
         out.insert(
             c.id.clone(),
             Endpoint {
@@ -150,6 +176,8 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
                 container_name: name,
                 host_mgmt_ip: ctx.config.host_mgmt_ip.clone(),
                 container_ip: entry.ip_address.clone(),
+                state: state_str,
+                health: health_str,
             },
         );
     }
@@ -168,19 +196,22 @@ fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
         match d {
             Delta::Upsert(ep) => out.push(Statement::new(
                 "INSERT INTO service_endpoints \
-                 (container_id, container_name, host_mgmt_ip, container_ip, healthy, updated_at) \
-                 VALUES (?, ?, ?, ?, 1, ?) \
+                 (container_id, container_name, host_mgmt_ip, container_ip, state, health, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(container_id) DO UPDATE SET \
                    container_name = excluded.container_name, \
                    host_mgmt_ip   = excluded.host_mgmt_ip, \
                    container_ip   = excluded.container_ip, \
-                   healthy        = 1, \
+                   state          = excluded.state, \
+                   health         = excluded.health, \
                    updated_at     = excluded.updated_at",
                 vec![
                     json!(ep.container_id),
                     json!(ep.container_name),
                     json!(ep.host_mgmt_ip),
                     json!(ep.container_ip),
+                    json!(ep.state),
+                    json!(ep.health),
                     json!(now_ms),
                 ],
             )),

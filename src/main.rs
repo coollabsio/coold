@@ -1,5 +1,6 @@
 mod config;
 mod corrosion;
+mod dns;
 mod model;
 mod podman;
 mod sync;

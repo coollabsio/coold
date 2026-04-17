@@ -6,6 +6,12 @@ pub struct Endpoint {
     pub container_name: String,
     pub host_mgmt_ip: String,
     pub container_ip: String,
+    /// Raw podman status: "running", "exited", "stopped", "restarting",
+    /// "paused", "created", "dead", "configured", "removing". Liveness signal.
+    pub state: String,
+    /// HEALTHCHECK result. One of "healthy", "unhealthy", "starting", "unknown".
+    /// "unknown" when the container has no HEALTHCHECK declared.
+    pub health: String,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +54,8 @@ mod tests {
             container_name: format!("name-{id}"),
             host_mgmt_ip: "100.64.0.5".into(),
             container_ip: ip.into(),
+            state: "running".into(),
+            health: "unknown".into(),
         }
     }
 

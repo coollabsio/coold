@@ -23,6 +23,10 @@ thiserror = "1"
 bytes = "1"
 humantime = "2"
 futures-util = "0.3"
+async-trait = "0.1"
+hickory-server = "0.24"
+hickory-proto = "0.24"
+hickory-resolver = "0.24"
 
 [profile.release]
 lto = "thin"

@@ -27,6 +27,7 @@ pub struct NetworkEntry {
 
 /// Subset of `GET /containers/{id}/json` — libpod's list endpoint leaves
 /// `NetworkSettings.Networks` empty, so we inspect each container to get IPs.
+/// Also the only source of truth for container state + HEALTHCHECK result.
 #[derive(Debug, Deserialize)]
 pub struct ContainerInspect {
     #[serde(rename = "Id")]
@@ -35,6 +36,25 @@ pub struct ContainerInspect {
     pub name: String,
     #[serde(default, rename = "NetworkSettings")]
     pub network_settings: Option<ListNetworkSettings>,
+    #[serde(default, rename = "State")]
+    pub state: Option<ContainerState>,
+}
+
+/// Podman inspect `State` block. `status` is liveness (running, exited,
+/// stopped, restarting, paused, created, dead, configured, removing).
+/// `health` is only populated when the container declares a HEALTHCHECK.
+#[derive(Debug, Default, Deserialize)]
+pub struct ContainerState {
+    #[serde(default, rename = "Status")]
+    pub status: String,
+    #[serde(default, rename = "Health")]
+    pub health: Option<ContainerHealth>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ContainerHealth {
+    #[serde(default, rename = "Status")]
+    pub status: String,
 }
 
 /// One line of the `GET /events` NDJSON stream.

@@ -73,7 +73,7 @@ impl CorrosionClient {
     ) -> Result<HashMap<String, Endpoint>> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = json!([
-            "SELECT container_id, container_name, host_mgmt_ip, container_ip \
+            "SELECT container_id, container_name, host_mgmt_ip, container_ip, state, health \
              FROM service_endpoints WHERE host_mgmt_ip = ?",
             [host_mgmt_ip]
         ]);
@@ -94,6 +94,63 @@ impl CorrosionClient {
         }
         parse_rows(&bytes)
     }
+
+    /// Return container IPs matching `container_name` across the whole mesh
+    /// (all hosts). Used by the embedded DNS resolver.
+    ///
+    /// Filters: `state = 'running'` and `health IN ('healthy', 'unknown')`.
+    /// Containers without a declared HEALTHCHECK report `health = 'unknown'`
+    /// and must still be resolvable (same convention as k8s readinessProbe
+    /// defaulting to ready when absent).
+    pub async fn query_ips_by_name(&self, container_name: &str) -> Result<Vec<String>> {
+        let url = format!("{}/v1/queries", self.base_url);
+        let body = json!([
+            "SELECT container_ip FROM service_endpoints \
+             WHERE container_name = ? \
+               AND state = 'running' \
+               AND health IN ('healthy', 'unknown')",
+            [container_name]
+        ]);
+        let res = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = res.status();
+        let bytes = res.bytes().await.context("read queries response")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "corrosion query failed: HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
+        parse_ip_column(&bytes)
+    }
+}
+
+/// Parse the single-column `container_ip` result from `/v1/queries` NDJSON.
+fn parse_ip_column(bytes: &[u8]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for line in bytes.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(frame): std::result::Result<Frame, _> = serde_json::from_slice(line) else {
+            continue;
+        };
+        if let Some(row) = frame.row {
+            if row.len() != 2 {
+                continue;
+            }
+            let Some(values) = row[1].as_array() else { continue };
+            if let Some(ip) = values.first().and_then(|v| v.as_str()) {
+                out.push(ip.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Corrosion `/v1/queries` returns newline-delimited JSON frames:
@@ -112,7 +169,7 @@ fn parse_rows(bytes: &[u8]) -> Result<HashMap<String, Endpoint>> {
                 continue;
             }
             let Some(values) = row[1].as_array() else { continue };
-            if values.len() < 4 {
+            if values.len() < 6 {
                 continue;
             }
             let endpoint = Endpoint {
@@ -120,6 +177,8 @@ fn parse_rows(bytes: &[u8]) -> Result<HashMap<String, Endpoint>> {
                 container_name: string_at(values, 1)?,
                 host_mgmt_ip: string_at(values, 2)?,
                 container_ip: string_at(values, 3)?,
+                state: string_at(values, 4)?,
+                health: string_at(values, 5)?,
             };
             out.insert(endpoint.container_id.clone(), endpoint);
         }
