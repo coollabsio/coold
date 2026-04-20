@@ -4,9 +4,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio::task::JoinError;
 use tokio::time::{sleep, MissedTickBehavior};
 use tracing::{debug, info, warn};
 
@@ -34,7 +35,10 @@ pub async fn run(config: Config) -> Result<()> {
     let events_handle = {
         let ctx = ctx.clone();
         let tx = tx.clone();
-        tokio::spawn(async move { events::run(ctx.podman.clone(), tx).await })
+        tokio::spawn(async move {
+            events::run(ctx.podman.clone(), tx).await;
+            Ok::<(), anyhow::Error>(())
+        })
     };
 
     let trigger_handle = {
@@ -56,18 +60,38 @@ pub async fn run(config: Config) -> Result<()> {
     drop(tx);
 
     tokio::select! {
-        _ = events_handle => warn!("events task exited"),
-        _ = trigger_handle => warn!("event-trigger task exited"),
-        _ = reconcile_handle => warn!("reconcile task exited"),
-        res = dns_handle => match res {
-            Ok(Ok(())) => warn!("dns task exited"),
-            Ok(Err(e)) => warn!(error = format!("{:#}", e), "dns task failed"),
-            Err(e) => warn!(error = %e, "dns task panicked"),
-        },
+        res = events_handle    => propagate("events",    res)?,
+        res = trigger_handle   => propagate("trigger",   res)?,
+        res = reconcile_handle => propagate("reconcile", res)?,
+        res = dns_handle       => propagate("dns",       res)?,
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }
 
     Ok(())
+}
+
+/// Convert a `JoinHandle` result for a named task into a top-level `Result`.
+/// A normal `Ok(())` return is treated as an unexpected early exit and
+/// bubbled up as an error so systemd can restart the daemon instead of
+/// silently losing a worker.
+fn propagate(
+    task: &str,
+    res: std::result::Result<Result<()>, JoinError>,
+) -> Result<()> {
+    match res {
+        Ok(Ok(())) => {
+            warn!(task, "task exited unexpectedly");
+            Err(anyhow!("{task} task exited unexpectedly"))
+        }
+        Ok(Err(e)) => {
+            warn!(task, error = format!("{:#}", e), "task failed");
+            Err(e.context(format!("{task} task failed")))
+        }
+        Err(e) => {
+            warn!(task, error = %e, "task panicked");
+            Err(anyhow!("{task} task panicked: {e}"))
+        }
+    }
 }
 
 struct SyncContext {
@@ -76,16 +100,20 @@ struct SyncContext {
     corrosion: CorrosionClient,
 }
 
-async fn run_event_trigger(ctx: Arc<SyncContext>, mut rx: mpsc::Receiver<EventMessage>) {
+async fn run_event_trigger(
+    ctx: Arc<SyncContext>,
+    mut rx: mpsc::Receiver<EventMessage>,
+) -> Result<()> {
     while let Some(msg) = rx.recv().await {
         debug!(?msg.kind, container_id = %msg.container_id, "podman event");
         if let Err(e) = reconcile_once(&ctx).await {
             warn!(error = %e, "event-driven reconcile failed");
         }
     }
+    Ok(())
 }
 
-async fn run_reconcile_loop(ctx: Arc<SyncContext>) {
+async fn run_reconcile_loop(ctx: Arc<SyncContext>) -> Result<()> {
     let mut ticker = tokio::time::interval(ctx.config.reconcile_interval);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 

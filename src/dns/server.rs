@@ -1,16 +1,16 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use hickory_server::ServerFuture;
 use tokio::net::{TcpListener, UdpSocket};
-use tracing::info;
+use tokio::time::sleep;
+use tracing::{debug, info, warn};
 
 use crate::{
     config::Config,
     corrosion::CorrosionClient,
     dns::{
         forwarder,
-        preflight,
         resolver::{CoolifyResolver, CorrosionBackend, EndpointLookup},
     },
 };
@@ -18,24 +18,59 @@ use crate::{
 /// Timeout for a single in-flight TCP DNS query.
 const TCP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Spawned alongside events/reconcile tasks by `sync::run`. Returns `Ok(())`
-/// only on clean shutdown (currently: task cancellation from `tokio::select!`).
-/// If `config.bridge_gateway_ip` is unset we do nothing — lets the daemon run
-/// in test/agent-only modes without touching :53.
+/// Initial backoff when bind/serve fails with a retryable IO error.
+const BACKOFF_START: Duration = Duration::from_secs(1);
+/// Upper bound for exponential backoff.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// Entry point for the DNS subsystem. Spawned by `sync::run`.
+///
+/// If `config.bridge_gateway_ip` is unset, returns `Ok(())` immediately — this
+/// lets the daemon run in test/agent-only modes without touching :53.
+///
+/// Otherwise loops: try to bind + serve; on *retryable* IO errors (typically
+/// `EADDRNOTAVAIL` when the Podman bridge has been torn down because no
+/// containers are attached, or `EADDRINUSE` during netavark churn), wait with
+/// exponential backoff and try again. On *fatal* errors (zone parse, resolver
+/// build), propagate up so systemd restarts the whole daemon.
 pub async fn run(config: Config, corrosion: CorrosionClient) -> Result<()> {
     let Some(gateway) = config.bridge_gateway_ip else {
         info!("COOLD_BRIDGE_GATEWAY_IP unset; DNS server disabled");
         return Ok(());
     };
 
-    preflight::check(gateway).await.context("dns preflight")?;
-
     let backend: Arc<dyn EndpointLookup> = Arc::new(CorrosionBackend::new(corrosion));
     let upstream = forwarder::build(config.dns_upstream);
-    let handler = CoolifyResolver::new(backend, &config.dns_zone, upstream)
-        .context("build CoolifyResolver")?;
-
     let addr = SocketAddr::new(gateway, 53);
+
+    let mut backoff = BACKOFF_START;
+    let mut attempt: u32 = 0;
+
+    loop {
+        // Resolver is cheap to build; rebuilding on every retry keeps the
+        // fatal-vs-retryable boundary crisp — a zone-parse failure errors
+        // out here, not inside try_serve, so it cannot be misclassified.
+        let handler = CoolifyResolver::new(backend.clone(), &config.dns_zone, upstream.clone())
+            .context("build CoolifyResolver")?;
+
+        match try_serve(addr, handler).await {
+            Ok(()) => return Ok(()),
+            Err(e) if is_retryable_io(&e) => {
+                attempt = attempt.saturating_add(1);
+                log_bind_failure(addr, &e, attempt, backoff);
+                sleep(backoff).await;
+                backoff = (backoff * 2).min(BACKOFF_MAX);
+                continue;
+            }
+            Err(e) => return Err(e.context(format!("dns bind/serve on {addr}"))),
+        }
+    }
+}
+
+/// One attempt: bind UDP+TCP, register with hickory, serve until the server
+/// future returns. Returns `Ok(())` only on a clean hickory exit. Any bind or
+/// serve error is returned so the caller can classify it as retryable or fatal.
+async fn try_serve(addr: SocketAddr, handler: CoolifyResolver) -> Result<()> {
     let udp = UdpSocket::bind(addr)
         .await
         .with_context(|| format!("bind udp {addr}"))?;
@@ -47,13 +82,85 @@ pub async fn run(config: Config, corrosion: CorrosionClient) -> Result<()> {
     server.register_socket(udp);
     server.register_listener(tcp, TCP_TIMEOUT);
 
-    info!(
-        bind = %addr,
-        zone = %config.dns_zone,
-        upstream = %config.dns_upstream,
-        "coold DNS listening",
-    );
-
+    info!(bind = %addr, "coold DNS listening");
     server.block_until_done().await.context("dns server loop")?;
     Ok(())
+}
+
+/// True for IO errors that indicate a transient network-config state —
+/// typically the Podman bridge being absent because no containers are
+/// currently attached to the mesh network. These resolve on their own once
+/// the first container attaches (netavark recreates bridge + gateway IP).
+fn is_retryable_io(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|c| c.downcast_ref::<io::Error>())
+        .any(|io_err| {
+            matches!(
+                io_err.kind(),
+                io::ErrorKind::AddrNotAvailable
+                    | io::ErrorKind::AddrInUse
+                    | io::ErrorKind::NetworkUnreachable
+                    | io::ErrorKind::Other
+            )
+        })
+}
+
+/// Loud on first failure (named causes), quieter on subsequent retries to
+/// avoid spamming the journal during prolonged idle windows.
+fn log_bind_failure(addr: SocketAddr, e: &anyhow::Error, attempt: u32, backoff: Duration) {
+    if attempt == 1 {
+        warn!(
+            bind = %addr,
+            error = format!("{e:#}"),
+            retry_in = ?backoff,
+            "coold DNS bind failed; retrying. \
+             Likely causes: \
+             (a) Podman bridge torn down because no containers are attached to the mesh network \
+             (netavark recreates it on first container start); \
+             (b) aardvark-dns squatting :53 because the network was created without `--disable-dns` \
+             — rerun `coolify init apply` to recreate it; \
+             (c) a host DNS daemon bound to 0.0.0.0:53 — bind it to a specific interface instead",
+        );
+    } else {
+        debug!(
+            bind = %addr,
+            error = format!("{e:#}"),
+            attempt,
+            retry_in = ?backoff,
+            "coold DNS bind still failing",
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    #[test]
+    fn retryable_classifier_addr_not_available() {
+        let io_err = io::Error::from(io::ErrorKind::AddrNotAvailable);
+        let wrapped: anyhow::Error = anyhow::Error::new(io_err).context("bind udp");
+        assert!(is_retryable_io(&wrapped));
+    }
+
+    #[test]
+    fn retryable_classifier_addr_in_use() {
+        let io_err = io::Error::from(io::ErrorKind::AddrInUse);
+        let wrapped: anyhow::Error = anyhow::Error::new(io_err).context("bind udp");
+        assert!(is_retryable_io(&wrapped));
+    }
+
+    #[test]
+    fn retryable_classifier_invalid_input_is_fatal() {
+        let io_err = io::Error::from(io::ErrorKind::InvalidInput);
+        let wrapped: anyhow::Error = anyhow::Error::new(io_err).context("bind udp");
+        assert!(!is_retryable_io(&wrapped));
+    }
+
+    #[test]
+    fn retryable_classifier_non_io_error_is_fatal() {
+        let err = anyhow!("zone parse failed");
+        assert!(!is_retryable_io(&err));
+    }
 }

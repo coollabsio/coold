@@ -12,16 +12,32 @@
 //! first tries `foo.coolify.internal`; forwarding handles absolute queries
 //! like `apt-get`'s `archive.ubuntu.com`.
 //!
-//! Port 53 conflicts are handled in three layers (see CONTROL_PLANE.md §5):
+//! ## Self-healing bind
+//!
+//! Netavark creates the Podman bridge on first container attach and **tears
+//! it down on last container detach** — so the gateway IP we bind to is not
+//! guaranteed to exist when coold starts, and can disappear at runtime (last
+//! `podman stop`, manual `ip addr flush`, etc.). [`server::run`] handles this
+//! by looping: bind attempts that fail with `EADDRNOTAVAIL`/`EADDRINUSE` back
+//! off (1s → 30s cap) and retry until the bridge reappears. Fatal config
+//! errors (zone parse, resolver build) propagate up so systemd can restart
+//! the daemon. This means the DNS task never silently dies from a missing
+//! bridge, and no external sentinel container / boot-time script is needed
+//! to keep the bridge alive.
+//!
+//! The "no DNS during the gap" window is a non-issue: queriers are
+//! containers on the bridge, so if the bridge is gone, nobody is asking.
+//!
+//! ## Port-53 collision defense
+//!
 //!   1. Bootstrap creates the Podman network with `--disable-dns` so
 //!      netavark/aardvark-dns never squats this socket.
 //!   2. Bind target is the bridge gateway IP only — never `0.0.0.0`, never
 //!      wg0 — so user DNS daemons bound to specific interfaces can coexist.
-//!   3. Preflight probe fails loud with an actionable error before the
-//!      handler is registered.
+//!   3. The retry loop above converts transient collisions during netavark
+//!      churn (e.g. `EADDRINUSE` briefly) into a retry instead of an exit.
 
 pub mod forwarder;
-pub mod preflight;
 pub mod resolver;
 pub mod server;
 
