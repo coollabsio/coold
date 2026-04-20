@@ -120,6 +120,11 @@ After=corrosion.service network-online.target podman.socket
 Environment=COOLD_HOST_MGMT_IP=100.64.0.5
 Environment=COOLD_BRIDGE_GATEWAY_IP=10.210.5.1
 Environment=COOLD_DNS_ZONE=coolify.internal
+# Firewall REST API (optional; omit the block to disable the API)
+Environment=COOLD_API_BIND=100.64.0.5:8443
+Environment=COOLD_API_TOKEN_FILE=/etc/coolify/api.token
+Environment=COOLD_TLS_CERT=/etc/coolify/api.crt
+Environment=COOLD_TLS_KEY=/etc/coolify/api.key
 ExecStart=/usr/local/bin/coold
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 Restart=on-failure
@@ -129,7 +134,7 @@ RestartSec=2s
 WantedBy=multi-user.target
 ```
 
-`CAP_NET_BIND_SERVICE` is needed because coold binds privileged port 53.
+`CAP_NET_BIND_SERVICE` is needed because coold binds privileged port 53. The token file must be root-owned, mode `0600`; its contents are trimmed of leading/trailing whitespace.
 
 ## Sync semantics
 
@@ -139,6 +144,7 @@ WantedBy=multi-user.target
 - **Filter**: only containers attached to `coolify-mesh` are registered. Off-mesh containers are not routable across wg0 anyway.
 - **State reporting**: every attached container is reported with its raw Podman status and healthcheck result, including stopped/exited ones — they remain in `inspect` until `podman rm`. Consumers filter on `state`/`health`.
 - **Degraded mode**: if Corrosion is down, writes fail and are retried on the next reconcile tick. Podman polling and DNS continue to run.
+- **Fail-fast supervision**: all five tasks run under one `tokio::select!` in `sync::run`. If any task returns or panics, `run` exits with an error so systemd's `Restart=on-failure` respawns the whole daemon rather than silently losing a worker (`src/sync.rs`).
 
 ## DNS semantics
 
@@ -146,7 +152,8 @@ WantedBy=multi-user.target
 - **Port collision**: three layers of defense (see `CONTROL_PLANE.md §5`):
   1. Bootstrap creates the Podman network with `--disable-dns` so netavark/aardvark-dns never squats `:53`.
   2. coold binds only the bridge gateway IP, not a wildcard.
-  3. A preflight probe attempts the bind before the handler is registered; on failure it surfaces an actionable error naming the likely cause (aardvark, host dnsmasq, etc.) and systemd's `Restart=on-failure` retries once the operator clears it.
+  3. On bind failure coold enters a self-healing retry loop (`src/dns/server.rs`). `EADDRNOTAVAIL` / `EADDRINUSE` / `NetworkUnreachable` are classified as transient and retried with exponential backoff (1s → 30s cap); the first failure logs the three likely causes (bridge torn down because nothing is attached to the mesh network, aardvark-dns squatting `:53`, host DNS daemon on `0.0.0.0`). Zone-parse or resolver-build errors are fatal and bubble up so systemd restarts the daemon.
+- **Bridge churn**: netavark tears the Podman bridge down when the last container on the mesh network detaches, so the gateway IP vanishes at runtime — not only at startup. The retry loop above is what lets coold survive this window without a sentinel container or boot-time hack. During the gap the only potential queriers are containers on the bridge, which are also gone.
 - **Zone resolution**: `foo.coolify.internal` → `CorrosionBackend::lookup("foo")` → all A records with matching `container_name`. TTL 5s (convergence vs. chatter trade-off from `CONTROL_PLANE.md`).
 - **Out-of-zone**: forwarded via `hickory-resolver` to `--dns-upstream`.
 - **Records**: IPv4-only in v1. AAAA/other types on an in-zone name return NODATA.
@@ -164,6 +171,9 @@ Endpoints (all under `/api/v1/firewall`, Bearer auth, bound to wg0 mgmt IP):
 | `DELETE` | `/allow/:id`      | — | revoke (idempotent, 204 even on missing) |
 | `POST`   | `/allow/bulk`     | `{add:[...], remove:[id,...]}` | one kernel transaction via `iptables-restore --noflush` |
 | `POST`   | `/reconcile`      | — | flush the chain, reload from `/etc/coolify/allow.rules` |
+| `GET`    | `/healthz`        | — | unauthenticated liveness probe, returns `ok` |
+
+**Auth & TLS.** Every `/api/v1/firewall/*` handler requires `Authorization: Bearer <token>`; the token is compared in constant time (`src/firewall/api.rs`) to avoid timing oracles. The server refuses to start without `--api-token-file` — no anonymous-access codepath exists. When both `--tls-cert` and `--tls-key` are set, the API serves HTTPS via rustls; otherwise plain HTTP, intended only for dev on a trusted overlay. Bind the API to the wg0 mgmt IP (never `0.0.0.0`) so it is never reachable off the mesh.
 
 Rule identity `id` is `sha256("src|dst|proto|port")[:12]` — same hash the Go `coolify firewall` CLI computes, so mixed writers share stable IDs. Snapshots are written atomically (`.tmp` + rename) to `/etc/coolify/allow.rules` in the `*filter` / `:COOLIFY-ALLOW -` / `-A ...` / `COMMIT` shape that `iptables-restore --noflush` expects.
 
