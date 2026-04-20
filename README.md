@@ -4,8 +4,9 @@ Per-host Coolify v5 agent. Runs on every node in the WireGuard mesh and does two
 
 1. **Service discovery sync**: watches the local Podman socket and keeps the Corrosion-replicated `service_endpoints` table in sync with the set of containers attached to the `coolify-mesh` network on this host.
 2. **Embedded cluster DNS**: binds UDP+TCP `:53` on the Podman bridge gateway IP and resolves `*.coolify.internal` from the replicated `service_endpoints` view, forwarding everything else upstream.
+3. **Firewall REST API**: serves `/api/v1/firewall/allow` over the wg0 mgmt IP (TLS + bearer token). Mutates the `COOLIFY-ALLOW` iptables chain and snapshots it to `/etc/coolify/allow.rules` so `coolify-mesh-allow.service` can restore on boot. Tuples only — metadata (audit, RBAC, owners) lives in the central Coolify DB.
 
-Scope is deliberately narrow. coold does **not** manage WireGuard, iptables/nft, the Podman bridge, TLS, or RBAC. Those are handled by `coolify init` at bootstrap or (for the runtime allow-list) a future control-plane component. coold also does not supervise `corrosion` — they run as independent systemd services.
+Scope is deliberately narrow. coold does **not** manage WireGuard, the Podman bridge, or the default-deny scaffold. Those are handled by `coolify init` at bootstrap. coold also does not supervise `corrosion` — they run as independent systemd services.
 
 ## Architecture
 
@@ -46,8 +47,9 @@ Scope is deliberately narrow. coold does **not** manage WireGuard, iptables/nft,
 | `event trigger` | `src/sync.rs` | debounces events into reconciles |
 | `reconcile loop` | `src/sync.rs` | periodic full reconcile against Podman + Corrosion |
 | `dns server` | `src/dns/server.rs` | hickory-server bound to bridge gateway `:53` |
+| `firewall api` | `src/firewall/server.rs` | axum REST on wg0 mgmt IP; mutates COOLIFY-ALLOW + snapshot |
 
-All four are spawned in parallel by `sync::run`. If the bridge gateway IP is unset, the DNS task no-ops (useful for tests and agent-only deployments).
+All five are spawned in parallel by `sync::run`. If `bridge_gateway_ip` is unset, the DNS task no-ops; if `api_bind` is unset, the firewall API task no-ops (both useful for tests and agent-only deployments).
 
 ## Required Corrosion schema
 
@@ -81,6 +83,12 @@ All flags also read from matching env vars.
 | `--bridge-gateway-ip` | `COOLD_BRIDGE_GATEWAY_IP` | unset | bridge gateway IP (e.g. `10.210.5.1`) to bind DNS on; when unset, DNS is skipped |
 | `--dns-zone` | `COOLD_DNS_ZONE` | `coolify.internal` | authoritative zone |
 | `--dns-upstream` | `COOLD_DNS_UPSTREAM` | `1.1.1.1:53` | upstream resolver for out-of-zone queries |
+| `--api-bind` | `COOLD_API_BIND` | unset | bind addr for the firewall REST API (e.g. `100.64.0.5:8443`); unset disables the API |
+| `--api-token-file` | `COOLD_API_TOKEN_FILE` | unset | path to bearer-token file; **required** when `--api-bind` is set |
+| `--tls-cert` | `COOLD_TLS_CERT` | unset | PEM cert chain for the API; set together with `--tls-key` to enable HTTPS |
+| `--tls-key` | `COOLD_TLS_KEY` | unset | PEM private key for the API |
+| `--rules-path` | `COOLD_RULES_PATH` | `/etc/coolify/allow.rules` | on-disk snapshot of `COOLIFY-ALLOW` for reboot restore |
+| `--chain-name` | `COOLD_CHAIN_NAME` | `COOLIFY-ALLOW` | iptables chain coold owns |
 | `--log-level` | `COOLD_LOG_LEVEL` | `info` | `tracing_subscriber` env filter |
 
 ## Run
@@ -144,10 +152,25 @@ WantedBy=multi-user.target
 - **Records**: IPv4-only in v1. AAAA/other types on an in-zone name return NODATA.
 - **Missing name**: NXDOMAIN.
 
+## Firewall API
+
+Endpoints (all under `/api/v1/firewall`, Bearer auth, bound to wg0 mgmt IP):
+
+| Method | Path | Body | Purpose |
+| --- | --- | --- | --- |
+| `POST`   | `/allow`          | `{src, dst, proto?, port?}` | create-or-ensure one rule, returns `{id, ...}` |
+| `GET`    | `/allow`          | — | list kernel state as JSON array |
+| `GET`    | `/allow/:id`      | — | one rule (404 when absent) |
+| `DELETE` | `/allow/:id`      | — | revoke (idempotent, 204 even on missing) |
+| `POST`   | `/allow/bulk`     | `{add:[...], remove:[id,...]}` | one kernel transaction via `iptables-restore --noflush` |
+| `POST`   | `/reconcile`      | — | flush the chain, reload from `/etc/coolify/allow.rules` |
+
+Rule identity `id` is `sha256("src|dst|proto|port")[:12]` — same hash the Go `coolify firewall` CLI computes, so mixed writers share stable IDs. Snapshots are written atomically (`.tmp` + rename) to `/etc/coolify/allow.rules` in the `*filter` / `:COOLIFY-ALLOW -` / `-A ...` / `COMMIT` shape that `iptables-restore --noflush` expects.
+
+coold stores **tuples only**. Audit trail, RBAC, app/owner linkage, and rule intent belong in the central Coolify DB — which issues REST calls to coold(s) after its own commit. On coold restart, the kernel chain is the source of truth; central reconciles any drift via `POST /reconcile` or by replaying `POST /allow`.
+
 ## Not (yet) in scope
 
-- REST API, TLS, RBAC.
-- iptables/nft rule management (the `COOLIFY-ALLOW` chain installed by `coolify init --default-deny` is still empty at runtime).
 - WireGuard peer management.
 - AAAA / IPv6 records.
 

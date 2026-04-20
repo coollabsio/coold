@@ -57,6 +57,11 @@ pub async fn run(config: Config) -> Result<()> {
         tokio::spawn(async move { crate::dns::run(config, corrosion).await })
     };
 
+    let firewall_handle = {
+        let config = ctx.config.clone();
+        tokio::spawn(async move { crate::firewall::run(config).await })
+    };
+
     drop(tx);
 
     tokio::select! {
@@ -64,6 +69,7 @@ pub async fn run(config: Config) -> Result<()> {
         res = trigger_handle   => propagate("trigger",   res)?,
         res = reconcile_handle => propagate("reconcile", res)?,
         res = dns_handle       => propagate("dns",       res)?,
+        res = firewall_handle  => propagate("firewall",  res)?,
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }
 
