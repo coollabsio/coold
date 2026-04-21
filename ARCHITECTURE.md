@@ -8,8 +8,10 @@
 
 coold is the **kubelet-analogue** of Coolify v5: a narrow, per-host agent that
 proxies a curated set of primitives over the local `/run/podman/podman.sock`
-Unix socket, programs `COOLIFY-ALLOW` in iptables, writes service-endpoint rows
-to Corrosion, and answers `.coolify.internal` DNS on the bridge gateway IP.
+Unix socket, dual-writes allow rules to iptables (`COOLIFY-ALLOW`) and to the
+nft bridge chain (`coolify_bridge::coolify_allow`), writes service-endpoint
+rows to Corrosion, and answers `<container>.<namespace>.coolify.internal` DNS
+on each namespace's bridge gateway IP.
 
 It is **not** the brain. Central Coolify (the apiserver + controllers analogue)
 owns all app-aware logic — compose, Dockerfiles, buildpacks, Nixpacks,
@@ -24,9 +26,10 @@ scheduling, rollback, ingress templating, RBAC, audit.
 | Concern | Owner | Notes |
 |---|---|---|
 | podman API proxy (containers/images/volumes/networks/exec/logs) | **coold** | Thin pass-through; denies dangerous flags. |
-| iptables COOLIFY-ALLOW writes + `/etc/coolify/allow.rules` snapshot | **coold** | Sole kernel writer. |
-| Corrosion row writes (service endpoints) scoped to own host | **coold** | Gossip distributes. |
-| Embedded DNS on bridge gateway `:53` | **coold** | Reads local Corrosion, answers `.coolify.internal`. |
+| iptables `COOLIFY-ALLOW` writes + `/etc/coolify/allow.rules` snapshot (cross-host plane) | **coold** | Sole kernel writer. |
+| nft `coolify_bridge::coolify_allow` writes + `/etc/coolify/allow.nft` snapshot (intra-host same-bridge plane) | **coold** | Sole kernel writer. Dual-written in the same API handler. |
+| Corrosion row writes (service endpoints, per namespace) scoped to own host | **coold** | Gossip distributes. |
+| Embedded DNS on each namespace's bridge gateway `:53` | **coold** | Reads local Corrosion, answers `<container>.<namespace>.coolify.internal`. |
 | Host facts (`podman info`, `wg show`, `/proc/*`, `iptables -nvL`) | **coold** | Read-only endpoints for central to scrape. |
 | Bearer-token authn + deny-dangerous-flags filter + ops/debug request log | **coold** | No RBAC, no per-user identity. |
 | Compose file parsing (services, networks, depends_on, volumes) | **central** | Emits primitive op sequence. |
@@ -73,10 +76,12 @@ POST   /api/v1/networks              {name, driver, options, labels}
 DELETE /api/v1/networks/{name}
 GET    /api/v1/networks
 
-# Firewall (coold = sole writer)
-POST   /api/v1/firewall/allow        {src, dst, proto?, port?}  -> {id}
+# Firewall (coold = sole writer; dual-plane: iptables + nft bridge)
+POST   /api/v1/firewall/allow            {namespace, src, dst, proto?, port?}  -> {id}
 DELETE /api/v1/firewall/allow/{id}
-GET    /api/v1/firewall/allow
+GET    /api/v1/firewall/allow[?namespace=X]
+POST   /api/v1/firewall/allow/bulk       {add:[...], remove:[id,...]}          -> {ok}
+POST   /api/v1/firewall/reconcile        -> {ok}  # flush + reload both snapshots
 
 # Service endpoints (Corrosion writer; central registers on deploy)
 POST   /api/v1/services/register
@@ -226,18 +231,30 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
 
 ## 9. Network model
 
-- **Default**: shared `coolify-mesh` bridge created at bootstrap by
-  `coolify init apply --podman`. Containers get `.coolify.internal` DNS + flat
-  L3 across the mesh.
-- **Per-app namespaces**: users may opt into extra podman networks (docker-
-  compose `networks:` style). Central compiles the compose block into
-  `POST /networks` + attach-on-create. coold is the only writer; bootstrap
-  doesn't own these.
+- **Namespaces as the tenancy unit**: every namespace is a separate podman
+  bridge named `coolify-<ns>-mesh` with its own per-host `/24` carved from the
+  shared container pool. `coolify init --namespaces default,alpha,…` provisions
+  every namespace on every host in one pass. coold receives the full list via
+  `COOLD_NAMESPACES=<name>:<network>:<gateway-ip>,…` and binds one DNS task per
+  entry.
+- **Per-app sub-networks**: inside a namespace, users may opt into additional
+  podman networks (docker-compose `networks:` style). Central compiles the
+  compose block into `POST /networks` + attach-on-create. coold is the only
+  writer; bootstrap owns only the top-level `coolify-<ns>-mesh` bridges.
 - **Egress from containers**: bridge-NAT to the host's default route. Cross-
-  host container traffic rides wg0 via peer `AllowedIPs`.
-- **coold DNS binds the bridge gateway IP only** (`10.210.X.1:53`); never
-  `0.0.0.0`. REST API binds the wg0 mgmt IP only. Separate concerns, separate
-  sockets.
+  host container traffic rides wg0 via peer `AllowedIPs` (mgmt /32 + every
+  peer namespace subnet).
+- **Two enforcement planes, both coold-written**:
+  - **iptables FORWARD** — cross-host plane. `COOLIFY-INTRA` jumps to
+    `COOLIFY-ALLOW`, then `DROP`. Enforces deny/allow on packets crossing
+    wg0 ↔ bridge.
+  - **nft `coolify_bridge`** — intra-host same-bridge plane. Fills a linux
+    gap: bridge L2 forwarding bypasses iptables FORWARD even with
+    `bridge-nf-call-iptables=1`. nft bridge-family hooks catch same-subnet
+    traffic and jump to the same `coolify_allow` chain.
+- **coold DNS binds each namespace bridge gateway IP only**
+  (`10.210.<ns>.1:53`); never `0.0.0.0`. REST API binds the wg0 mgmt IP only.
+  Separate concerns, separate sockets.
 
 ## 10. Volumes (v5 alpha)
 
@@ -256,13 +273,29 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
 
 ## 12. Persistence
 
-- **Allow-rule snapshot**: coold rewrites `/etc/coolify/allow.rules` (flat
-  `iptables-save` fragment — `:COOLIFY-ALLOW` + `-A COOLIFY-ALLOW` lines only)
-  on every successful API mutate. Atomic write (`.tmp` + `mv`).
-- **Boot restore**: `coolify-mesh-allow.service` is a `Type=oneshot` unit
-  ordered `After=coolify-mesh-fw.service`, running
-  `iptables-restore --noflush /etc/coolify/allow.rules`. `--noflush` preserves
-  everything else in the filter table.
+- **Allow-rule snapshots (dual plane)**: on every successful API mutate coold
+  rewrites both snapshot files:
+  - `/etc/coolify/allow.rules` — flat `iptables-save` fragment
+    (`:COOLIFY-ALLOW` + `-A COOLIFY-ALLOW` lines only).
+  - `/etc/coolify/allow.nft` — nft fragment opening with
+    `flush chain bridge coolify_bridge coolify_allow` then one `add rule`
+    per tuple (namespace is preserved in the rule comment as `cid:<id>:<ns>`).
+  Both writes are atomic (`.tmp` + `mv`). Empty rule set → just the flush
+  line, which the next write naturally replaces.
+- **Boot restore**:
+  - `coolify-mesh-fw.service` (installed by `coolify init`) runs the nft
+    scaffold (`coolify_bridge` table + `forward` + `coolify_intra` chains)
+    and then `nft -f /etc/coolify/allow.nft` to restore the coold-owned
+    `coolify_allow` chain without touching the scaffold chains.
+  - `coolify-mesh-allow.service` is a `Type=oneshot` unit ordered
+    `After=coolify-mesh-fw.service`, running
+    `iptables-restore --noflush /etc/coolify/allow.rules`. `--noflush`
+    preserves everything else in the filter table.
+- **Permissive-mode hosts**: when the `coolify_bridge` scaffold is absent
+  (`coolify init --skip-default-deny`), the bridge-plane write no-ops with a
+  one-shot WARN and the iptables plane still succeeds. Snapshot file is still
+  written so a later `coolify init apply` without `--skip-default-deny`
+  converges cleanly.
 - coold keeps **no other DB**. App-level persistence (rule metadata, audit,
   app model) lives in central.
 
