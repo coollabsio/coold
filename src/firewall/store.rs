@@ -7,7 +7,14 @@
 //! gives us simple, predictable semantics and matches the Go CLI's
 //! one-SSH-at-a-time pattern.
 
-use std::{path::PathBuf, process::Stdio, sync::Arc};
+use std::{
+    path::PathBuf,
+    process::Stdio,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use anyhow::{bail, Context, Result};
 use tokio::{
@@ -16,15 +23,16 @@ use tokio::{
     process::Command,
     sync::Mutex,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
-use super::rule::{parse_chain_line, AllowRule};
+use super::rule::{parse_chain_line, render_bridge_line, AllowRule};
 
 /// Bundle of config the store needs. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct StoreConfig {
     pub chain_name: String,
     pub rules_path: PathBuf,
+    pub bridge_rules_path: PathBuf,
 }
 
 /// Iptables-backed COOLIFY-ALLOW manager. Clone freely — all shared state
@@ -39,6 +47,9 @@ struct Inner {
     /// Held for every mutation. Reads (list) don't need it but take it
     /// anyway so a caller observing "after apply" never races the apply.
     lock: Mutex<()>,
+    /// Set to true after the first nft warning to avoid log spam.
+    /// Cleared on a subsequent successful nft call.
+    bridge_plane_warned: AtomicBool,
 }
 
 impl FirewallStore {
@@ -47,6 +58,7 @@ impl FirewallStore {
             inner: Arc::new(Inner {
                 cfg,
                 lock: Mutex::new(()),
+                bridge_plane_warned: AtomicBool::new(false),
             }),
         }
     }
@@ -81,6 +93,29 @@ impl FirewallStore {
         Ok(())
     }
 
+    /// Ensure the nft bridge table and allow chain exist. Safe to call repeatedly.
+    pub async fn ensure_bridge_chain(&self) -> Result<()> {
+        for args in [
+            vec!["add", "table", "bridge", "coolify_bridge"],
+            vec!["add", "chain", "bridge", "coolify_bridge", "coolify_allow"],
+        ] {
+            let out = Command::new("nft")
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .output()
+                .await
+                .context("spawn nft add table/chain")?;
+            if !out.status.success() {
+                debug!(
+                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "nft add returned non-zero (likely already exists)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Apply one rule: idempotent `-C || -A`, then snapshot.
     pub async fn apply(&self, rule: &AllowRule) -> Result<()> {
         let _guard = self.inner.lock.lock().await;
@@ -105,6 +140,8 @@ impl FirewallStore {
             info!(id = ?rule.id, "rule applied");
         }
         self.snapshot_locked().await?;
+        let rules = self.list_locked().await?;
+        self.sync_bridge_snapshot(&rules).await?;
         Ok(())
     }
 
@@ -134,6 +171,8 @@ impl FirewallStore {
             info!(id = %id, "rule revoked");
         }
         self.snapshot_locked().await?;
+        let updated_rules = self.list_locked().await?;
+        self.sync_bridge_snapshot(&updated_rules).await?;
         Ok(Some(rule))
     }
 
@@ -180,6 +219,8 @@ impl FirewallStore {
         }
         iptables_restore(&snapshot, /*noflush*/ true).await?;
         info!("chain reloaded from snapshot");
+        let rules = self.list_locked().await?;
+        self.sync_bridge_snapshot(&rules).await?;
         Ok(())
     }
 
@@ -212,6 +253,7 @@ impl FirewallStore {
         let fragment = render_fragment(self.chain(), &keep);
         iptables_restore(fragment.as_bytes(), /*noflush*/ true).await?;
         self.write_snapshot(fragment.as_bytes()).await?;
+        self.sync_bridge_snapshot(&keep).await?;
         info!(added, removed = removes.len(), "bulk applied");
         Ok(BulkOutcome {
             added,
@@ -278,6 +320,77 @@ impl FirewallStore {
             })?;
         Ok(())
     }
+
+    /// Sync the bridge nft snapshot: write file atomically, then pipe to `nft -f -`.
+    /// Tolerates missing table/chain (permissive mode / --skip-default-deny).
+    async fn sync_bridge_snapshot(&self, rules: &[AllowRule]) -> Result<()> {
+        let fragment = render_bridge_fragment(rules);
+        self.write_bridge_snapshot(fragment.as_bytes()).await?;
+
+        // Pipe to nft -f -
+        let mut cmd = Command::new("nft");
+        cmd.arg("-f")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().context("spawn nft -f -")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(fragment.as_bytes())
+                .await
+                .context("write nft stdin")?;
+            stdin.flush().await.ok();
+        }
+        let out = child.wait_with_output().await.context("wait nft -f -")?;
+        if out.status.success() {
+            // Clear the warned flag on success so re-enabling the table triggers a fresh warn.
+            self.inner.bridge_plane_warned.store(false, Ordering::Relaxed);
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // Permissive mode: table not yet set up.
+        if stderr.contains("No such file") || stderr.contains("No such table") {
+            if !self.inner.bridge_plane_warned.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "nft bridge chain not found (permissive mode / --skip-default-deny); \
+                     bridge snapshot written but not applied. \
+                     Re-enable default-deny to activate bridge rules."
+                );
+            }
+            return Ok(());
+        }
+
+        bail!("nft -f - failed: {}", stderr.trim());
+    }
+
+    async fn write_bridge_snapshot(&self, bytes: &[u8]) -> Result<()> {
+        if let Some(parent) = self.inner.cfg.bridge_rules_path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        let tmp = self.inner.cfg.bridge_rules_path.with_extension("bridge_rules.tmp");
+        let mut f = fs::File::create(&tmp)
+            .await
+            .with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(bytes)
+            .await
+            .with_context(|| format!("write {}", tmp.display()))?;
+        f.flush().await.ok();
+        drop(f);
+        fs::rename(&tmp, &self.inner.cfg.bridge_rules_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "rename {} -> {}",
+                    tmp.display(),
+                    self.inner.cfg.bridge_rules_path.display()
+                )
+            })?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -327,6 +440,27 @@ fn render_fragment(chain: &str, rules: &[AllowRule]) -> String {
         out.push('\n');
     }
     out.push_str("COMMIT\n");
+    out
+}
+
+/// Build an nft fragment for the bridge allow chain. Starts with
+/// `flush chain` so the entire chain is replaced atomically.
+fn render_bridge_fragment(rules: &[AllowRule]) -> String {
+    let mut sorted: Vec<&AllowRule> = rules.iter().collect();
+    sorted.sort_by(|a, b| {
+        let ns_a = if a.namespace.is_empty() { "default" } else { &a.namespace };
+        let ns_b = if b.namespace.is_empty() { "default" } else { &b.namespace };
+        ns_a
+            .cmp(ns_b)
+            .then_with(|| a.id.as_deref().unwrap_or("").cmp(b.id.as_deref().unwrap_or("")))
+    });
+
+    let mut out = String::new();
+    out.push_str("flush chain bridge coolify_bridge coolify_allow\n");
+    for r in &sorted {
+        out.push_str(&render_bridge_line(r));
+        out.push('\n');
+    }
     out
 }
 
@@ -420,5 +554,37 @@ mod tests {
         // Only one header per namespace.
         assert_eq!(out.matches("# namespace: alpha").count(), 1);
         assert_eq!(out.matches("# namespace: default").count(), 1);
+    }
+
+    #[test]
+    fn test_render_bridge_fragment_flush_at_top() {
+        let r1 = rule("10.210.5.2", "10.210.6.3", 80, "default");
+        let r2 = rule("10.210.5.3", "10.210.6.4", 81, "default");
+        let r3 = rule("10.210.5.4", "10.210.6.5", 82, "alpha");
+        let out = render_bridge_fragment(&[r1, r2, r3]);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines[0],
+            "flush chain bridge coolify_bridge coolify_allow",
+            "first line must be flush"
+        );
+        let rule_lines: Vec<&str> = lines[1..].iter().copied().filter(|l| !l.is_empty()).collect();
+        assert_eq!(rule_lines.len(), 3, "should have 3 rule lines");
+    }
+
+    #[test]
+    fn test_render_bridge_fragment_empty() {
+        let out = render_bridge_fragment(&[]);
+        assert_eq!(out, "flush chain bridge coolify_bridge coolify_allow\n");
+    }
+
+    #[test]
+    fn test_render_bridge_fragment_namespace_sorted() {
+        let r1 = rule("10.210.5.2", "10.210.6.3", 80, "default");
+        let r2 = rule("10.210.5.3", "10.210.6.4", 81, "alpha");
+        let out = render_bridge_fragment(&[r1, r2]);
+        let alpha_pos = out.find("alpha").unwrap();
+        let default_pos = out.find("default").unwrap();
+        assert!(alpha_pos < default_pos, "alpha namespace should appear before default");
     }
 }
