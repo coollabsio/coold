@@ -118,6 +118,12 @@ coold speaks two transports, **same endpoint set on both**:
 - **No inbound from central**: central never dials coold. All mutations from
   central arrive over the coold-initiated stream; no `COOLIFY-ALLOW` rule for
   "central → host:8443" is needed. Works through NAT / corp firewalls.
+- **L4 LB + keepalive**: any load balancer between coold and central must be
+  L4 (TCP pass-through). gRPC rides HTTP/2 long-lived streams; L7 LBs
+  round-robin per-request and break the transport. Both sides send HTTP/2
+  PING frames (default interval 30s) so provider idle timeouts (~5 min on
+  Hetzner Cloud LB TCP) do not silently drop quiet streams. See §15 for
+  capacity planning.
 
 ## 5. Deny filter
 
@@ -319,7 +325,94 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
   central pins per-host to what the deployed coold supports until upgraded.
 - New verbs require a coold release. No passthrough.
 
-## 15. Cross-references
+## 15. Scale and routing
+
+Capacity planning for the `coold → central` stream fleet.
+
+### Cost per open stream
+
+- One TCP file descriptor + TLS state + ~50 KB of buffers per agent.
+- 10 k streams ≈ 500 MB RSS on central, 10 k fds. Requires `ulimit -n`
+  bumped to ≥ 65 k and `net.core.somaxconn` / `tcp_max_syn_backlog` raised.
+- Steady-state CPU scales with **command rate**, not stream count. Quiet
+  hosts are cheap.
+
+### Fleet sizing tiers
+
+| Fleet | Topology |
+|---|---|
+| < 1 k | Single central instance. Tune fds. Done. |
+| 1 k – 10 k | N × central behind L4 LB. Stateless — any coold lands on any central. |
+| 10 k – 100 k | Same, with sharding or consistent hash if per-central stream count exceeds tonic's comfortable ceiling (~30–50 k per 16-core box). |
+| > 100 k | Multi-region; regional central clusters; push command routing to edge. |
+
+### Horizontal central (recommended path)
+
+- coold dials the LB VIP; LB distributes new streams across central
+  instances. Each central instance serves the streams assigned to it.
+- On `Hello`, the receiving central writes a row to Corrosion:
+  ```
+  host_routes(host_id, central_instance_id, connected_at)
+  ```
+  Gossip distributes. Controllers doing a deploy look up which instance
+  owns `host_id` and forward the command via internal RPC or a small
+  inter-central gRPC service.
+- Why Corrosion: already in the stack, already gossiping, eventually
+  consistent — matches the retry-safe semantics of command dispatch.
+  No new infra (Redis / etcd / Kafka).
+
+### Thundering herd / rebalance
+
+- Exponential backoff **with jitter** in the coold dialer prevents lockstep
+  reconnects on central restart. Target: `backoff ± random(0, backoff/2)`.
+- Optional **periodic reconnect** (e.g. every 60 min ± 15 min jitter) lets
+  the fleet rebalance onto newly added central instances without waiting
+  for a failure to trigger a redial.
+- On central drain/upgrade, the server sends a `ShutdownHint` frame; coold
+  closes and redials, landing on a different instance via the LB. Zero
+  downtime for deploys already in flight elsewhere.
+
+### Load balancer constraints
+
+- **L4 only** (TCP pass-through). HTTP/2 long-lived streams break L7
+  round-robin. Hetzner Cloud Load Balancer supports this in `tcp` service
+  mode. AWS NLB, haproxy `mode tcp` equivalent.
+- **TLS terminates at central**, not at the LB. JWT check runs on each
+  central; LB is transport-only. (mTLS per-host is workable but creates
+  handshake thundering on fleet reconnect — JWT + one central-side TLS
+  cert scales better.)
+- **Idle timeout** on the LB must be tolerated by HTTP/2 PING. Hetzner
+  default is ~5 min; enable `http2_keep_alive_interval` on both client and
+  server (30 s is fine).
+- **Provider connection caps**: Hetzner LB tiers cap concurrent conns
+  (LB11 ≈ 10 k, LB21 ≈ 30 k, LB31 ≈ 75 k at time of writing). Pick tier or
+  shard across multiple LB VIPs if a single tier is insufficient.
+
+### Bandwidth profile
+
+Bytes flowing through the LB are **control-plane only**. Image bytes
+never touch central/LB:
+
+- **Image pulls**: `POST /images/pull {ref}` is a tiny frame. coold calls
+  podman, which fetches directly from the registry. Bytes go
+  `registry → coold host`, bypassing central entirely.
+- **Commands / responses / host-facts scrapes**: negligible.
+- **Log follow streams**: the real bandwidth consumer at scale. 10 k
+  hosts × 10 KB/s average ≈ 800 Mbps through central. Mitigations: only
+  subscribe when a user is actively tailing in the UI, cap per-stream
+  throughput, compress non-follow historical fetches.
+- **Exec streams**: interactive, normally low bandwidth.
+
+### Capacity rule of thumb
+
+```
+N_central = ceil(fleet_size / 30_000) + 1  # +1 for headroom / drain
+```
+
+Assumes commodity 16-core / 32 GB nodes running tonic. Increase divisor
+on larger hardware; decrease if logs-follow subscriptions are common.
+
+## 16. Cross-references
 
 - Bootstrap + CLI: `coolify-cli/CLAUDE.md`, `coolify-cli/CONTROL_PLANE.md`.
 - `coolify firewall` CLI (alpha, SSH-bounced REST client of local coold):
