@@ -412,6 +412,89 @@ N_central = ceil(fleet_size / 30_000) + 1  # +1 for headroom / drain
 Assumes commodity 16-core / 32 GB nodes running tonic. Increase divisor
 on larger hardware; decrease if logs-follow subscriptions are common.
 
+## 17. Central topology: broker + Laravel
+
+### Why a separate broker service
+
+Laravel (Coolify central brain) runs on a request/response PHP worker model.
+Workers cycle on deploy and cannot safely hold thousands of long-lived HTTP/2
+streams. The `coolify-broker` binary fills this gap: it is the gRPC server
+that coold dials, and it bridges commands and responses to Laravel via Redis.
+
+```
+[coold hosts]
+     │  grpcs://central.example.com:6443
+     ▼
+[coolify-broker]  ←→  Redis (coold:cmd stream, coold:resp:{id} lists)
+                              │
+                         [Laravel]  (brain: scheduler, deploy controller, RBAC, etc.)
+```
+
+### Self-hosted topology (default)
+
+Single central VM. No load balancer required.
+
+- `coolify-broker` binds `0.0.0.0:6443` (systemd unit, starts before Laravel).
+- Laravel runs on `:80` / `:443` via nginx. No port conflict.
+- Redis on localhost. Both Laravel and broker connect to it.
+- TLS on broker: Let's Encrypt cert (if domain available) or self-signed
+  generated at `coolify init`, pinned in `/etc/coolify/broker.pin`.
+- Firewall: open port `6443` inbound for coold connections.
+
+### Cloud SaaS topology (fleet)
+
+Multiple broker instances behind an L4 LB (per §15 sizing):
+
+- L4 LB (TCP pass-through) on `:443` → broker fleet.
+- Each broker writes `host_routes(host_id, broker_instance_id)` to Corrosion
+  on `Hello`. Inter-broker command forwarding resolves which instance owns
+  a given `host_id`.
+- Laravel fleet behind L7 LB on `:443`; broker fleet on separate VIP.
+
+### Redis protocol (Laravel → broker → coold)
+
+| Key | Type | Producer | Consumer |
+|---|---|---|---|
+| `coold:cmd` | Stream | Laravel (`XADD`) | broker (`XREADGROUP GROUP broker`) |
+| `coold:resp:{request_id}` | List | broker (`LPUSH`) | Laravel (`BLPOP`) |
+| `coold:hosts` | Hash | broker (on `Hello`) | Laravel (dashboard) |
+
+**Dispatch flow:**
+1. Laravel `XADD coold:cmd * payload <json>` where JSON = `{host_id, request_id, command: {type: ...}}`.
+2. Broker consumes, looks up `host_id` in `DashMap`, sends `ServerMsg` over gRPC.
+3. coold replies with `Response`; broker `LPUSH coold:resp:{request_id}` with JSON result.
+4. Laravel `BLPOP coold:resp:{request_id} 30` (30 s timeout).
+5. Unknown host or timeout → broker pushes `{status: "error", code: 404|504}`.
+
+Response keys expire after 300 s (`EXPIRE`) so stale entries self-clean.
+
+### coold config change
+
+`COOLD_CENTRAL_URL` renamed to `COOLD_BROKER_URL`. Update enrollment and
+`coolify init` templates when central enrollment is implemented. Semantics
+identical; only the name changes to reflect the actual target.
+
+### Repository layout
+
+```
+Cargo.toml        # workspace root (members: coold, broker, proto)
+proto/
+  agent.proto     # shared Protobuf definitions
+  Cargo.toml      # coolify-proto crate (runs tonic-build)
+  src/lib.rs
+coold/
+  Cargo.toml      # depends on coolify-proto
+  src/
+broker/
+  Cargo.toml      # coolify-broker binary; depends on coolify-proto
+  src/
+    main.rs       # tonic AgentServer + spawns redis_bridge
+    config.rs     # BROKER_GRPC_BIND, BROKER_REDIS_URL, BROKER_JWT_PUBLIC_KEY_PATH
+    state.rs      # Streams: DashMap<host_id, mpsc::Sender<ServerMsg>>
+    auth.rs       # JWT verify (ES256/RS256, sub = host_id)
+    redis_bridge.rs  # XREADGROUP consumer + push_response
+```
+
 ## 16. Cross-references
 
 - Bootstrap + CLI: `coolify-cli/CLAUDE.md`, `coolify-cli/CONTROL_PLANE.md`.

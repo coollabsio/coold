@@ -38,6 +38,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     env:
       COOLD_VERSION: ${{ needs.prep.outputs.tag }}
+      BROKER_VERSION: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -55,16 +56,23 @@ jobs:
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
-      - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build workspace
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package coold
         run: |
           mkdir -p dist
           cp target/${{ matrix.target }}/release/coold dist/coold
           tar -czf dist/coold-linux-${{ matrix.arch }}.tar.gz -C dist coold
           rm dist/coold
           (cd dist && sha256sum coold-linux-${{ matrix.arch }}.tar.gz > coold-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - name: Package coolify-broker
+        run: |
+          cp target/${{ matrix.target }}/release/coolify-broker dist/coolify-broker
+          tar -czf dist/coolify-broker-linux-${{ matrix.arch }}.tar.gz -C dist coolify-broker
+          rm dist/coolify-broker
+          (cd dist && sha256sum coolify-broker-linux-${{ matrix.arch }}.tar.gz > coolify-broker-linux-${{ matrix.arch }}.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -98,6 +106,10 @@ jobs:
             echo "**Version:** \`${TAG}\`"
             echo "**Commit:** $(git log -1 --pretty=format:'%s')"
             echo
+            echo "### Artifacts"
+            echo "- \`coold\` — per-host agent"
+            echo "- \`coolify-broker\` — central-side gRPC stream broker"
+            echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"
               git log --pretty=format:'- %s (%h)' "$PREV"..HEAD
@@ -119,6 +131,10 @@ jobs:
             dist/coold-linux-amd64.tar.gz.sha256
             dist/coold-linux-arm64.tar.gz
             dist/coold-linux-arm64.tar.gz.sha256
+            dist/coolify-broker-linux-amd64.tar.gz
+            dist/coolify-broker-linux-amd64.tar.gz.sha256
+            dist/coolify-broker-linux-arm64.tar.gz
+            dist/coolify-broker-linux-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -133,4 +149,8 @@ jobs:
             dist/coold-linux-amd64.tar.gz \
             dist/coold-linux-amd64.tar.gz.sha256 \
             dist/coold-linux-arm64.tar.gz \
-            dist/coold-linux-arm64.tar.gz.sha256
+            dist/coold-linux-arm64.tar.gz.sha256 \
+            dist/coolify-broker-linux-amd64.tar.gz \
+            dist/coolify-broker-linux-amd64.tar.gz.sha256 \
+            dist/coolify-broker-linux-arm64.tar.gz \
+            dist/coolify-broker-linux-arm64.tar.gz.sha256

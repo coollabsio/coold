@@ -16,13 +16,13 @@ use crate::grpc::proto::{
 use crate::podman::PodmanClient;
 
 pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
-    if config.grpc_disabled || config.central_url.is_none() {
+    if config.grpc_disabled || config.broker_url.is_none() {
         info!("grpc transport disabled; skipping");
         std::future::pending::<()>().await;
         return Ok(());
     }
 
-    let url = config.central_url.clone().unwrap();
+    let url = config.broker_url.clone().unwrap();
 
     let jwt = tokio::fs::read_to_string(&config.host_jwt_path)
         .await
