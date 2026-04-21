@@ -157,9 +157,24 @@ async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
     Ok(deltas.len())
 }
 
+/// Enumerate every container on every managed namespace's bridge network on
+/// this host, keyed by `container_id` so the map lines up 1:1 with Corrosion
+/// rows (PK is `container_id`). A container attached to two managed bridges
+/// yields only one row — the first namespace wins and the second attachment
+/// is logged. Alpha does not support dual-attach routing; changing the schema
+/// to allow it would require a composite PK.
 async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint>> {
     let containers = ctx.podman.list_containers().await?;
-    let mut out = HashMap::new();
+    let mut out: HashMap<String, Endpoint> = HashMap::new();
+
+    // Build a lookup from podman network name → namespace so we can stamp
+    // the right namespace on each endpoint without another podman call.
+    let network_to_ns: HashMap<&str, &str> = ctx
+        .config
+        .namespaces
+        .iter()
+        .map(|n| (n.network.as_str(), n.name.as_str()))
+        .collect();
 
     for c in containers {
         let inspect = match ctx.podman.inspect_container(&c.id).await {
@@ -169,15 +184,12 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
                 continue;
             }
         };
-        // Track every container attached to the mesh network regardless of
-        // run state — a stopped/exited container's bridge attachment remains
-        // in inspect until `podman rm`, so we keep reporting its state until
-        // removal. Routing consumers filter on state='running' AND
-        // health IN ('healthy','unknown').
+        // Track every container attached to a managed mesh network regardless
+        // of run state — a stopped/exited container's bridge attachment
+        // remains in inspect until `podman rm`, so we keep reporting its
+        // state until removal. Routing consumers filter on state='running'
+        // AND health IN ('healthy','unknown').
         let Some(net_settings) = inspect.network_settings.as_ref() else {
-            continue;
-        };
-        let Some(entry) = net_settings.networks.get(&ctx.config.mesh_network) else {
             continue;
         };
 
@@ -203,17 +215,32 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "unknown".into());
 
-        out.insert(
-            c.id.clone(),
-            Endpoint {
-                container_id: c.id,
-                container_name: name,
-                host_mgmt_ip: ctx.config.host_mgmt_ip.clone(),
-                container_ip: entry.ip_address.clone(),
-                state: state_str,
-                health: health_str,
-            },
-        );
+        for (net_name, entry) in &net_settings.networks {
+            let Some(ns) = network_to_ns.get(net_name.as_str()) else {
+                continue;
+            };
+            if let Some(existing) = out.get(&c.id) {
+                warn!(
+                    container_id = %c.id,
+                    existing_namespace = %existing.namespace,
+                    additional_namespace = %ns,
+                    "container attached to multiple managed namespaces; only first recorded",
+                );
+                continue;
+            }
+            out.insert(
+                c.id.clone(),
+                Endpoint {
+                    container_id: c.id.clone(),
+                    container_name: name.clone(),
+                    namespace: (*ns).to_string(),
+                    host_mgmt_ip: ctx.config.host_mgmt_ip.clone(),
+                    container_ip: entry.ip_address.clone(),
+                    state: state_str.clone(),
+                    health: health_str.clone(),
+                },
+            );
+        }
     }
 
     Ok(out)
@@ -230,10 +257,11 @@ fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
         match d {
             Delta::Upsert(ep) => out.push(Statement::new(
                 "INSERT INTO service_endpoints \
-                 (container_id, container_name, host_mgmt_ip, container_ip, state, health, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 (container_id, container_name, namespace, host_mgmt_ip, container_ip, state, health, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(container_id) DO UPDATE SET \
                    container_name = excluded.container_name, \
+                   namespace      = excluded.namespace, \
                    host_mgmt_ip   = excluded.host_mgmt_ip, \
                    container_ip   = excluded.container_ip, \
                    state          = excluded.state, \
@@ -242,6 +270,7 @@ fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
                 vec![
                     json!(ep.container_id),
                     json!(ep.container_name),
+                    json!(ep.namespace),
                     json!(ep.host_mgmt_ip),
                     json!(ep.container_ip),
                     json!(ep.state),
@@ -257,4 +286,3 @@ fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
     }
     out
 }
-

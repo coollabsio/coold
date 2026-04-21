@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, net::IpAddr, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use hickory_server::ServerFuture;
@@ -25,24 +25,64 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 
 /// Entry point for the DNS subsystem. Spawned by `sync::run`.
 ///
-/// If `config.bridge_gateway_ip` is unset, returns `Ok(())` immediately — this
-/// lets the daemon run in test/agent-only modes without touching :53.
+/// For every namespace with a non-zero bridge gateway IP, spawn a dedicated
+/// bind/serve loop on `<gateway>:53`. A namespace with gateway `0.0.0.0`
+/// (test / agent-only stub) is skipped. When every namespace is stubbed out,
+/// this task returns `Ok(())` immediately.
 ///
-/// Otherwise loops: try to bind + serve; on *retryable* IO errors (typically
+/// Each per-namespace loop retries on transient IO errors (typically
 /// `EADDRNOTAVAIL` when the Podman bridge has been torn down because no
-/// containers are attached, or `EADDRINUSE` during netavark churn), wait with
-/// exponential backoff and try again. On *fatal* errors (zone parse, resolver
-/// build), propagate up so systemd restarts the whole daemon.
+/// containers are attached, or `EADDRINUSE` during netavark churn). Fatal
+/// errors (zone parse, resolver build) propagate up so systemd restarts
+/// the whole daemon.
 pub async fn run(config: Config, corrosion: CorrosionClient) -> Result<()> {
-    let Some(gateway) = config.bridge_gateway_ip else {
-        info!("COOLD_BRIDGE_GATEWAY_IP unset; DNS server disabled");
+    let gateways: Vec<(String, IpAddr)> = config
+        .namespaces
+        .iter()
+        .filter(|n| !n.gateway_ip.is_unspecified())
+        .map(|n| (n.name.clone(), n.gateway_ip))
+        .collect();
+
+    if gateways.is_empty() {
+        info!("no namespace has a bridge gateway IP; DNS server disabled");
         return Ok(());
-    };
+    }
 
     let backend: Arc<dyn EndpointLookup> = Arc::new(CorrosionBackend::new(corrosion));
     let upstream = forwarder::build(config.dns_upstream);
-    let addr = SocketAddr::new(gateway, 53);
+    let zone = config.dns_zone.clone();
 
+    let mut handles = Vec::with_capacity(gateways.len());
+    for (ns, gateway) in gateways {
+        let backend = backend.clone();
+        let upstream = upstream.clone();
+        let zone = zone.clone();
+        handles.push(tokio::spawn(async move {
+            run_for_gateway(ns, gateway, zone, backend, upstream).await
+        }));
+    }
+
+    // First failure takes the whole task down so systemd restarts coold.
+    for h in handles {
+        match h.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(e),
+            Err(e) => return Err(anyhow::anyhow!("dns bind task panicked: {e}")),
+        }
+    }
+    Ok(())
+}
+
+/// Per-namespace bind/serve loop. Retries transient IO errors forever;
+/// returns only on fatal errors.
+async fn run_for_gateway(
+    namespace: String,
+    gateway: IpAddr,
+    zone: String,
+    backend: Arc<dyn EndpointLookup>,
+    upstream: hickory_resolver::TokioAsyncResolver,
+) -> Result<()> {
+    let addr = SocketAddr::new(gateway, 53);
     let mut backoff = BACKOFF_START;
     let mut attempt: u32 = 0;
 
@@ -50,19 +90,23 @@ pub async fn run(config: Config, corrosion: CorrosionClient) -> Result<()> {
         // Resolver is cheap to build; rebuilding on every retry keeps the
         // fatal-vs-retryable boundary crisp — a zone-parse failure errors
         // out here, not inside try_serve, so it cannot be misclassified.
-        let handler = CoolifyResolver::new(backend.clone(), &config.dns_zone, upstream.clone())
+        let handler = CoolifyResolver::new(backend.clone(), &zone, upstream.clone())
             .context("build CoolifyResolver")?;
 
         match try_serve(addr, handler).await {
             Ok(()) => return Ok(()),
             Err(e) if is_retryable_io(&e) => {
                 attempt = attempt.saturating_add(1);
-                log_bind_failure(addr, &e, attempt, backoff);
+                log_bind_failure(&namespace, addr, &e, attempt, backoff);
                 sleep(backoff).await;
                 backoff = (backoff * 2).min(BACKOFF_MAX);
                 continue;
             }
-            Err(e) => return Err(e.context(format!("dns bind/serve on {addr}"))),
+            Err(e) => {
+                return Err(e.context(format!(
+                    "dns bind/serve on {addr} (namespace {namespace})"
+                )))
+            }
         }
     }
 }
@@ -107,9 +151,16 @@ fn is_retryable_io(e: &anyhow::Error) -> bool {
 
 /// Loud on first failure (named causes), quieter on subsequent retries to
 /// avoid spamming the journal during prolonged idle windows.
-fn log_bind_failure(addr: SocketAddr, e: &anyhow::Error, attempt: u32, backoff: Duration) {
+fn log_bind_failure(
+    namespace: &str,
+    addr: SocketAddr,
+    e: &anyhow::Error,
+    attempt: u32,
+    backoff: Duration,
+) {
     if attempt == 1 {
         warn!(
+            namespace = %namespace,
             bind = %addr,
             error = format!("{e:#}"),
             retry_in = ?backoff,
@@ -123,6 +174,7 @@ fn log_bind_failure(addr: SocketAddr, e: &anyhow::Error, attempt: u32, backoff: 
         );
     } else {
         debug!(
+            namespace = %namespace,
             bind = %addr,
             error = format!("{e:#}"),
             attempt,

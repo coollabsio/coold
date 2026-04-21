@@ -11,7 +11,18 @@ use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Namespace value that goes on the wire / into the hash when the caller
+/// leaves it empty. Mirrors the Go CLI's `ComputeID` normalization so old
+/// clients (no namespace field) still address the same rules as new ones
+/// that explicitly pass `"default"`.
+pub const DEFAULT_NAMESPACE: &str = "default";
+
 /// An ACCEPT rule in the COOLIFY-ALLOW chain.
+///
+/// `namespace` qualifies the tuple so identical src/dst/proto/port pairs in
+/// different namespaces produce different rule IDs and are managed
+/// independently. Empty is normalized to `"default"` at serialization and
+/// hashing time.
 ///
 /// `proto` is `Some("tcp")` / `Some("udp")` or `None` (match any protocol).
 /// `port` is `Some(n)` (dst port) or `None` (match any port; only valid when
@@ -24,23 +35,39 @@ pub struct AllowRule {
     pub proto: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub port: Option<u16>,
+    /// Mesh namespace the rule lives in. Serialized as `"default"` when the
+    /// wire value is absent (legacy CLI versions) so the cid is stable.
+    #[serde(default)]
+    pub namespace: String,
     /// Stable 12-hex identity. Clients may omit on create; the server
-    /// computes it from (src, dst, proto, port) so identical tuples hash
-    /// to identical IDs regardless of creator.
+    /// computes it from (namespace, src, dst, proto, port) so identical
+    /// tuples hash to identical IDs regardless of creator.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub id: Option<String>,
 }
 
-/// Compute the 12-hex stable identity for a (src, dst, proto, port) tuple.
+/// Compute the 12-hex stable identity for a (namespace, src, dst, proto, port) tuple.
 ///
-/// Matches the Go CLI byte-for-byte: `sha256("<src>|<dst>|<proto>|<port>")`
-/// truncated to the first 12 hex chars, proto lowercased, `None` proto
-/// rendered as empty, `None` port rendered as `0`.
+/// Matches the Go CLI byte-for-byte: `sha256("<ns>|<src>|<dst>|<proto>|<port>")`
+/// truncated to the first 12 hex chars, namespace defaulting to `"default"`
+/// when empty, proto lowercased, `None` proto rendered as empty, `None` port
+/// rendered as `0`.
 #[allow(non_snake_case)]
-pub fn ComputeID_(src: &IpAddr, dst: &IpAddr, proto: Option<&str>, port: Option<u16>) -> String {
+pub fn ComputeID_(
+    namespace: &str,
+    src: &IpAddr,
+    dst: &IpAddr,
+    proto: Option<&str>,
+    port: Option<u16>,
+) -> String {
+    let ns = if namespace.is_empty() {
+        DEFAULT_NAMESPACE
+    } else {
+        namespace
+    };
     let proto_s = proto.unwrap_or("").to_ascii_lowercase();
     let port_n = port.unwrap_or(0);
-    let material = format!("{src}|{dst}|{proto_s}|{port_n}");
+    let material = format!("{ns}|{src}|{dst}|{proto_s}|{port_n}");
     let digest = Sha256::digest(material.as_bytes());
     hex::encode(digest)[..12].to_string()
 }
@@ -53,6 +80,9 @@ impl AllowRule {
     /// proto set (would iptables-accept but has no semantic meaning for
     /// user-facing allow rules).
     pub fn normalize(mut self) -> Result<Self> {
+        if self.namespace.is_empty() {
+            self.namespace = DEFAULT_NAMESPACE.into();
+        }
         if let Some(p) = &self.proto {
             let lower = p.to_ascii_lowercase();
             if lower != "tcp" && lower != "udp" {
@@ -66,7 +96,13 @@ impl AllowRule {
         if matches!(self.port, Some(0)) {
             return Err(anyhow!("port 0 is not a valid match"));
         }
-        let computed = ComputeID_(&self.src, &self.dst, self.proto.as_deref(), self.port);
+        let computed = ComputeID_(
+            &self.namespace,
+            &self.src,
+            &self.dst,
+            self.proto.as_deref(),
+            self.port,
+        );
         match &self.id {
             Some(supplied) if supplied != &computed => {
                 return Err(anyhow!(
@@ -100,7 +136,16 @@ impl AllowRule {
             args.push("-m".into());
             args.push("comment".into());
             args.push("--comment".into());
-            args.push(format!("cid:{id}"));
+            // Embed namespace in the comment so iptables state is
+            // self-describing: `cid:<12-hex>:<namespace>`. The API surface
+            // still exposes `id` as just the 12-hex portion — the namespace
+            // suffix is for parse_chain_line / snapshot grouping.
+            let ns = if self.namespace.is_empty() {
+                DEFAULT_NAMESPACE
+            } else {
+                &self.namespace
+            };
+            args.push(format!("cid:{id}:{ns}"));
         }
         args.push("-j".into());
         args.push("ACCEPT".into());
@@ -120,7 +165,10 @@ impl AllowRule {
 /// AllowRule. Returns `None` for non-append lines or unparseable entries.
 ///
 /// Mirrors `ParseChainLine` in the Go CLI, minus the go regex engine —
-/// a small hand-rolled tokenizer suffices.
+/// a small hand-rolled tokenizer suffices. iptables doesn't preserve the
+/// rule's namespace anywhere (single host-global chain for alpha), so the
+/// returned rule's namespace is left empty — callers that need namespace
+/// scoping must carry it separately (API handlers do so via query params).
 pub fn parse_chain_line(line: &str, chain: &str) -> Option<AllowRule> {
     let line = line.trim();
     let prefix = format!("-A {chain} ");
@@ -165,13 +213,24 @@ pub fn parse_chain_line(line: &str, chain: &str) -> Option<AllowRule> {
 
     let src = src?;
     let dst = dst?;
-    let id = comment.and_then(|c| c.strip_prefix("cid:").map(|s| s.to_string()));
+    // Comment format: `cid:<12-hex>` (legacy) or `cid:<12-hex>:<namespace>`
+    // (current). The second form lets listings surface the namespace
+    // without any sidecar state.
+    let (id, namespace) = match comment.and_then(|c| c.strip_prefix("cid:").map(str::to_string))
+    {
+        Some(rest) => match rest.split_once(':') {
+            Some((hash, ns)) => (Some(hash.to_string()), ns.to_string()),
+            None => (Some(rest), String::new()),
+        },
+        None => (None, String::new()),
+    };
 
     Some(AllowRule {
         src,
         dst,
         proto,
         port,
+        namespace,
         id,
     })
 }
@@ -194,11 +253,12 @@ mod tests {
 
     #[test]
     fn compute_id_matches_go_cli_shape() {
-        // Shape test: same inputs → deterministic 12-hex. We cannot assert
-        // against the Go CLI without embedding the expected value, but the
-        // formula (proto lowercased, empty for None, port 0 for None) is
-        // the contract the Go CLI's ComputeID documents.
+        // Shape test: same inputs → deterministic 12-hex. The formula
+        // (namespace defaulting to "default", proto lowercased, empty for
+        // None, port 0 for None) is the contract the Go CLI's ComputeID
+        // documents.
         let id = ComputeID_(
+            "default",
             &ipv4("10.210.5.2"),
             &ipv4("10.210.6.3"),
             Some("tcp"),
@@ -208,26 +268,58 @@ mod tests {
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
 
         let id2 = ComputeID_(
+            "default",
             &ipv4("10.210.5.2"),
             &ipv4("10.210.6.3"),
             Some("TCP"),
             Some(80),
         );
         assert_eq!(id, id2, "proto must be case-insensitive");
+
+        // Empty namespace normalizes to "default".
+        let id3 = ComputeID_(
+            "",
+            &ipv4("10.210.5.2"),
+            &ipv4("10.210.6.3"),
+            Some("tcp"),
+            Some(80),
+        );
+        assert_eq!(id, id3, "empty namespace must equal 'default'");
     }
 
     #[test]
-    fn normalize_fills_id() {
+    fn compute_id_namespace_changes_hash() {
+        let a = ComputeID_(
+            "default",
+            &ipv4("10.210.5.2"),
+            &ipv4("10.210.6.3"),
+            Some("tcp"),
+            Some(80),
+        );
+        let b = ComputeID_(
+            "alpha",
+            &ipv4("10.210.5.2"),
+            &ipv4("10.210.6.3"),
+            Some("tcp"),
+            Some(80),
+        );
+        assert_ne!(a, b, "namespace must influence the hash");
+    }
+
+    #[test]
+    fn normalize_fills_id_and_namespace() {
         let r = AllowRule {
             src: ipv4("10.210.5.2"),
             dst: ipv4("10.210.6.3"),
             proto: Some("tcp".into()),
             port: Some(80),
+            namespace: String::new(),
             id: None,
         }
         .normalize()
         .unwrap();
         assert!(r.id.is_some());
+        assert_eq!(r.namespace, "default");
     }
 
     #[test]
@@ -237,6 +329,7 @@ mod tests {
             dst: ipv4("10.0.0.2"),
             proto: None,
             port: Some(80),
+            namespace: "default".into(),
             id: None,
         }
         .normalize();
@@ -250,6 +343,7 @@ mod tests {
             dst: ipv4("10.0.0.2"),
             proto: Some("icmp".into()),
             port: None,
+            namespace: "default".into(),
             id: None,
         }
         .normalize();
@@ -263,6 +357,7 @@ mod tests {
             dst: ipv4("10.0.0.2"),
             proto: Some("tcp".into()),
             port: Some(80),
+            namespace: "default".into(),
             id: Some("deadbeefcafe".into()),
         }
         .normalize();
@@ -276,6 +371,7 @@ mod tests {
             dst: ipv4("10.210.6.3"),
             proto: Some("tcp".into()),
             port: Some(80),
+            namespace: "default".into(),
             id: None,
         }
         .normalize()
@@ -298,18 +394,20 @@ mod tests {
             dst: ipv4("10.210.6.3"),
             proto: Some("tcp".into()),
             port: Some(443),
+            namespace: "default".into(),
             id: None,
         }
         .normalize()
         .unwrap();
 
-        // Simulate iptables -S output shape.
+        // Simulate iptables -S output shape (current comment format includes ns).
         let line = format!(
-            r#"-A COOLIFY-ALLOW -s {src}/32 -d {dst}/32 -p tcp -m tcp --dport {port} -m comment --comment "cid:{id}" -j ACCEPT"#,
+            r#"-A COOLIFY-ALLOW -s {src}/32 -d {dst}/32 -p tcp -m tcp --dport {port} -m comment --comment "cid:{id}:{ns}" -j ACCEPT"#,
             src = original.src,
             dst = original.dst,
             port = original.port.unwrap(),
             id = original.id.as_ref().unwrap(),
+            ns = original.namespace,
         );
         let parsed = parse_chain_line(&line, "COOLIFY-ALLOW").unwrap();
         assert_eq!(parsed.src, original.src);
@@ -317,6 +415,18 @@ mod tests {
         assert_eq!(parsed.proto.as_deref(), Some("tcp"));
         assert_eq!(parsed.port, Some(443));
         assert_eq!(parsed.id, original.id);
+        assert_eq!(parsed.namespace, "default");
+    }
+
+    #[test]
+    fn parse_chain_line_legacy_comment_without_namespace() {
+        // Pre-namespace rules that still linger in the kernel after an
+        // upgrade: `cid:<hex>` (no namespace suffix). Parser keeps the id
+        // and leaves namespace empty so normalize() can backfill "default".
+        let line = r#"-A COOLIFY-ALLOW -s 10.0.0.1/32 -d 10.0.0.2/32 -m comment --comment "cid:aabbccddeeff" -j ACCEPT"#;
+        let parsed = parse_chain_line(line, "COOLIFY-ALLOW").unwrap();
+        assert_eq!(parsed.id.as_deref(), Some("aabbccddeeff"));
+        assert_eq!(parsed.namespace, "");
     }
 
     #[test]

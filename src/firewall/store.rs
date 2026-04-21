@@ -290,17 +290,38 @@ pub struct BulkOutcome {
 /// `*filter\n:<chain> -\n<rendered rules>\nCOMMIT\n` — the exact shape the
 /// Go CLI's `SaveRulesCommand` produces. `iptables-restore --noflush` on
 /// this fragment only touches `<chain>`.
+///
+/// Rules are grouped by namespace with a `# namespace: <ns>` header per
+/// group so snapshots are human-readable and operators can see the
+/// tenancy split at a glance. The group boundary is cosmetic — iptables
+/// treats `#` lines as comments.
 fn render_fragment(chain: &str, rules: &[AllowRule]) -> String {
+    let mut sorted: Vec<&AllowRule> = rules.iter().collect();
+    sorted.sort_by(|a, b| {
+        let ns_a = if a.namespace.is_empty() { "default" } else { &a.namespace };
+        let ns_b = if b.namespace.is_empty() { "default" } else { &b.namespace };
+        ns_a
+            .cmp(ns_b)
+            .then_with(|| a.id.as_deref().unwrap_or("").cmp(b.id.as_deref().unwrap_or("")))
+    });
+
     let mut out = String::new();
     out.push_str("*filter\n");
     out.push_str(&format!(":{chain} -\n"));
-    for r in rules {
+
+    let mut current_ns: Option<&str> = None;
+    for r in &sorted {
+        let ns = if r.namespace.is_empty() { "default" } else { &r.namespace };
+        if current_ns != Some(ns) {
+            out.push_str(&format!("# namespace: {ns}\n"));
+            current_ns = Some(ns);
+        }
         let args = r.match_args(chain);
         out.push_str(&format!("-A {chain}"));
         for a in args {
             out.push(' ');
             // iptables-restore accepts unquoted single-token comments
-            // (our "cid:<hex>" is single-token by construction).
+            // (our "cid:<hex>:<ns>" is single-token by construction).
             out.push_str(&a);
         }
         out.push('\n');
@@ -356,12 +377,13 @@ mod tests {
         s.parse().unwrap()
     }
 
-    fn rule(src: &str, dst: &str, port: u16) -> AllowRule {
+    fn rule(src: &str, dst: &str, port: u16, ns: &str) -> AllowRule {
         AllowRule {
             src: ipv4(src),
             dst: ipv4(dst),
             proto: Some("tcp".into()),
             port: Some(port),
+            namespace: ns.into(),
             id: None,
         }
         .normalize()
@@ -370,12 +392,13 @@ mod tests {
 
     #[test]
     fn render_fragment_golden_shape() {
-        let r = rule("10.210.5.2", "10.210.6.3", 80);
+        let r = rule("10.210.5.2", "10.210.6.3", 80, "default");
         let out = render_fragment("COOLIFY-ALLOW", std::slice::from_ref(&r));
         assert!(out.starts_with("*filter\n:COOLIFY-ALLOW -\n"));
         assert!(out.ends_with("COMMIT\n"));
+        assert!(out.contains("# namespace: default"));
         assert!(out.contains("-A COOLIFY-ALLOW -s 10.210.5.2 -d 10.210.6.3 -p tcp --dport 80"));
-        assert!(out.contains(&format!("cid:{}", r.id.as_ref().unwrap())));
+        assert!(out.contains(&format!("cid:{}:default", r.id.as_ref().unwrap())));
         assert!(out.contains("-j ACCEPT"));
     }
 
@@ -383,5 +406,19 @@ mod tests {
     fn render_fragment_empty_chain() {
         let out = render_fragment("COOLIFY-ALLOW", &[]);
         assert_eq!(out, "*filter\n:COOLIFY-ALLOW -\nCOMMIT\n");
+    }
+
+    #[test]
+    fn render_fragment_groups_by_namespace() {
+        let r1 = rule("10.210.5.2", "10.210.6.3", 80, "alpha");
+        let r2 = rule("10.210.5.2", "10.210.6.3", 81, "default");
+        let r3 = rule("10.210.5.2", "10.210.6.3", 82, "alpha");
+        let out = render_fragment("COOLIFY-ALLOW", &[r1, r2, r3]);
+        let alpha_at = out.find("# namespace: alpha").unwrap();
+        let default_at = out.find("# namespace: default").unwrap();
+        assert!(alpha_at < default_at, "namespaces sorted alphabetically");
+        // Only one header per namespace.
+        assert_eq!(out.matches("# namespace: alpha").count(), 1);
+        assert_eq!(out.matches("# namespace: default").count(), 1);
     }
 }

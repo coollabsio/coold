@@ -16,7 +16,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -25,7 +25,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
-use super::{rule::AllowRule, store::FirewallStore};
+use super::{
+    rule::{AllowRule, DEFAULT_NAMESPACE},
+    store::FirewallStore,
+};
 
 /// Shared state handed to every handler.
 #[derive(Clone)]
@@ -53,12 +56,34 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct ListQuery {
+    #[serde(default)]
+    namespace: Option<String>,
+}
+
 async fn list_allow(
     State(s): State<ApiState>,
     headers: HeaderMap,
+    Query(q): Query<ListQuery>,
 ) -> Result<Json<Vec<AllowRule>>, ApiError> {
     authorize(&headers, &s.token)?;
-    let rules = s.store.list().await.map_err(ApiError::internal)?;
+    let raw = s.store.list().await.map_err(ApiError::internal)?;
+    // Stamp `default` on legacy rules with an empty namespace so clients see
+    // a consistent view regardless of when the rule was installed.
+    let rules: Vec<AllowRule> = raw
+        .into_iter()
+        .map(|mut r| {
+            if r.namespace.is_empty() {
+                r.namespace = DEFAULT_NAMESPACE.into();
+            }
+            r
+        })
+        .filter(|r| match &q.namespace {
+            Some(want) if !want.is_empty() => r.namespace == *want,
+            _ => true,
+        })
+        .collect();
     Ok(Json(rules))
 }
 

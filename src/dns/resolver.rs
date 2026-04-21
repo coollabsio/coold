@@ -16,16 +16,20 @@ use tracing::{debug, warn};
 /// CONTROL_PLANE.md §TTL: 5s is the convergence-vs-chatter sweet spot.
 const POSITIVE_TTL: u32 = 5;
 
-/// Backend that resolves a container name to IPv4 addresses. Abstracted as a
-/// trait so tests can substitute a deterministic source without spinning up
-/// Corrosion.
+/// Backend that resolves `(container_name, namespace)` to IPv4 addresses.
+/// Abstracted as a trait so tests can substitute a deterministic source
+/// without spinning up Corrosion.
 #[async_trait]
 pub trait EndpointLookup: Send + Sync + 'static {
-    async fn lookup(&self, container_name: &str) -> anyhow::Result<Vec<IpAddr>>;
+    async fn lookup(
+        &self,
+        container_name: &str,
+        namespace: &str,
+    ) -> anyhow::Result<Vec<IpAddr>>;
 }
 
 /// Production backend: consults the local Corrosion HTTP API for endpoints
-/// matching `container_name` across the mesh.
+/// matching `(container_name, namespace)` across the mesh.
 pub struct CorrosionBackend {
     client: crate::corrosion::CorrosionClient,
 }
@@ -38,8 +42,15 @@ impl CorrosionBackend {
 
 #[async_trait]
 impl EndpointLookup for CorrosionBackend {
-    async fn lookup(&self, container_name: &str) -> anyhow::Result<Vec<IpAddr>> {
-        let ips = self.client.query_ips_by_name(container_name).await?;
+    async fn lookup(
+        &self,
+        container_name: &str,
+        namespace: &str,
+    ) -> anyhow::Result<Vec<IpAddr>> {
+        let ips = self
+            .client
+            .query_ips_by_name(container_name, namespace)
+            .await?;
         Ok(ips
             .into_iter()
             .filter_map(|s| IpAddr::from_str(&s).ok())
@@ -71,41 +82,56 @@ impl CoolifyResolver {
         })
     }
 
-    /// Extract the label immediately before the zone suffix.
+    /// Extract `(container, namespace)` from an in-zone query.
     ///
-    /// `foo.coolify.internal.`     with zone `coolify.internal.` → `Some("foo")`
-    /// `bar.baz.coolify.internal.` with same zone                → `Some("bar")`
-    ///   (returns the leftmost label: treats the whole subdomain as a name,
-    ///    but right now only single-label service names are supported — the
-    ///    rest is ignored. Good enough for v1.)
-    /// `other.example.com.`       → `None`
-    fn container_label<'a>(&self, query_name: &'a LowerName) -> Option<String> {
+    /// Expected shape is `<container>.<namespace>.<zone>`, e.g.
+    /// `web.default.coolify.internal.` → `Some(("web", "default"))`.
+    /// Anything shorter (bare `<name>.<zone>`, zone apex) returns `None` so
+    /// the resolver answers NXDOMAIN — callers must fully qualify.
+    fn container_and_namespace<'a>(
+        &self,
+        query_name: &'a LowerName,
+    ) -> Option<(String, String)> {
         if !self.zone.zone_of(query_name) {
             return None;
         }
         let qn = Name::from(query_name.clone());
         let zn = Name::from(self.zone.clone());
         let extra = qn.num_labels().saturating_sub(zn.num_labels());
-        if extra == 0 {
-            // Exact zone apex query (`coolify.internal.`) — no service name.
+        // Need at least two labels above the zone (<name>.<namespace>.<zone>).
+        if extra < 2 {
             return None;
         }
-        // Leftmost label.
-        qn.iter().next().map(|bytes| {
-            String::from_utf8_lossy(bytes).to_lowercase()
-        })
+        // Two leftmost labels: container, then namespace.
+        let mut labels = qn.iter();
+        let container = labels
+            .next()
+            .map(|b| String::from_utf8_lossy(b).to_lowercase())?;
+        let namespace = labels
+            .next()
+            .map(|b| String::from_utf8_lossy(b).to_lowercase())?;
+        if container.is_empty() || namespace.is_empty() {
+            return None;
+        }
+        Some((container, namespace))
     }
 
     async fn answer_internal<R: ResponseHandler>(
         &self,
         request: &Request,
         mut response: R,
-        label: &str,
+        container: &str,
+        namespace: &str,
     ) -> ResponseInfo {
-        let ips = match self.backend.lookup(label).await {
+        let ips = match self.backend.lookup(container, namespace).await {
             Ok(v) => v,
             Err(e) => {
-                warn!(label = %label, error = %e, "backend lookup failed");
+                warn!(
+                    container = %container,
+                    namespace = %namespace,
+                    error = %e,
+                    "backend lookup failed",
+                );
                 return send_code(request, response, ResponseCode::ServFail).await;
             }
         };
@@ -152,6 +178,17 @@ impl CoolifyResolver {
                 fallback_info(request)
             }
         }
+    }
+
+    /// In-zone query that did not match the `<name>.<ns>.<zone>` shape.
+    /// Returns NXDOMAIN authoritatively so clients don't fall through to
+    /// search-domain guessing against the upstream resolver.
+    async fn answer_in_zone_nxdomain<R: ResponseHandler>(
+        &self,
+        request: &Request,
+        response: R,
+    ) -> ResponseInfo {
+        send_code(request, response, ResponseCode::NXDomain).await
     }
 
     async fn answer_forwarded<R: ResponseHandler>(
@@ -201,9 +238,16 @@ impl RequestHandler for CoolifyResolver {
         }
 
         let qname = request.query().name().clone();
-        match self.container_label(&qname) {
-            Some(label) => self.answer_internal(request, response, &label).await,
-            None => self.answer_forwarded(request, response).await,
+        if self.zone.zone_of(&qname) {
+            match self.container_and_namespace(&qname) {
+                Some((container, namespace)) => {
+                    self.answer_internal(request, response, &container, &namespace)
+                        .await
+                }
+                None => self.answer_in_zone_nxdomain(request, response).await,
+            }
+        } else {
+            self.answer_forwarded(request, response).await
         }
     }
 }
@@ -250,15 +294,19 @@ mod tests {
     use std::net::Ipv4Addr;
 
     struct FakeBackend {
-        records: std::collections::HashMap<String, Vec<IpAddr>>,
+        records: std::collections::HashMap<(String, String), Vec<IpAddr>>,
     }
 
     #[async_trait]
     impl EndpointLookup for FakeBackend {
-        async fn lookup(&self, container_name: &str) -> anyhow::Result<Vec<IpAddr>> {
+        async fn lookup(
+            &self,
+            container_name: &str,
+            namespace: &str,
+        ) -> anyhow::Result<Vec<IpAddr>> {
             Ok(self
                 .records
-                .get(container_name)
+                .get(&(container_name.to_string(), namespace.to_string()))
                 .cloned()
                 .unwrap_or_default())
         }
@@ -270,45 +318,60 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn label_extraction_in_zone() {
+    async fn extracts_namespace_qualified_name() {
         let resolver = build_resolver(FakeBackend {
             records: Default::default(),
         });
-        let name = LowerName::from(Name::from_utf8("myapp.coolify.internal.").unwrap());
-        assert_eq!(resolver.container_label(&name).as_deref(), Some("myapp"));
+        let name = LowerName::from(Name::from_utf8("web.default.coolify.internal.").unwrap());
+        let got = resolver.container_and_namespace(&name);
+        assert_eq!(
+            got.as_ref().map(|(c, n)| (c.as_str(), n.as_str())),
+            Some(("web", "default"))
+        );
     }
 
     #[tokio::test]
-    async fn label_extraction_out_of_zone() {
+    async fn bare_name_rejected() {
         let resolver = build_resolver(FakeBackend {
             records: Default::default(),
         });
-        let name = LowerName::from(Name::from_utf8("example.com.").unwrap());
-        assert_eq!(resolver.container_label(&name), None);
+        let name = LowerName::from(Name::from_utf8("web.coolify.internal.").unwrap());
+        assert!(resolver.container_and_namespace(&name).is_none());
     }
 
     #[tokio::test]
-    async fn label_extraction_zone_apex() {
+    async fn zone_apex_rejected() {
         let resolver = build_resolver(FakeBackend {
             records: Default::default(),
         });
         let name = LowerName::from(Name::from_utf8("coolify.internal.").unwrap());
-        assert_eq!(resolver.container_label(&name), None);
+        assert!(resolver.container_and_namespace(&name).is_none());
     }
 
     #[tokio::test]
-    async fn backend_filters_ipv6() {
+    async fn out_of_zone_rejected() {
+        let resolver = build_resolver(FakeBackend {
+            records: Default::default(),
+        });
+        let name = LowerName::from(Name::from_utf8("example.com.").unwrap());
+        assert!(resolver.container_and_namespace(&name).is_none());
+    }
+
+    #[tokio::test]
+    async fn backend_scopes_by_namespace() {
         let mut records = std::collections::HashMap::new();
         records.insert(
-            "db".into(),
-            vec![
-                IpAddr::V4(Ipv4Addr::new(10, 210, 5, 2)),
-                IpAddr::V6("::1".parse().unwrap()),
-            ],
+            ("web".into(), "default".into()),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 210, 0, 2))],
+        );
+        records.insert(
+            ("web".into(), "alpha".into()),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 220, 0, 2))],
         );
         let backend = FakeBackend { records };
-        let ips = backend.lookup("db").await.unwrap();
-        // backend itself returns both; filtering happens inside answer_internal.
-        assert_eq!(ips.len(), 2);
+        let def = backend.lookup("web", "default").await.unwrap();
+        let alp = backend.lookup("web", "alpha").await.unwrap();
+        assert_eq!(def, vec![IpAddr::V4(Ipv4Addr::new(10, 210, 0, 2))]);
+        assert_eq!(alp, vec![IpAddr::V4(Ipv4Addr::new(10, 220, 0, 2))]);
     }
 }

@@ -42,6 +42,7 @@ start() {
 
 build() {
   start
+  trap 'docker stop "$CONTAINER" >/dev/null 2>&1 || true; echo "container $CONTAINER stopped"' EXIT
   docker exec "$CONTAINER" cargo build --release
   echo "binary: $REPO_ROOT/target/release/coold"
 }

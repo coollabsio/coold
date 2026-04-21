@@ -4,6 +4,9 @@ use std::collections::HashMap;
 pub struct Endpoint {
     pub container_id: String,
     pub container_name: String,
+    /// Mesh namespace the container lives in. Same shape as the namespace
+    /// label stamped on the podman bridge (`io.coolify.namespace=<ns>`).
+    pub namespace: String,
     pub host_mgmt_ip: String,
     pub container_ip: String,
     /// Raw podman status: "running", "exited", "stopped", "restarting",
@@ -52,6 +55,7 @@ mod tests {
         Endpoint {
             container_id: id.into(),
             container_name: format!("name-{id}"),
+            namespace: "default".into(),
             host_mgmt_ip: "100.64.0.5".into(),
             container_ip: ip.into(),
             state: "running".into(),
@@ -97,5 +101,20 @@ mod tests {
         let mut m = HashMap::new();
         m.insert("a".into(), ep("a", "10.210.5.2"));
         assert!(diff(&m, &m).is_empty());
+    }
+
+    #[test]
+    fn diff_flags_namespace_change() {
+        let mut desired = HashMap::new();
+        let mut e = ep("a", "10.210.5.2");
+        e.namespace = "alpha".into();
+        desired.insert("a".into(), e);
+
+        let mut current = HashMap::new();
+        current.insert("a".into(), ep("a", "10.210.5.2")); // namespace="default"
+
+        let deltas = diff(&desired, &current);
+        assert_eq!(deltas.len(), 1);
+        assert!(matches!(deltas[0], Delta::Upsert(_)));
     }
 }

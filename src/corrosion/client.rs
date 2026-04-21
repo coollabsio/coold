@@ -73,7 +73,7 @@ impl CorrosionClient {
     ) -> Result<HashMap<String, Endpoint>> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = json!([
-            "SELECT container_id, container_name, host_mgmt_ip, container_ip, state, health \
+            "SELECT container_id, container_name, namespace, host_mgmt_ip, container_ip, state, health \
              FROM service_endpoints WHERE host_mgmt_ip = ?",
             [host_mgmt_ip]
         ]);
@@ -95,21 +95,27 @@ impl CorrosionClient {
         parse_rows(&bytes)
     }
 
-    /// Return container IPs matching `container_name` across the whole mesh
-    /// (all hosts). Used by the embedded DNS resolver.
+    /// Return container IPs for `container_name` within `namespace` across
+    /// the whole mesh (all hosts). Used by the embedded DNS resolver to
+    /// answer `<name>.<namespace>.coolify.internal`.
     ///
     /// Filters: `state = 'running'` and `health IN ('healthy', 'unknown')`.
     /// Containers without a declared HEALTHCHECK report `health = 'unknown'`
     /// and must still be resolvable (same convention as k8s readinessProbe
     /// defaulting to ready when absent).
-    pub async fn query_ips_by_name(&self, container_name: &str) -> Result<Vec<String>> {
+    pub async fn query_ips_by_name(
+        &self,
+        container_name: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = json!([
             "SELECT container_ip FROM service_endpoints \
              WHERE container_name = ? \
+               AND namespace = ? \
                AND state = 'running' \
                AND health IN ('healthy', 'unknown')",
-            [container_name]
+            [container_name, namespace]
         ]);
         let res = self
             .http
@@ -169,16 +175,17 @@ fn parse_rows(bytes: &[u8]) -> Result<HashMap<String, Endpoint>> {
                 continue;
             }
             let Some(values) = row[1].as_array() else { continue };
-            if values.len() < 6 {
+            if values.len() < 7 {
                 continue;
             }
             let endpoint = Endpoint {
                 container_id: string_at(values, 0)?,
                 container_name: string_at(values, 1)?,
-                host_mgmt_ip: string_at(values, 2)?,
-                container_ip: string_at(values, 3)?,
-                state: string_at(values, 4)?,
-                health: string_at(values, 5)?,
+                namespace: string_at(values, 2)?,
+                host_mgmt_ip: string_at(values, 3)?,
+                container_ip: string_at(values, 4)?,
+                state: string_at(values, 5)?,
+                health: string_at(values, 6)?,
             };
             out.insert(endpoint.container_id.clone(), endpoint);
         }

@@ -18,9 +18,14 @@ async fn main() -> Result<()> {
     let config = Config::parse();
     init_tracing(&config.log_level);
 
+    let namespaces: Vec<String> = config
+        .namespaces
+        .iter()
+        .map(|n| format!("{}={}", n.name, n.network))
+        .collect();
     info!(
         host_mgmt_ip = %config.host_mgmt_ip,
-        mesh_network = %config.mesh_network,
+        namespaces = %namespaces.join(","),
         podman_socket = %config.podman_socket.display(),
         corrosion_url = %config.corrosion_url,
         reconcile_interval = ?config.reconcile_interval,
