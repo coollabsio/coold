@@ -9,7 +9,7 @@ use coolify_proto::builder::v1::{
     BuilderHello,
 };
 
-use crate::{auth, config::Config};
+use crate::config::Config;
 
 const RECONNECT_DELAY_SECS: u64 = 5;
 
@@ -33,8 +33,7 @@ async fn connect_and_run(config: &Config) -> Result<()> {
         .connect()
         .await?;
 
-    let token = auth::sign_jwt(&config.builder_id, &config.jwt_private_key)?;
-    let bearer: MetadataValue<_> = format!("Bearer {token}").parse()?;
+    let bearer: MetadataValue<_> = format!("Bearer {}", config.jwt).parse()?;
 
     let mut client = BuilderClient::with_interceptor(channel, move |mut req: tonic::Request<()>| {
         req.metadata_mut().insert("authorization", bearer.clone());
