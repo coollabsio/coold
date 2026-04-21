@@ -12,6 +12,10 @@ pub struct Config {
     #[arg(long, env = "BROKER_GRPC_BIND", default_value = "0.0.0.0:6443")]
     pub grpc_bind: String,
 
+    /// Address the builder gRPC server binds on (builder dials this).
+    #[arg(long, env = "BROKER_BUILDER_GRPC_BIND", default_value = "0.0.0.0:6444")]
+    pub builder_grpc_bind: String,
+
     /// Redis URL for the Laravel bridge.
     #[arg(long, env = "BROKER_REDIS_URL", default_value = "redis://127.0.0.1:6379")]
     pub redis_url: String,

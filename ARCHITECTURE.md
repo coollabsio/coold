@@ -33,7 +33,7 @@ scheduling, rollback, ingress templating, RBAC, audit.
 | Host facts (`podman info`, `wg show`, `/proc/*`, `iptables -nvL`) | **coold** | Read-only endpoints for central to scrape. |
 | Bearer-token authn + deny-dangerous-flags filter + ops/debug request log | **coold** | No RBAC, no per-user identity. |
 | Compose file parsing (services, networks, depends_on, volumes) | **central** | Emits primitive op sequence. |
-| Dockerfile / Buildpack / Nixpacks build | **central** (or pinned builder host) | BuildKit / buildpacks / nixpacks → push to registry. coold only `images/pull`s. |
+| OCI image build (Dockerfile / Buildpacks / Railpack / Static) | **builder** (separate binary in this workspace) | buildah bud → shared containers-storage. coold never builds. See §6. |
 | App model (app → services → deployments → replicas) | **central** | Central DB. coold has no notion of "app". |
 | Scheduling (which host runs which container) | **central** | Consumes coold host facts; decides placement. |
 | Deploy orchestration (rolling swap, health gate, proxy cutover, rollback) | **central controller** | State machine in central. |
@@ -501,3 +501,39 @@ broker/
 - `coolify firewall` CLI (alpha, SSH-bounced REST client of local coold):
   `coolify-cli/CLAUDE.md` § "`coolify firewall`".
 - Wire surface + transport: mirror of §3, §4 here ↔ `CONTROL_PLANE.md §2`.
+
+## 17. builder — OCI image build agent
+
+`builder/` is a separate binary in this Cargo workspace. It is **not** part of coold. coold never runs builds.
+
+### Role
+
+- Receives `BuildRequest` from broker via outbound gRPC stream (`Builder.Stream` service, `proto/builder.proto`).
+- Clones repo (shallow), runs the appropriate build toolchain, writes OCI image to shared podman containers-storage (`/var/lib/containers/storage`).
+- Returns `BuildResult { digest, registry_ref }` to broker → broker pushes to `build:resp:{request_id}` → Laravel BLPOPs.
+
+### Supported stacks (v0.1 MVP)
+
+| Stack | Detector | Impl |
+|---|---|---|
+| `STATIC` | explicit in BuildRequest | generateContainerfile → `buildah bud` → nginx:alpine base |
+| `DOCKERFILE` | — | post-MVP |
+| `BUILDPACKS` | — | post-MVP |
+| `RAILPACK` | — | post-MVP |
+
+### Storage model (single-node MVP)
+
+builder writes to the same `/var/lib/containers/storage` as coold + podman. No registry, no push over the network. coold calls `containers/create image=localhost/<app>@sha256:...`; image is already present. Multi-node requires a registry or `podman save`/`load` — deferred.
+
+### Ports
+
+- broker coold gRPC: `:6443` (existing)
+- broker builder gRPC: `:6444` (new, `BROKER_BUILDER_GRPC_BIND`)
+
+### Single-node systemd layout
+
+```
+coold.service   → dials broker :6443
+builder.service → dials broker :6444
+broker.service  → listens :6443 + :6444, bridges Redis ↔ gRPC
+```

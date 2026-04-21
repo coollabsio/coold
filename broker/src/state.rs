@@ -5,8 +5,9 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 
 use coolify_proto::agent::v1::ServerMsg;
+use coolify_proto::builder::v1::BuilderServerMsg;
 
-/// Shared map: host_id → sender into the open gRPC stream.
+/// Shared map: host_id → sender into the open coold gRPC stream.
 #[derive(Clone)]
 pub struct Streams(Arc<DashMap<String, mpsc::Sender<ServerMsg>>>);
 
@@ -29,6 +30,33 @@ impl Streams {
 
     pub fn host_ids(&self) -> Vec<String> {
         self.0.iter().map(|e| e.key().clone()).collect()
+    }
+}
+
+/// Shared map: builder_id → sender into the open builder gRPC stream.
+#[derive(Clone)]
+pub struct BuilderStreams(Arc<DashMap<String, mpsc::Sender<BuilderServerMsg>>>);
+
+impl BuilderStreams {
+    pub fn new() -> Self {
+        Self(Arc::new(DashMap::new()))
+    }
+
+    pub fn insert(&self, builder_id: String, tx: mpsc::Sender<BuilderServerMsg>) {
+        self.0.insert(builder_id, tx);
+    }
+
+    pub fn remove(&self, builder_id: &str) {
+        self.0.remove(builder_id);
+    }
+
+    pub fn get(&self, builder_id: &str) -> Option<mpsc::Sender<BuilderServerMsg>> {
+        self.0.get(builder_id).map(|e| e.value().clone())
+    }
+
+    /// Return builder_id with fewest in-flight jobs (for load-balanced dispatch).
+    pub fn pick_idle(&self) -> Option<String> {
+        self.0.iter().next().map(|e| e.key().clone())
     }
 }
 

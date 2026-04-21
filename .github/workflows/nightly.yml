@@ -39,6 +39,7 @@ jobs:
     env:
       COOLD_VERSION: ${{ needs.prep.outputs.tag }}
       BROKER_VERSION: ${{ needs.prep.outputs.tag }}
+      BUILDER_VERSION: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -73,6 +74,13 @@ jobs:
           tar -czf dist/broker-linux-${{ matrix.arch }}.tar.gz -C dist broker
           rm dist/broker
           (cd dist && sha256sum broker-linux-${{ matrix.arch }}.tar.gz > broker-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - name: Package builder
+        run: |
+          cp target/${{ matrix.target }}/release/builder dist/builder
+          tar -czf dist/builder-linux-${{ matrix.arch }}.tar.gz -C dist builder
+          rm dist/builder
+          (cd dist && sha256sum builder-linux-${{ matrix.arch }}.tar.gz > builder-linux-${{ matrix.arch }}.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -109,6 +117,7 @@ jobs:
             echo "### Artifacts"
             echo "- \`coold\` — per-host agent"
             echo "- \`broker\` — central-side gRPC stream broker"
+            echo "- \`builder\` — OCI image build agent"
             echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"
@@ -135,6 +144,10 @@ jobs:
             dist/broker-linux-amd64.tar.gz.sha256
             dist/broker-linux-arm64.tar.gz
             dist/broker-linux-arm64.tar.gz.sha256
+            dist/builder-linux-amd64.tar.gz
+            dist/builder-linux-amd64.tar.gz.sha256
+            dist/builder-linux-arm64.tar.gz
+            dist/builder-linux-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -153,4 +166,8 @@ jobs:
             dist/broker-linux-amd64.tar.gz \
             dist/broker-linux-amd64.tar.gz.sha256 \
             dist/broker-linux-arm64.tar.gz \
-            dist/broker-linux-arm64.tar.gz.sha256
+            dist/broker-linux-arm64.tar.gz.sha256 \
+            dist/builder-linux-amd64.tar.gz \
+            dist/builder-linux-amd64.tar.gz.sha256 \
+            dist/builder-linux-arm64.tar.gz \
+            dist/builder-linux-arm64.tar.gz.sha256

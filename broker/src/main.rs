@@ -1,4 +1,6 @@
 mod auth;
+mod build_redis_bridge;
+mod builder_grpc_server;
 mod config;
 mod redis_bridge;
 mod state;
@@ -15,17 +17,21 @@ async fn main() -> Result<()> {
     init_tracing(&config.log_level);
 
     info!(
-        grpc_bind = %config.grpc_bind,
-        redis_url = %config.redis_url,
+        grpc_bind         = %config.grpc_bind,
+        builder_grpc_bind = %config.builder_grpc_bind,
+        redis_url         = %config.redis_url,
         "broker starting",
     );
 
     let streams = state::Streams::new();
+    let builder_streams = state::BuilderStreams::new();
     let pending = state::Pending::new();
 
     tokio::try_join!(
         grpc_server::run(config.clone(), streams.clone(), pending.clone()),
         redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
+        builder_grpc_server::run(config.clone(), builder_streams.clone(), pending.clone()),
+        build_redis_bridge::run(config.clone(), builder_streams.clone(), pending.clone()),
         pending_sweeper::run(config.clone(), pending.clone()),
     )?;
 
@@ -85,7 +91,6 @@ mod grpc_server {
             &self,
             request: Request<Streaming<ClientMsg>>,
         ) -> Result<Response<Self::StreamStream>, Status> {
-            // Validate JWT from Authorization metadata.
             let jwt = request
                 .metadata()
                 .get("authorization")
@@ -98,7 +103,6 @@ mod grpc_server {
 
             info!(%host_id, "coold stream connected");
 
-            // Channel through which the redis_bridge sends commands to this stream.
             let (cmd_tx, cmd_rx) = mpsc::channel::<ServerMsg>(64);
             self.streams.insert(host_id.clone(), cmd_tx);
 
@@ -106,7 +110,6 @@ mod grpc_server {
             let pending = self.pending.clone();
             let mut inbound = request.into_inner();
 
-            // Spawn task: read responses from coold, push to Redis.
             let redis_url = self.config.redis_url.clone();
             let host_id_clone = host_id.clone();
             tokio::spawn(async move {
@@ -132,7 +135,6 @@ mod grpc_server {
                 streams.remove(&host_id_clone);
             });
 
-            // Outbound: ServerMsg frames from cmd_rx.
             let outbound = ReceiverStream::new(cmd_rx).map(Ok);
             Ok(Response::new(Box::pin(outbound)))
         }
@@ -152,8 +154,12 @@ mod pending_sweeper {
             let expired = pending.drain_expired();
             for request_id in expired {
                 warn!(%request_id, timeout_secs = DISPATCH_TIMEOUT_SECS, "dispatch timed out; pushing 504");
+                // Push timeout to both coold and build resp keys; only one will exist.
                 if let Err(e) = crate::redis_bridge::push_timeout_error(&config.redis_url, &request_id).await {
-                    warn!(%request_id, error = %e, "failed to push timeout error to Redis");
+                    warn!(%request_id, error = %e, "failed to push coold timeout error");
+                }
+                if let Err(e) = crate::build_redis_bridge::push_build_timeout_error(&config.redis_url, &request_id).await {
+                    warn!(%request_id, error = %e, "failed to push build timeout error");
                 }
             }
         }
