@@ -132,6 +132,12 @@ pub struct Config {
     #[arg(long, env = "COOLD_RULES_PATH", default_value = "/etc/coolify/allow.rules")]
     pub rules_path: PathBuf,
 
+    /// Path where coold writes the nft bridge-family allow snapshot.
+    /// The CLI's `coolify-mesh-fw.service` restores this on start/restart via
+    /// `nft -f /etc/coolify/allow.nft`. coold writes it on every rule mutate.
+    #[arg(long, env = "COOLD_BRIDGE_RULES_PATH", default_value = "/etc/coolify/allow.nft")]
+    pub bridge_rules_path: PathBuf,
+
     /// Name of the iptables chain coold owns. Must match the chain created
     /// by `coolify init --default-deny` and jumped to from COOLIFY-INTRA.
     #[arg(long, env = "COOLD_CHAIN_NAME", default_value = "COOLIFY-ALLOW")]
