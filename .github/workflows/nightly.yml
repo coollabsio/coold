@@ -13,7 +13,18 @@ permissions:
   contents: write
 
 jobs:
+  prep:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute tag
+        id: meta
+        run: echo "tag=nightly-$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prep
     strategy:
       fail-fast: false
       matrix:
@@ -25,6 +36,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
             arch: arm64
     runs-on: ${{ matrix.runner }}
+    env:
+      COOLD_VERSION: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,6 +48,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+          cache-all-crates: true
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
@@ -54,8 +70,10 @@ jobs:
           retention-days: 7
 
   release:
-    needs: build
+    needs: [prep, build]
     runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -66,16 +84,15 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Compute tag and release notes
-        id: meta
+      - name: Compose release notes
+        id: notes
         run: |
-          TAG="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           PREV=$(git tag --list 'nightly-*' --sort=-creatordate | head -n1)
           {
             echo "body<<EOF"
             echo "Automated nightly build from \`${GITHUB_SHA}\`."
             echo
+            echo "**Version:** \`${TAG}\`"
             echo "**Commit:** $(git log -1 --pretty=format:'%s')"
             echo
             if [ -n "$PREV" ]; then
@@ -89,9 +106,9 @@ jobs:
       - name: Create per-commit release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.meta.outputs.tag }}
-          name: Nightly ${{ steps.meta.outputs.tag }}
-          body: ${{ steps.meta.outputs.body }}
+          tag_name: ${{ env.TAG }}
+          name: Nightly ${{ env.TAG }}
+          body: ${{ steps.notes.outputs.body }}
           prerelease: true
           make_latest: false
           files: |
@@ -103,7 +120,6 @@ jobs:
       - name: Refresh rolling nightly release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.meta.outputs.tag }}
         run: |
           gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
           gh release create nightly \

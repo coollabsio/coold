@@ -45,8 +45,13 @@ impl<'a> IntoIterator for &'a Namespaces {
     }
 }
 
+pub const VERSION: &str = match option_env!("COOLD_VERSION") {
+    Some(v) => v,
+    None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
+};
+
 #[derive(Debug, Clone, Parser)]
-#[command(name = "coold", version, about)]
+#[command(name = "coold", version = VERSION, about)]
 pub struct Config {
     /// WireGuard management IP for this host (e.g. 100.64.0.5).
     #[arg(long, env = "COOLD_HOST_MGMT_IP")]
