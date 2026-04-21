@@ -98,7 +98,7 @@ mod grpc_server {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .ok_or_else(|| Status::unauthenticated("missing Bearer token"))?;
 
-            let host_id = auth::verify_jwt(jwt, &self.config.jwt_public_key)
+            let host_id = auth::verify_jwt(jwt, &self.config.jwt_public_key, "coold")
                 .map_err(|e| Status::unauthenticated(format!("invalid JWT: {e}")))?;
 
             info!(%host_id, "coold stream connected");

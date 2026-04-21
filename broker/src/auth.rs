@@ -8,14 +8,15 @@ struct Claims {
     sub: String,
 }
 
-/// Verify a per-host JWT. Returns the `sub` claim (host_id) on success.
-pub fn verify_jwt(token: &str, public_key_pem: &str) -> Result<String> {
+/// Verify a per-host JWT against the expected audience ("coold" or "builder").
+/// Returns the `sub` claim (caller id) on success.
+pub fn verify_jwt(token: &str, public_key_pem: &str, expected_audience: &str) -> Result<String> {
     let key = DecodingKey::from_ec_pem(public_key_pem.as_bytes())
         .or_else(|_| DecodingKey::from_rsa_pem(public_key_pem.as_bytes()))
         .map_err(|e| anyhow!("load JWT pubkey: {e}"))?;
 
     let mut validation = Validation::new(Algorithm::ES256);
-    validation.set_audience(&["coold"]);
+    validation.set_audience(&[expected_audience]);
 
     let data = decode::<Claims>(token, &key, &validation)
         .map_err(|e| anyhow!("JWT verification failed: {e}"))?;

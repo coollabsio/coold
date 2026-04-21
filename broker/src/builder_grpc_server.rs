@@ -54,7 +54,7 @@ impl Builder for BrokerBuilder {
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or_else(|| Status::unauthenticated("missing Bearer token"))?;
 
-        let builder_id = auth::verify_jwt(jwt, &self.config.jwt_public_key)
+        let builder_id = auth::verify_jwt(jwt, &self.config.jwt_public_key, "builder")
             .map_err(|e| Status::unauthenticated(format!("invalid JWT: {e}")))?;
 
         info!(%builder_id, "builder stream connected");
