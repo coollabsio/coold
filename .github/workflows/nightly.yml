@@ -1,0 +1,117 @@
+name: Nightly Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/coold dist/coold
+          tar -czf dist/coold-linux-${{ matrix.arch }}.tar.gz -C dist coold
+          rm dist/coold
+          (cd dist && sha256sum coold-linux-${{ matrix.arch }}.tar.gz > coold-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coold-linux-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Compute tag and release notes
+        id: meta
+        run: |
+          TAG="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short=8 HEAD)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          PREV=$(git tag --list 'nightly-*' --sort=-creatordate | head -n1)
+          {
+            echo "body<<EOF"
+            echo "Automated nightly build from \`${GITHUB_SHA}\`."
+            echo
+            echo "**Commit:** $(git log -1 --pretty=format:'%s')"
+            echo
+            if [ -n "$PREV" ]; then
+              echo "### Changes since $PREV"
+              git log --pretty=format:'- %s (%h)' "$PREV"..HEAD
+              echo
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create per-commit release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: Nightly ${{ steps.meta.outputs.tag }}
+          body: ${{ steps.meta.outputs.body }}
+          prerelease: true
+          make_latest: false
+          files: |
+            dist/coold-linux-amd64.tar.gz
+            dist/coold-linux-amd64.tar.gz.sha256
+            dist/coold-linux-arm64.tar.gz
+            dist/coold-linux-arm64.tar.gz.sha256
+
+      - name: Refresh rolling nightly release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly \
+            --prerelease \
+            --title "Nightly (latest)" \
+            --target "${GITHUB_SHA}" \
+            --notes "Latest nightly build — mirrors [${TAG}](../../releases/tag/${TAG})." \
+            dist/coold-linux-amd64.tar.gz \
+            dist/coold-linux-amd64.tar.gz.sha256 \
+            dist/coold-linux-arm64.tar.gz \
+            dist/coold-linux-arm64.tar.gz.sha256
