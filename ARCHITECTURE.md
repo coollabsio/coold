@@ -418,14 +418,14 @@ on larger hardware; decrease if logs-follow subscriptions are common.
 
 Laravel (Coolify central brain) runs on a request/response PHP worker model.
 Workers cycle on deploy and cannot safely hold thousands of long-lived HTTP/2
-streams. The `coolify-broker` binary fills this gap: it is the gRPC server
+streams. The `broker` binary fills this gap: it is the gRPC server
 that coold dials, and it bridges commands and responses to Laravel via Redis.
 
 ```
 [coold hosts]
      │  grpcs://central.example.com:6443
      ▼
-[coolify-broker]  ←→  Redis (coold:cmd stream, coold:resp:{id} lists)
+[broker]  ←→  Redis (coold:cmd stream, coold:resp:{id} lists)
                               │
                          [Laravel]  (brain: scheduler, deploy controller, RBAC, etc.)
 ```
@@ -434,7 +434,7 @@ that coold dials, and it bridges commands and responses to Laravel via Redis.
 
 Single central VM. No load balancer required.
 
-- `coolify-broker` binds `0.0.0.0:6443` (systemd unit, starts before Laravel).
+- `broker` binds `0.0.0.0:6443` (systemd unit, starts before Laravel).
 - Laravel runs on `:80` / `:443` via nginx. No port conflict.
 - Redis on localhost. Both Laravel and broker connect to it.
 - TLS on broker: Let's Encrypt cert (if domain available) or self-signed
@@ -486,7 +486,7 @@ coold/
   Cargo.toml      # depends on coolify-proto
   src/
 broker/
-  Cargo.toml      # coolify-broker binary; depends on coolify-proto
+  Cargo.toml      # broker binary; depends on coolify-proto
   src/
     main.rs       # tonic AgentServer + spawns redis_bridge
     config.rs     # BROKER_GRPC_BIND, BROKER_REDIS_URL, BROKER_JWT_PUBLIC_KEY_PATH

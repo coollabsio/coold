@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     info!(
         grpc_bind = %config.grpc_bind,
         redis_url = %config.redis_url,
-        "coolify-broker starting",
+        "broker starting",
     );
 
     let streams = state::Streams::new();

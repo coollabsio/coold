@@ -1,5 +1,5 @@
 [package]
-name = "coolify-broker"
+name = "broker"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ description = "gRPC stream broker: terminates coold streams, bridges commands/re
 license.workspace = true
 
 [[bin]]
-name = "coolify-broker"
+name = "broker"
 path = "src/main.rs"
 
 [dependencies]

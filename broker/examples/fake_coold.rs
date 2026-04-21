@@ -1,7 +1,7 @@
 //! Minimal fake coold: dials broker, sends Hello, answers ListContainers with a stub.
 //!
 //! Usage:
-//!   BROKER_URL=http://127.0.0.1:6443 JWT=<token> cargo run -p coolify-broker --example fake_coold
+//!   BROKER_URL=http://127.0.0.1:6443 JWT=<token> cargo run -p broker --example fake_coold
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;

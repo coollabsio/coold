@@ -1,7 +1,7 @@
 //! Generate ES256 keypair and sign a test JWT.
 //!
 //! Usage:
-//!   cargo run -p coolify-broker --example sign_jwt -- <host_id> <priv_pem_out> <pub_pem_out>
+//!   cargo run -p broker --example sign_jwt -- <host_id> <priv_pem_out> <pub_pem_out>
 //!
 //! Prints the signed JWT to stdout.
 

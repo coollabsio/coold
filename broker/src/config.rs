@@ -6,7 +6,7 @@ pub const VERSION: &str = match option_env!("BROKER_VERSION") {
 };
 
 #[derive(Debug, Clone, Parser)]
-#[command(name = "coolify-broker", version = VERSION, about)]
+#[command(name = "broker", version = VERSION, about)]
 pub struct Config {
     /// Address the gRPC server binds on (coold dials this).
     #[arg(long, env = "BROKER_GRPC_BIND", default_value = "0.0.0.0:6443")]
@@ -25,7 +25,7 @@ pub struct Config {
     #[clap(skip)]
     pub jwt_public_key: String,
 
-    /// Log filter (e.g. `info`, `coolify_broker=debug`).
+    /// Log filter (e.g. `info`, `broker=debug`).
     #[arg(long, env = "BROKER_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
