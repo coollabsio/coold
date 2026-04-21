@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use coolify_proto::agent::v1::{server_msg, ListContainersReq, Response, ServerMsg};
 
-use crate::{config::Config, state::Streams};
+use crate::{config::Config, state::{Pending, Streams}};
 
 const CMD_STREAM: &str = "coold:cmd";
 const CONSUMER_GROUP: &str = "broker";
@@ -49,7 +49,9 @@ enum ResponseBody {
     Error { code: u32, message: String },
 }
 
-pub async fn run(config: Config, streams: Streams) -> Result<()> {
+const RESP_TTL_SECS: usize = 10;
+
+pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
     let client = redis::Client::open(config.redis_url.as_str())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
@@ -105,7 +107,7 @@ pub async fn run(config: Config, streams: Streams) -> Result<()> {
                     }
                 };
 
-                dispatch(&streams, &mut conn, &config, envelope, stream_id.clone()).await;
+                dispatch(&streams, &mut conn, &config, &pending, envelope, stream_id.clone()).await;
                 ack(&mut conn, &stream_id).await;
             }
         }
@@ -142,8 +144,23 @@ pub async fn push_response(redis_url: &str, resp: Response) -> Result<()> {
 
     let mut c = conn;
     c.lpush::<_, _, ()>(&key, &json).await?;
-    c.expire::<_, ()>(&key, 300).await?;
+    c.expire::<_, ()>(&key, RESP_TTL_SECS as i64).await?;
 
+    Ok(())
+}
+
+/// Push a `code=504` timeout error for `request_id`. Called by the pending sweeper.
+pub async fn push_timeout_error(redis_url: &str, request_id: &str) -> Result<()> {
+    let client = redis::Client::open(redis_url)?;
+    let mut conn = client.get_multiplexed_async_connection().await?;
+    let envelope = ResponseEnvelope {
+        request_id: request_id.to_string(),
+        body: ResponseBody::Error { code: 504, message: "dispatch timeout".into() },
+    };
+    let json = serde_json::to_string(&envelope)?;
+    let key = format!("coold:resp:{request_id}");
+    conn.lpush::<_, _, ()>(&key, &json).await?;
+    conn.expire::<_, ()>(&key, RESP_TTL_SECS as i64).await?;
     Ok(())
 }
 
@@ -151,6 +168,7 @@ async fn dispatch(
     streams: &Streams,
     conn: &mut impl AsyncCommands,
     _config: &Config,
+    pending: &Pending,
     env: DispatchEnvelope,
     _stream_id: String,
 ) {
@@ -167,7 +185,9 @@ async fn dispatch(
 
     match streams.get(&env.host_id) {
         Some(tx) => {
+            pending.insert(env.request_id.clone());
             if let Err(e) = tx.send(msg).await {
+                pending.remove(&env.request_id);
                 warn!(host_id = %env.host_id, error = %e, "failed to send to stream");
                 push_error(conn, &env.request_id, 503, "host stream send failed").await;
             }
@@ -187,7 +207,7 @@ async fn push_error(conn: &mut impl AsyncCommands, request_id: &str, code: u32, 
     let json = serde_json::to_string(&envelope).unwrap_or_default();
     let key = format!("coold:resp:{request_id}");
     let _: Result<(), _> = conn.lpush(&key, &json).await;
-    let _: Result<(), _> = conn.expire(&key, 300).await;
+    let _: Result<(), _> = conn.expire(&key, RESP_TTL_SECS as i64).await;
 }
 
 async fn ack(conn: &mut impl AsyncCommands, stream_id: &str) {

@@ -21,10 +21,12 @@ async fn main() -> Result<()> {
     );
 
     let streams = state::Streams::new();
+    let pending = state::Pending::new();
 
     tokio::try_join!(
-        grpc_server::run(config.clone(), streams.clone()),
-        redis_bridge::run(config.clone(), streams.clone()),
+        grpc_server::run(config.clone(), streams.clone(), pending.clone()),
+        redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
+        pending_sweeper::run(config.clone(), pending.clone()),
     )?;
 
     Ok(())
@@ -53,11 +55,11 @@ mod grpc_server {
         client_msg, ClientMsg, ServerMsg,
     };
 
-    use crate::{auth, config::Config, state::Streams};
+    use crate::{auth, config::Config, state::{Pending, Streams}};
 
-    pub async fn run(config: Config, streams: Streams) -> Result<()> {
+    pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr = config.grpc_bind.parse()?;
-        let svc = BrokerAgent { config, streams };
+        let svc = BrokerAgent { config, streams, pending };
 
         info!(%addr, "gRPC server listening");
         Server::builder()
@@ -70,6 +72,7 @@ mod grpc_server {
     struct BrokerAgent {
         config: Config,
         streams: Streams,
+        pending: Pending,
     }
 
     type ServerMsgStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send + 'static>>;
@@ -100,6 +103,7 @@ mod grpc_server {
             self.streams.insert(host_id.clone(), cmd_tx);
 
             let streams = self.streams.clone();
+            let pending = self.pending.clone();
             let mut inbound = request.into_inner();
 
             // Spawn task: read responses from coold, push to Redis.
@@ -109,6 +113,7 @@ mod grpc_server {
                 while let Some(msg) = inbound.next().await {
                     match msg {
                         Ok(ClientMsg { payload: Some(client_msg::Payload::Response(resp)) }) => {
+                            pending.remove(&resp.request_id);
                             if let Err(e) = crate::redis_bridge::push_response(&redis_url, resp).await {
                                 warn!(host_id = %host_id_clone, error = %e, "failed to push response to Redis");
                             }
@@ -130,6 +135,27 @@ mod grpc_server {
             // Outbound: ServerMsg frames from cmd_rx.
             let outbound = ReceiverStream::new(cmd_rx).map(Ok);
             Ok(Response::new(Box::pin(outbound)))
+        }
+    }
+}
+
+mod pending_sweeper {
+    use anyhow::Result;
+    use tracing::warn;
+
+    use crate::{config::Config, state::{Pending, DISPATCH_TIMEOUT_SECS}};
+
+    pub async fn run(config: Config, pending: Pending) -> Result<()> {
+        let interval = std::time::Duration::from_secs(1);
+        loop {
+            tokio::time::sleep(interval).await;
+            let expired = pending.drain_expired();
+            for request_id in expired {
+                warn!(%request_id, timeout_secs = DISPATCH_TIMEOUT_SECS, "dispatch timed out; pushing 504");
+                if let Err(e) = crate::redis_bridge::push_timeout_error(&config.redis_url, &request_id).await {
+                    warn!(%request_id, error = %e, "failed to push timeout error to Redis");
+                }
+            }
         }
     }
 }
