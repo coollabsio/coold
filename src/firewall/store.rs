@@ -107,10 +107,18 @@ impl FirewallStore {
                 .await
                 .context("spawn nft add table/chain")?;
             if !out.status.success() {
-                debug!(
-                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                    "nft add returned non-zero (likely already exists)"
-                );
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("exists") || stderr.contains("already") {
+                    debug!(
+                        stderr = %stderr.trim(),
+                        "nft add table/chain returned non-zero (already exists)"
+                    );
+                } else {
+                    warn!(
+                        stderr = %stderr.trim(),
+                        "nft add table/chain failed (non-exists error); bridge plane may not be active"
+                    );
+                }
             }
         }
         Ok(())
@@ -170,9 +178,11 @@ impl FirewallStore {
             }
             info!(id = %id, "rule revoked");
         }
-        self.snapshot_locked().await?;
-        let updated_rules = self.list_locked().await?;
-        self.sync_bridge_snapshot(&updated_rules).await?;
+        // list_locked once, reuse for both snapshot and bridge sync.
+        let updated = self.list_locked().await?;
+        let fragment = render_fragment(self.chain(), &updated);
+        self.write_snapshot(fragment.as_bytes()).await?;
+        self.sync_bridge_snapshot(&updated).await?;
         Ok(Some(rule))
     }
 
@@ -321,13 +331,19 @@ impl FirewallStore {
         Ok(())
     }
 
-    /// Sync the bridge nft snapshot: write file atomically, then pipe to `nft -f -`.
+    /// Sync the bridge nft snapshot: pipe to `nft -f -` first, then write file.
     /// Tolerates missing table/chain (permissive mode / --skip-default-deny).
+    ///
+    /// Order:
+    /// 1. Build fragment.
+    /// 2. Pipe fragment to `nft -f -`.
+    /// 3. nft fails with "No such file"/"No such table" → WARN (once) → write file → Ok.
+    /// 4. nft fails for any other reason → bail (do NOT write file — kernel and disk would diverge).
+    /// 5. nft succeeds → clear warned flag → write file → Ok.
     async fn sync_bridge_snapshot(&self, rules: &[AllowRule]) -> Result<()> {
         let fragment = render_bridge_fragment(rules);
-        self.write_bridge_snapshot(fragment.as_bytes()).await?;
 
-        // Pipe to nft -f -
+        // Pipe to nft -f - first.
         let mut cmd = Command::new("nft");
         cmd.arg("-f")
             .arg("-")
@@ -343,14 +359,17 @@ impl FirewallStore {
             stdin.flush().await.ok();
         }
         let out = child.wait_with_output().await.context("wait nft -f -")?;
+
         if out.status.success() {
-            // Clear the warned flag on success so re-enabling the table triggers a fresh warn.
+            // nft applied cleanly — clear warned flag and persist to disk.
             self.inner.bridge_plane_warned.store(false, Ordering::Relaxed);
+            self.write_bridge_snapshot(fragment.as_bytes()).await?;
             return Ok(());
         }
 
         let stderr = String::from_utf8_lossy(&out.stderr);
-        // Permissive mode: table not yet set up.
+        // Permissive mode: table not yet set up. Write file so re-enabling
+        // the table replays the rules, but don't treat this as an error.
         if stderr.contains("No such file") || stderr.contains("No such table") {
             if !self.inner.bridge_plane_warned.swap(true, Ordering::Relaxed) {
                 warn!(
@@ -359,9 +378,11 @@ impl FirewallStore {
                      Re-enable default-deny to activate bridge rules."
                 );
             }
+            self.write_bridge_snapshot(fragment.as_bytes()).await?;
             return Ok(());
         }
 
+        // Genuine nft failure — do NOT write the file to avoid kernel/disk divergence.
         bail!("nft -f - failed: {}", stderr.trim());
     }
 
@@ -371,7 +392,12 @@ impl FirewallStore {
                 .await
                 .with_context(|| format!("mkdir {}", parent.display()))?;
         }
-        let tmp = self.inner.cfg.bridge_rules_path.with_extension("bridge_rules.tmp");
+        let file_name = self.inner.cfg.bridge_rules_path
+            .file_name()
+            .expect("bridge_rules_path has no filename")
+            .to_string_lossy();
+        let tmp = self.inner.cfg.bridge_rules_path
+            .with_file_name(format!("{file_name}.tmp"));
         let mut f = fs::File::create(&tmp)
             .await
             .with_context(|| format!("create {}", tmp.display()))?;
@@ -400,6 +426,15 @@ pub struct BulkOutcome {
     pub total: usize,
 }
 
+/// Shared sort key for both `render_fragment` and `render_bridge_fragment`.
+/// Sorts by namespace (empty → "default") then by rule id.
+fn rule_sort_key<'a>(r: &'a AllowRule) -> (&'a str, &'a str) {
+    (
+        if r.namespace.is_empty() { "default" } else { &r.namespace },
+        r.id.as_deref().unwrap_or(""),
+    )
+}
+
 /// `*filter\n:<chain> -\n<rendered rules>\nCOMMIT\n` — the exact shape the
 /// Go CLI's `SaveRulesCommand` produces. `iptables-restore --noflush` on
 /// this fragment only touches `<chain>`.
@@ -410,13 +445,7 @@ pub struct BulkOutcome {
 /// treats `#` lines as comments.
 fn render_fragment(chain: &str, rules: &[AllowRule]) -> String {
     let mut sorted: Vec<&AllowRule> = rules.iter().collect();
-    sorted.sort_by(|a, b| {
-        let ns_a = if a.namespace.is_empty() { "default" } else { &a.namespace };
-        let ns_b = if b.namespace.is_empty() { "default" } else { &b.namespace };
-        ns_a
-            .cmp(ns_b)
-            .then_with(|| a.id.as_deref().unwrap_or("").cmp(b.id.as_deref().unwrap_or("")))
-    });
+    sorted.sort_by_key(|r| rule_sort_key(r));
 
     let mut out = String::new();
     out.push_str("*filter\n");
@@ -447,13 +476,7 @@ fn render_fragment(chain: &str, rules: &[AllowRule]) -> String {
 /// `flush chain` so the entire chain is replaced atomically.
 fn render_bridge_fragment(rules: &[AllowRule]) -> String {
     let mut sorted: Vec<&AllowRule> = rules.iter().collect();
-    sorted.sort_by(|a, b| {
-        let ns_a = if a.namespace.is_empty() { "default" } else { &a.namespace };
-        let ns_b = if b.namespace.is_empty() { "default" } else { &b.namespace };
-        ns_a
-            .cmp(ns_b)
-            .then_with(|| a.id.as_deref().unwrap_or("").cmp(b.id.as_deref().unwrap_or("")))
-    });
+    sorted.sort_by_key(|r| rule_sort_key(r));
 
     let mut out = String::new();
     out.push_str("flush chain bridge coolify_bridge coolify_allow\n");
