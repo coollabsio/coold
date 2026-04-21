@@ -249,22 +249,22 @@ pub fn render_bridge_line(rule: &AllowRule) -> String {
     } else {
         &rule.namespace
     };
-    let id = rule.id.as_deref().unwrap_or("");
+    let id = rule.id.as_deref().expect("render_bridge_line called on unnormalized rule (id is None); call .normalize() first");
 
-    let mut parts = format!(
+    let mut line = format!(
         "add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr {} ip daddr {}",
         rule.src, rule.dst
     );
 
     if let Some(proto) = &rule.proto {
-        parts.push_str(&format!(" ip protocol {proto}"));
+        line.push_str(&format!(" ip protocol {proto}"));
         if let Some(port) = rule.port {
-            parts.push_str(&format!(" th dport {port}"));
+            line.push_str(&format!(" th dport {port}"));
         }
     }
 
-    parts.push_str(&format!(" accept comment \"cid:{id}:{ns}\""));
-    parts
+    line.push_str(&format!(" accept comment \"cid:{id}:{ns}\""));
+    line
 }
 
 fn parse_ip_maybe_cidr(s: &str) -> Option<IpAddr> {

@@ -133,7 +133,7 @@ pub struct Config {
     pub rules_path: PathBuf,
 
     /// Path where coold writes the nft bridge-family allow snapshot.
-    /// The CLI's `coolify-mesh-fw.service` restores this on start/restart via
+    /// The firewall systemd unit restores this on start/restart via
     /// `nft -f /etc/coolify/allow.nft`. coold writes it on every rule mutate.
     #[arg(long, env = "COOLD_BRIDGE_RULES_PATH", default_value = "/etc/coolify/allow.nft")]
     pub bridge_rules_path: PathBuf,
