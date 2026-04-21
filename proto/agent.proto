@@ -1,0 +1,60 @@
+syntax = "proto3";
+package coolify.agent.v1;
+
+// Central is the gRPC server. coold dials central and opens this stream.
+// Flow: coold → ClientMsg (Hello first, then Responses).
+//       central → ServerMsg (Commands with request_id).
+service Agent {
+    rpc Stream(stream ClientMsg) returns (stream ServerMsg);
+}
+
+message ClientMsg {
+    oneof payload {
+        Hello hello = 1;
+        Response response = 2;
+    }
+}
+
+// First frame sent by coold after opening the stream.
+message Hello {
+    string host_mgmt_ip = 1;
+    string coold_version = 2;
+    uint32 schema_min = 3;
+    uint32 schema_max = 4;
+}
+
+// Command frame sent by central.
+message ServerMsg {
+    string request_id = 1;
+    oneof command {
+        ListContainersReq list_containers = 10;
+    }
+}
+
+// Response frame sent by coold in reply to a ServerMsg.
+message Response {
+    string request_id = 1;
+    oneof body {
+        ListContainersResp list_containers = 10;
+        Error error = 100;
+    }
+}
+
+message Error {
+    uint32 code = 1;
+    string message = 2;
+}
+
+message ListContainersReq {}
+
+message ListContainersResp {
+    repeated ContainerSummary containers = 1;
+}
+
+message ContainerSummary {
+    string id = 1;
+    string name = 2;
+    string image = 3;
+    string state = 4;
+    repeated string networks = 5;
+}

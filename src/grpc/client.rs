@@ -1,0 +1,125 @@
+use std::time::Duration;
+
+use anyhow::{anyhow, Context, Result};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::metadata::MetadataValue;
+use tonic::transport::Channel;
+use tonic::Request;
+use tracing::{info, warn};
+
+use crate::config::{Config, VERSION};
+use crate::grpc::handlers::handle;
+use crate::grpc::proto::{
+    agent_client::AgentClient, client_msg, ClientMsg, Hello,
+};
+use crate::podman::PodmanClient;
+
+pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
+    if config.grpc_disabled || config.central_url.is_none() {
+        info!("grpc transport disabled; skipping");
+        std::future::pending::<()>().await;
+        return Ok(());
+    }
+
+    let url = config.central_url.clone().unwrap();
+
+    let jwt = tokio::fs::read_to_string(&config.host_jwt_path)
+        .await
+        .with_context(|| format!("read host JWT from {}", config.host_jwt_path.display()))?;
+    let jwt = jwt.trim().to_string();
+    if jwt.is_empty() {
+        return Err(anyhow!(
+            "host JWT file {} is empty",
+            config.host_jwt_path.display()
+        ));
+    }
+
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match connect_and_serve(&url, &jwt, &config, &podman).await {
+            Ok(()) => {
+                warn!("grpc stream closed cleanly; reconnecting");
+                backoff = Duration::from_secs(1);
+            }
+            Err(e) => {
+                warn!(
+                    error = format!("{e:#}"),
+                    backoff_ms = backoff.as_millis(),
+                    "grpc stream failed"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+            }
+        }
+    }
+}
+
+async fn connect_and_serve(
+    url: &str,
+    jwt: &str,
+    config: &Config,
+    podman: &PodmanClient,
+) -> Result<()> {
+    let channel = Channel::from_shared(url.to_string())
+        .context("invalid central URL")?
+        .connect()
+        .await
+        .context("connect to central")?;
+
+    let bearer: MetadataValue<_> = format!("Bearer {jwt}")
+        .parse()
+        .context("build bearer metadata")?;
+
+    let mut client = AgentClient::with_interceptor(channel, move |mut req: Request<()>| {
+        req.metadata_mut()
+            .insert("authorization", bearer.clone());
+        Ok(req)
+    });
+
+    let (tx, rx) = mpsc::channel::<ClientMsg>(64);
+
+    tx.send(ClientMsg {
+        payload: Some(client_msg::Payload::Hello(Hello {
+            host_mgmt_ip: config.host_mgmt_ip.clone(),
+            coold_version: VERSION.to_string(),
+            schema_min: 1,
+            schema_max: 1,
+        })),
+    })
+    .await
+    .context("send Hello")?;
+
+    let outbound = ReceiverStream::new(rx);
+    let mut inbound = client
+        .stream(outbound)
+        .await
+        .context("open stream")?
+        .into_inner();
+
+    info!(central_url = url, "grpc stream established");
+
+    while let Some(msg) = inbound.message().await.context("receive ServerMsg")? {
+        let request_id = msg.request_id.clone();
+        let Some(command) = msg.command else {
+            warn!(%request_id, "ServerMsg has no command; ignoring");
+            continue;
+        };
+
+        let tx = tx.clone();
+        let podman = podman.clone();
+        tokio::spawn(async move {
+            let response = handle(request_id.clone(), command, &podman).await;
+            if let Err(e) = tx
+                .send(ClientMsg {
+                    payload: Some(client_msg::Payload::Response(response)),
+                })
+                .await
+            {
+                warn!(%request_id, error = %e, "failed to enqueue response");
+            }
+        });
+    }
+
+    Ok(())
+}

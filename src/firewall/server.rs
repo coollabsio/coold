@@ -28,6 +28,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 pub async fn run(config: Config) -> Result<()> {
     let Some(addr) = config.api_bind else {
         info!("COOLD_API_BIND unset; firewall API disabled");
+        std::future::pending::<()>().await;
         return Ok(());
     };
 

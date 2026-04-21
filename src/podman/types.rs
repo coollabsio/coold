@@ -9,6 +9,10 @@ pub struct Container {
     pub id: String,
     #[serde(default, rename = "Names")]
     pub names: Vec<String>,
+    #[serde(default, rename = "Image")]
+    pub image: String,
+    #[serde(default, rename = "State")]
+    pub state: String,
     #[serde(default, rename = "NetworkSettings")]
     pub network_settings: Option<ListNetworkSettings>,
 }

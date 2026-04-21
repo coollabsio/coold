@@ -45,6 +45,7 @@ pub async fn run(config: Config, corrosion: CorrosionClient) -> Result<()> {
 
     if gateways.is_empty() {
         info!("no namespace has a bridge gateway IP; DNS server disabled");
+        std::future::pending::<()>().await;
         return Ok(());
     }
 

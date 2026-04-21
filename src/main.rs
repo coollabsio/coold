@@ -2,6 +2,7 @@ mod config;
 mod corrosion;
 mod dns;
 mod firewall;
+mod grpc;
 mod model;
 mod podman;
 mod sync;

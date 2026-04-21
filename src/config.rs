@@ -142,6 +142,27 @@ pub struct Config {
     /// by `coolify init --default-deny` and jumped to from COOLIFY-INTRA.
     #[arg(long, env = "COOLD_CHAIN_NAME", default_value = "COOLIFY-ALLOW")]
     pub chain_name: String,
+
+    /// Central gRPC URL (e.g. `http://127.0.0.1:50051` for h2c or
+    /// `https://central.coolify.io:443` for TLS). When unset, the gRPC
+    /// transport is disabled and coold runs in REST-only / local mode.
+    #[arg(long, env = "COOLD_CENTRAL_URL")]
+    pub central_url: Option<String>,
+
+    /// Path to the per-host JWT file used to authenticate the outbound gRPC
+    /// stream. Must be readable; coold exits at boot if the file is absent or
+    /// empty and `central_url` is set.
+    #[arg(
+        long,
+        env = "COOLD_HOST_JWT_PATH",
+        default_value = "/etc/coolify/host-jwt"
+    )]
+    pub host_jwt_path: PathBuf,
+
+    /// Disable the outbound gRPC transport even when `central_url` is set.
+    /// Useful for alpha hosts that are not yet enrolled with central.
+    #[arg(long, env = "COOLD_GRPC_DISABLED", default_value = "false")]
+    pub grpc_disabled: bool,
 }
 
 impl Config {
