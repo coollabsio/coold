@@ -42,12 +42,16 @@ pub async fn run(config: Config) -> Result<()> {
     let store = FirewallStore::new(StoreConfig {
         chain_name: config.chain_name.clone(),
         rules_path: config.rules_path.clone(),
+        bridge_rules_path: config.bridge_rules_path.clone(),
     });
 
     // Best-effort chain bootstrap. ensure_chain is idempotent; this lets
     // the very first API call skip the chain-missing fallback path.
     if let Err(e) = store.ensure_chain().await {
         warn!(error = format!("{e:#}"), "initial ensure_chain failed; continuing");
+    }
+    if let Err(e) = store.ensure_bridge_chain().await {
+        warn!(error = format!("{e:#}"), "initial ensure_bridge_chain failed; continuing");
     }
 
     let state = ApiState {

@@ -235,6 +235,38 @@ pub fn parse_chain_line(line: &str, chain: &str) -> Option<AllowRule> {
     })
 }
 
+/// Render one nft statement to insert into `chain coolify_allow` in the
+/// `bridge coolify_bridge` family. Produces a single line with no trailing
+/// newline. The rule must already be normalized (id is populated).
+///
+/// Output shape:
+/// ```text
+/// add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr <src> ip daddr <dst> [ip protocol <proto> [th dport <port>]] accept comment "cid:<id>:<ns>"
+/// ```
+pub fn render_bridge_line(rule: &AllowRule) -> String {
+    let ns = if rule.namespace.is_empty() {
+        DEFAULT_NAMESPACE
+    } else {
+        &rule.namespace
+    };
+    let id = rule.id.as_deref().expect("render_bridge_line called on unnormalized rule (id is None); call .normalize() first");
+
+    let mut line = format!(
+        "add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr {} ip daddr {}",
+        rule.src, rule.dst
+    );
+
+    if let Some(proto) = &rule.proto {
+        line.push_str(&format!(" ip protocol {proto}"));
+        if let Some(port) = rule.port {
+            line.push_str(&format!(" th dport {port}"));
+        }
+    }
+
+    line.push_str(&format!(" accept comment \"cid:{id}:{ns}\""));
+    line
+}
+
 fn parse_ip_maybe_cidr(s: &str) -> Option<IpAddr> {
     let bare = s
         .strip_suffix("/32")
@@ -433,5 +465,79 @@ mod tests {
     fn parse_chain_line_rejects_non_append() {
         assert!(parse_chain_line("-N COOLIFY-ALLOW", "COOLIFY-ALLOW").is_none());
         assert!(parse_chain_line("-A OTHER -s 1.2.3.4 -d 5.6.7.8 -j ACCEPT", "COOLIFY-ALLOW").is_none());
+    }
+
+    // ── render_bridge_line tests ────────────────────────────────────────────
+
+    fn make_rule(src: &str, dst: &str, proto: Option<&str>, port: Option<u16>, ns: &str) -> AllowRule {
+        AllowRule {
+            src: ipv4(src),
+            dst: ipv4(dst),
+            proto: proto.map(str::to_string),
+            port,
+            namespace: ns.to_string(),
+            id: None,
+        }
+        .normalize()
+        .unwrap()
+    }
+
+    #[test]
+    fn test_render_bridge_line_tcp_port() {
+        let rule = make_rule("10.210.0.2", "10.210.1.3", Some("tcp"), Some(80), "default");
+        let line = render_bridge_line(&rule);
+        let id = rule.id.as_deref().unwrap();
+        let expected = format!(
+            "add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr 10.210.0.2 ip daddr 10.210.1.3 ip protocol tcp th dport 80 accept comment \"cid:{id}:default\""
+        );
+        assert_eq!(line, expected);
+    }
+
+    #[test]
+    fn test_render_bridge_line_udp_any_port() {
+        let rule = make_rule("10.210.0.2", "10.210.1.3", Some("udp"), None, "default");
+        let line = render_bridge_line(&rule);
+        assert!(line.contains("ip protocol udp"));
+        assert!(!line.contains("th dport"));
+    }
+
+    #[test]
+    fn test_render_bridge_line_no_proto_no_port() {
+        let rule = make_rule("10.210.0.2", "10.210.1.3", None, None, "default");
+        let line = render_bridge_line(&rule);
+        assert!(!line.contains("ip protocol"));
+        assert!(!line.contains("th dport"));
+        assert!(line.contains("accept"));
+    }
+
+    #[test]
+    fn test_render_bridge_line_namespace_in_comment() {
+        let rule_default = make_rule("10.210.0.2", "10.210.1.3", Some("tcp"), Some(80), "default");
+        let rule_alpha = make_rule("10.210.0.2", "10.210.1.3", Some("tcp"), Some(80), "alpha");
+        let line_default = render_bridge_line(&rule_default);
+        let line_alpha = render_bridge_line(&rule_alpha);
+
+        let id_default = rule_default.id.as_deref().unwrap();
+        let id_alpha = rule_alpha.id.as_deref().unwrap();
+
+        // (a) different cids
+        assert_ne!(id_default, id_alpha);
+        // (b) namespace suffix matches
+        assert!(line_default.contains(&format!("cid:{id_default}:default")));
+        assert!(line_alpha.contains(&format!("cid:{id_alpha}:alpha")));
+        // (c) lines differ only in cid and ns suffix
+        let stripped_default = line_default
+            .replace(&format!("cid:{id_default}:default"), "cid:HASH:NS");
+        let stripped_alpha = line_alpha
+            .replace(&format!("cid:{id_alpha}:alpha"), "cid:HASH:NS");
+        assert_eq!(stripped_default, stripped_alpha);
+    }
+
+    #[test]
+    fn test_render_bridge_line_stable() {
+        let rule = make_rule("10.210.0.2", "10.210.1.3", Some("tcp"), Some(443), "default");
+        let line1 = render_bridge_line(&rule);
+        let line2 = render_bridge_line(&rule);
+        assert_eq!(line1, line2);
     }
 }
