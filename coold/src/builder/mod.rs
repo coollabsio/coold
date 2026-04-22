@@ -242,8 +242,11 @@ impl BuilderCtx {
             .arg("LockPersonality=yes")
             .arg("-p")
             .arg("RestrictRealtime=yes")
+            // buildah creates mount + user namespaces to extract image layers
+            // ("creating mount namespace before pivot"). Allow those two but
+            // continue denying cgroup/net/uts/pid/ipc that builds never need.
             .arg("-p")
-            .arg("RestrictNamespaces=yes")
+            .arg("RestrictNamespaces=mnt user")
             .arg("-p")
             .arg("SystemCallArchitectures=native")
             .arg("--")
