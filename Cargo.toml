@@ -1,5 +1,9 @@
 [workspace]
-members = ["coold", "broker", "builder", "builder-core", "proto"]
+members = ["coold", "broker", "builder", "builder-core", "e2e-tests", "proto"]
+# e2e-tests is a live-server test harness; exclude it from default builds
+# so nightly + local `cargo build --workspace` stay fast. Run explicitly
+# with `cargo test -p e2e-tests -- --ignored --test-threads=1`.
+default-members = ["coold", "broker", "builder", "builder-core", "proto"]
 resolver = "2"
 
 [workspace.package]
