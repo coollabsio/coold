@@ -49,6 +49,7 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
         ctx.ensure_work_root()
             .await
             .with_context(|| format!("mkdir -p {}", config.builder_work_dir.display()))?;
+        BuilderCtx::reap_orphan_units().await;
         info!(
             work_dir = %config.builder_work_dir.display(),
             capacity = config.builder_capacity,

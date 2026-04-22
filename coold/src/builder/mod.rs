@@ -72,6 +72,53 @@ impl BuilderCtx {
         tokio::fs::create_dir_all(&self.work_root).await
     }
 
+    /// Stop any `coolify-build-*.service` transient units left behind by a
+    /// prior coold run. A clean coold shutdown lets `systemd-run --pipe
+    /// --wait` tear its unit down via SIGTERM propagation, but SIGKILL / OOM
+    /// / host crash leaves the unit running under PID 1 until RuntimeMaxSec
+    /// hits. This sweeper reclaims them on startup.
+    pub async fn reap_orphan_units() {
+        let out = match Command::new("systemctl")
+            .args([
+                "list-units",
+                "--all",
+                "--no-legend",
+                "--plain",
+                "--type=service",
+                "coolify-build-*.service",
+            ])
+            .output()
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(error = %e, "systemctl list-units failed; skipping orphan sweep");
+                return;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<String> = stdout
+            .lines()
+            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+            .filter(|n| n.starts_with("coolify-build-") && n.ends_with(".service"))
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        warn!(count = names.len(), units = ?names,
+              "reaping orphaned builder units from a prior coold run");
+        let _ = Command::new("systemctl")
+            .arg("stop")
+            .args(&names)
+            .status()
+            .await;
+        let _ = Command::new("systemctl")
+            .arg("reset-failed")
+            .args(&names)
+            .status()
+            .await;
+    }
+
     /// Spawn a build. Returns immediately after the subprocess is started;
     /// the reader task stays alive in a detached tokio task and sends the
     /// final `Response` frame on `tx` when the subprocess exits.
@@ -156,23 +203,45 @@ impl BuilderCtx {
             .arg(format!("CPUQuota={}", self.cpu_quota))
             .arg("-p")
             .arg("PrivateTmp=yes")
-            // ProtectSystem=full keeps /usr, /boot, /efi read-only but leaves
-            // /var, /run, /etc writable — buildah needs to touch
-            // /var/lib/containers/storage and /run/containers (netavark locks,
-            // image overlay mountpoints), so "strict" breaks the build with
-            // "open /run/lock/netavark.lock: read-only file system".
+            // ProtectSystem=strict mounts / read-only except /dev, /proc, /sys
+            // and the explicit ReadWritePaths below. Full allowlist:
+            //   * `work_dir`                — git clone + generated Containerfile
+            //   * /var/lib/containers       — buildah image store + overlays
+            //   * /run/containers           — buildah/libpod runtime state
+            //   * /run/netavark             — network-plugin state
+            //   * /run/lock                 — netavark.lock
+            // /tmp + /var/tmp are ephemeral via PrivateTmp; /home and /root
+            // are hidden via ProtectHome.
             .arg("-p")
-            .arg("ProtectSystem=full")
+            .arg("ProtectSystem=strict")
             .arg("-p")
             .arg("ProtectHome=yes")
             .arg("-p")
             .arg(format!("ReadWritePaths={}", work_dir.display()))
             .arg("-p")
-            .arg("ReadWritePaths=/var/lib/containers/storage")
+            .arg("ReadWritePaths=/var/lib/containers")
             .arg("-p")
             .arg("ReadWritePaths=/run/containers")
             .arg("-p")
+            .arg("ReadWritePaths=/run/netavark")
+            .arg("-p")
             .arg("ReadWritePaths=/run/lock")
+            // Defense-in-depth. Builder runs as root for buildah's benefit,
+            // so lock down everything not strictly required. CAP_* trim and
+            // SystemCallFilter are deferred until the ReadWritePaths set is
+            // stable (easier to iterate on one dimension at a time).
+            .arg("-p")
+            .arg("NoNewPrivileges=yes")
+            .arg("-p")
+            .arg("RestrictSUIDSGID=yes")
+            .arg("-p")
+            .arg("LockPersonality=yes")
+            .arg("-p")
+            .arg("RestrictRealtime=yes")
+            .arg("-p")
+            .arg("RestrictNamespaces=yes")
+            .arg("-p")
+            .arg("SystemCallArchitectures=native")
             .arg("--")
             .arg(&self.builder_bin)
             .arg(&req_path)
