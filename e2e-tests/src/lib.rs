@@ -252,6 +252,19 @@ impl Env {
         );
         self.ssh(host, &cmd).map(|s| s.contains('Y')).unwrap_or(false)
     }
+
+    /// `stat -c '%F|%a|%U' <path>` → `(kind, mode, owner)`. Returns `Err`
+    /// on stat failure (missing file, ssh error). Callers usually assert
+    /// on the tuple directly.
+    pub fn stat_spec(&self, host: &str, path: &str) -> Result<(String, String, String), String> {
+        let out = self.ssh(host, &format!("stat -c '%F|%a|%U' {path}"))?;
+        let line = out.trim();
+        let mut parts = line.split('|');
+        let kind = parts.next().unwrap_or("").to_owned();
+        let mode = parts.next().unwrap_or("").to_owned();
+        let owner = parts.next().unwrap_or("").to_owned();
+        Ok((kind, mode, owner))
+    }
 }
 
 fn must(key: &str) -> String {

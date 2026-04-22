@@ -412,105 +412,234 @@ N_central = ceil(fleet_size / 30_000) + 1  # +1 for headroom / drain
 Assumes commodity 16-core / 32 GB nodes running tonic. Increase divisor
 on larger hardware; decrease if logs-follow subscriptions are common.
 
-## 17. Central topology: broker + Laravel
+## 16. Central topology: broker + Laravel
 
 ### Why a separate broker service
 
 Laravel (Coolify central brain) runs on a request/response PHP worker model.
 Workers cycle on deploy and cannot safely hold thousands of long-lived HTTP/2
-streams. The `broker` binary fills this gap: it is the gRPC server
-that coold dials, and it bridges commands and responses to Laravel via Redis.
+streams. The `broker` binary fills this gap: it is the gRPC server that
+coold dials, and it exposes a synchronous HTTP lane over a Unix domain
+socket that Laravel calls per-request.
 
 ```
 [coold hosts]
-     │  grpcs://central.example.com:6443
+     │  grpcs://central.example.com:6443  (JWT bearer, HTTP/2 bidi stream)
      ▼
-[broker]  ←→  Redis (coold:cmd stream, coold:resp:{id} lists)
-                              │
-                         [Laravel]  (brain: scheduler, deploy controller, RBAC, etc.)
+[broker]
+     ▲  HTTP over /run/coolify/broker.sock  (0660, group = PHP-FPM)
+     │
+[Laravel]  (brain: scheduler, deploy controller, RBAC, etc.)
 ```
+
+No Redis, no message queue. The broker owns the connection pool; Laravel
+treats it as a local HTTP backend.
 
 ### Self-hosted topology (default)
 
 Single central VM. No load balancer required.
 
-- `broker` binds `0.0.0.0:6443` (systemd unit, starts before Laravel).
+- `broker` binds `0.0.0.0:6443` for coold gRPC (systemd unit, starts
+  before Laravel).
+- `broker` also binds the UDS at `/run/coolify/broker.sock`. Mode `0660`
+  when `BROKER_UNIX_SOCKET_GROUP` is set, else `0600`. The PHP-FPM group
+  goes in `BROKER_UNIX_SOCKET_GROUP` so Laravel workers can dial it
+  without a TCP hop or auth handshake.
 - Laravel runs on `:80` / `:443` via nginx. No port conflict.
-- Redis on localhost. Both Laravel and broker connect to it.
-- TLS on broker: Let's Encrypt cert (if domain available) or self-signed
-  generated at `coolify init`, pinned in `/etc/coolify/broker.pin`.
+- TLS on broker gRPC only: Let's Encrypt cert (if domain available) or
+  self-signed generated at `coolify init`, pinned in
+  `/etc/coolify/broker.pin`.
 - Firewall: open port `6443` inbound for coold connections.
 
-### Cloud SaaS topology (fleet)
+### Cloud / multi-broker
 
-Multiple broker instances behind an L4 LB (per §15 sizing):
+Single broker per central VM / pod for the current release. Multi-broker
+routing (Corrosion `host_routes` fan-out, inter-broker command forward)
+is deferred until horizontal central is actually needed — the UDS lane
+is local-only by design, so scaling requires either sidecar pinning
+(Laravel pod → local broker) or a new inter-broker RPC.
 
-- L4 LB (TCP pass-through) on `:443` → broker fleet.
-- Each broker writes `host_routes(host_id, broker_instance_id)` to Corrosion
-  on `Hello`. Inter-broker command forwarding resolves which instance owns
-  a given `host_id`.
-- Laravel fleet behind L7 LB on `:443`; broker fleet on separate VIP.
+### UDS wire surface (Laravel → broker)
 
-### Redis protocol (Laravel → broker → coold)
+All handlers live in `broker/src/unix_bridge.rs`. Axum routes:
 
-| Key | Type | Producer | Consumer |
-|---|---|---|---|
-| `coold:cmd` | Stream | Laravel (`XADD`) | broker (`XREADGROUP GROUP broker`) |
-| `coold:resp:{request_id}` | List | broker (`LPUSH`) | Laravel (`BLPOP`) |
-| `coold:hosts` | Hash | broker (on `Hello`) | Laravel (dashboard) |
+```
+GET  /v1/health                              -> {"ok": true}
+POST /v1/coold/dispatch                      sync, 10 s timeout
+POST /v1/build/dispatch                      202 Accepted + {request_id}
+GET  /v1/build/result/:request_id            long-poll, ?timeout_ms= (default 30 000)
+POST /v1/build/:request_id/cancel            204 No Content
+```
 
-**Dispatch flow:**
-1. Laravel `XADD coold:cmd * payload <json>` where JSON = `{host_id, request_id, command: {type: ...}}`.
-2. Broker consumes, looks up `host_id` in `DashMap`, sends `ServerMsg` over gRPC.
-3. coold replies with `Response`; broker `LPUSH coold:resp:{request_id}` with JSON result.
-4. Laravel `BLPOP coold:resp:{request_id} 30` (30 s timeout).
-5. Unknown host or timeout → broker pushes `{status: "error", code: 404|504}`.
+Access control = filesystem perms. No TLS, no bearer, no per-request
+authn — any local caller with group membership on the socket is trusted.
+JWT stays on the coold→broker gRPC stream where it belongs.
 
-Response keys expire after 300 s (`EXPIRE`) so stale entries self-clean.
+### Envelope schema (`broker/src/envelope.rs`)
 
-### coold config change
+Coold dispatch — request and response:
+
+```json
+POST /v1/coold/dispatch
+{ "host_id": "10.64.0.7",
+  "request_id": "01HX…",
+  "command": { "type": "list_containers" } }
+
+// response (sync)
+{ "request_id": "01HX…",
+  "status": "ok",
+  "data": [ { "id": "...", "name": "...", "image": "...", "state": "...", "networks": [...] } ] }
+// or
+{ "request_id": "01HX…",
+  "status": "error",
+  "code": 404, "message": "host not connected" }
+```
+
+Only `list_containers` is wired today. Every future verb from §3 adds a
+variant to `CommandPayload` and a match arm in `route_coold`.
+
+Build dispatch:
+
+```json
+POST /v1/build/dispatch
+{ "host_id": "10.64.0.7",                // optional — absent = broker picks
+  "request_id": "01HY…",
+  "command": { "type": "static_build",
+               "repo_url": "https://…",
+               "git_ref": "main",
+               "target_image": "localhost/web:v2",
+               "output_dir": "dist",
+               "base_image": "docker.io/library/nginx:alpine" } }
+
+// 202 Accepted
+{ "request_id": "01HY…" }
+
+// later:
+GET /v1/build/result/01HY…?timeout_ms=30000
+{ "request_id": "01HY…",
+  "status": "ok",
+  "digest": "sha256:…",
+  "registry_ref": "localhost/web:v2",
+  "duration_ms": 12345 }
+```
+
+### Coold dispatch flow (step by step)
+
+1. Laravel `POST /v1/coold/dispatch` with `{host_id, request_id, command}`.
+2. `route_coold` checks `Streams::get(host_id)`; miss → 404.
+3. `Pending::insert_waiting` reserves a slot (capped at
+   `BROKER_PENDING_MAX`, default 10 000; overflow → 503).
+4. Handler calls `Pending::park(request_id)` → `oneshot::Receiver`, then
+   pushes `ServerMsg` into the host's `mpsc::Sender<ServerMsg>` feeding
+   the open `Agent.Stream` response half.
+5. coold executes the command against `/run/podman/podman.sock` and
+   writes `Response { request_id, body }` back on the same stream.
+6. Broker `grpc_server::deliver_response` looks up the pending entry by
+   `request_id`, translates the proto body to `ResponseBody` via
+   `ResponseBody::try_from_proto`, and `Pending::deliver` fires every
+   parked oneshot sink, then transitions the entry to `Landed` with a
+   30 s TTL (`LANDED_TTL_SECS`) so a late poller on the build lane can
+   still claim results.
+7. HTTP handler receives the body and returns `ResponseEnvelope` to
+   Laravel. No response within 10 s (`DISPATCH_TIMEOUT_SECS`, hard-coded
+   in `state.rs`) → sweeper evicts the entry, handler returns 504.
+
+Unknown `host_id` → 404. Host stream dropped mid-dispatch → 503.
+
+### Build dispatch flow
+
+1. Laravel `POST /v1/build/dispatch`. `route_build` picks the target:
+   - `host_id` present → require `"builder"` cap on that stream, else 503.
+   - `host_id` absent → `Streams::pick_host_with_cap("builder")` (first
+     match; no load balancing), else 503.
+2. `Pending::insert_waiting` with `PendingKind::Build`; handler returns
+   202 immediately. Build `Waiting` entries are **not** swept by the
+   timeout sweeper — the systemd-run transient unit's `RuntimeMaxSec`
+   is the real ceiling.
+3. Laravel polls `GET /v1/build/result/:id?timeout_ms=…`. `Pending::park`
+   either hands back a cached `Landed` body or returns a receiver that
+   awaits the in-flight response.
+4. coold streams the final `Response` back the same way coold dispatch
+   does; `deliver_response` fans out to parked pollers.
+5. Cancel: `POST /v1/build/:request_id/cancel` → `route_build` resolves
+   the owning host from `Pending`, emits `CancelBuild` on its stream,
+   coold runs `systemctl kill --signal=SIGTERM <scope>`.
+
+### Broker config (env vars)
+
+All sourced from `broker/src/config.rs`:
+
+| var | default | role |
+|---|---|---|
+| `BROKER_GRPC_BIND` | `0.0.0.0:6443` | coold dials this. Build traffic shares this port — no separate builder listener. |
+| `BROKER_UNIX_SOCKET_PATH` | `/run/coolify/broker.sock` | Laravel UDS. |
+| `BROKER_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
+| `BROKER_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |
+| `BROKER_DISPATCH_TIMEOUT_SECS` | `30` | **currently unused** — handler uses the 10 s `DISPATCH_TIMEOUT_SECS` const in `state.rs`. TODO: wire the flag through. |
+| `BROKER_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | verifies coold stream JWT. |
+| `BROKER_LOG_LEVEL` | `info` | `tracing` EnvFilter. |
+
+### coold config rename
 
 `COOLD_CENTRAL_URL` renamed to `COOLD_BROKER_URL`. Update enrollment and
-`coolify init` templates when central enrollment is implemented. Semantics
-identical; only the name changes to reflect the actual target.
+`coolify init` templates when central enrollment is implemented.
+Semantics identical; only the name changes to reflect the actual target.
 
 ### Repository layout
 
 ```
-Cargo.toml        # workspace root (members: coold, broker, proto)
+Cargo.toml          # workspace root (members: coold, broker, builder, builder-core, proto, e2e-tests)
 proto/
-  agent.proto     # shared Protobuf definitions
-  Cargo.toml      # coolify-proto crate (runs tonic-build)
+  agent.proto       # shared Protobuf: Agent.Stream, Hello, ServerMsg, ClientMsg, Response,
+                    # BuildRequest, CancelBuild, BuildResponseBody, capabilities, builder_capacity
+  Cargo.toml
   src/lib.rs
 coold/
-  Cargo.toml      # depends on coolify-proto
-  src/
+  Cargo.toml
+  src/              # dials broker gRPC, podman proxy, firewall writer, DNS, builder subprocess driver
 broker/
-  Cargo.toml      # broker binary; depends on coolify-proto
+  Cargo.toml
   src/
-    main.rs       # tonic AgentServer + spawns redis_bridge
-    config.rs     # BROKER_GRPC_BIND, BROKER_REDIS_URL, BROKER_JWT_PUBLIC_KEY_PATH
-    state.rs      # Streams: DashMap<host_id, mpsc::Sender<ServerMsg>>
-    auth.rs       # JWT verify (ES256/RS256, sub = host_id)
-    redis_bridge.rs  # XREADGROUP consumer + push_response
+    main.rs         # tonic AgentServer (grpc_server mod) + pending_sweeper
+    config.rs       # BROKER_* env vars (see table above)
+    auth.rs         # JWT verify (ES256/RS256, sub = host_id, caps claim)
+    state.rs        # Streams: DashMap<host_id, StreamHandle{tx, caps, builder_capacity}>
+                    # Pending: DashMap<request_id, PendingEntry{Waiting|Landed}>
+    envelope.rs     # Laravel-facing JSON: DispatchEnvelope, ResponseEnvelope,
+                    # BuildDispatchEnvelope, BuildResponseEnvelope
+    routing.rs      # pure routing (no I/O): route_coold, route_build → RouteOutcome
+    unix_bridge.rs  # axum UDS server, handlers for /v1/coold/* and /v1/build/*
+builder/
+  Cargo.toml
+  src/main.rs       # one-shot CLI: reads request.json, runs builder-core, writes result.json
+builder-core/
+  src/              # reusable git + buildah pipeline (static_build.rs etc.)
 ```
-
-## 16. Cross-references
-
-- Bootstrap + CLI: `coolify-cli/CLAUDE.md`, `coolify-cli/CONTROL_PLANE.md`.
-- `coolify firewall` CLI (alpha, SSH-bounced REST client of local coold):
-  `coolify-cli/CLAUDE.md` § "`coolify firewall`".
-- Wire surface + transport: mirror of §3, §4 here ↔ `CONTROL_PLANE.md §2`.
 
 ## 17. builder — OCI image build agent
 
-`builder/` is a separate binary in this Cargo workspace. It is **not** part of coold. coold never runs builds.
+`builder/` is a separate binary in this Cargo workspace. coold never
+runs builds directly; it spawns the builder per-request.
 
 ### Role
 
-- Receives `BuildRequest` from broker via outbound gRPC stream (`Builder.Stream` service, `proto/builder.proto`).
-- Clones repo (shallow), runs the appropriate build toolchain, writes OCI image to shared podman containers-storage (`/var/lib/containers/storage`).
-- Returns `BuildResult { digest, registry_ref }` to broker → broker pushes to `build:resp:{request_id}` → Laravel BLPOPs.
+- Builder no longer holds its own gRPC stream. Commit `1024747`
+  collapsed it onto coold's `Agent.Stream`: one stream per host, not
+  two. Coold advertises `"builder"` in its Hello `capabilities` (gated
+  by `COOLD_BUILDER_ENABLED`); the broker capability-routes build
+  envelopes to any host that carries it.
+- Per build: coold spawns the builder binary inside a
+  `systemd-run --pipe --scope coolify-build-<request_id>` transient
+  unit for cgroup + FS isolation (`PrivateTmp`, `ProtectSystem=strict`,
+  `ReadWritePaths` allowlist, `MemoryMax`, `CPUQuota`, `RuntimeMaxSec`,
+  `IPAddressDeny` for mgmt / container CIDRs).
+- Builder clones the repo (shallow), runs the toolchain, writes the OCI
+  image to shared podman containers-storage
+  (`/var/lib/containers/storage`).
+- Builder emits NDJSON frames on stdout **and** durably to
+  `<work_dir>/events.ndjson` (see persistence below).
+- Coold parses the final frame and relays a `Response` over the
+  existing stream; broker delivers it on the build lane.
 
 ### Supported stacks (v0.1 MVP)
 
@@ -523,17 +652,69 @@ broker/
 
 ### Storage model (single-node MVP)
 
-builder writes to the same `/var/lib/containers/storage` as coold + podman. No registry, no push over the network. coold calls `containers/create image=localhost/<app>@sha256:...`; image is already present. Multi-node requires a registry or `podman save`/`load` — deferred.
+Builder writes to the same `/var/lib/containers/storage` as coold +
+podman. No registry, no push over the network. coold calls
+`containers/create image=localhost/<app>@sha256:...`; image is already
+present. Multi-node requires a registry or `podman save`/`load` —
+deferred.
+
+### Persistence (survive coold restart)
+
+Commit `8ac89a1` makes builds durable across a coold upgrade or crash.
+
+- **Durable event log**: every NDJSON frame is appended to
+  `<work_dir>/events.ndjson`. Stdout remains best-effort — SIGPIPE is
+  ignored at builder startup and write errors are swallowed, so a dead
+  reader (coold gone) never terminates the build.
+- **Final outcome**: atomically written (`.tmp` + `rename`) as
+  `<work_dir>/result.json` on success or `<work_dir>/error.json` on
+  error / cancel. Exit codes: 0 success, 1 build error, 2 usage/IO
+  error, 130 on SIGTERM.
+- **Restart adoption**: coold's `resume_or_reap` runs after the outbound
+  gRPC mpsc channel is live but before Hello. For every
+  `coolify-build-*.service` found on disk it classifies the unit:
+  - **active** → adopt: re-register in `active_builds` (cancel routing
+    keeps working), spawn a task that polls `systemctl is-active` every
+    2 s and, on exit, reads `result.json` / `error.json` and emits the
+    `Response` on the new stream.
+  - **inactive + `result.json`** → emit success `Response` immediately.
+  - **inactive + `error.json`** → emit error `Response` immediately.
+  - **inactive + neither** → emit `500 builder exited without result
+    file` so Laravel gets a terminal error instead of hanging.
+- Broker-side: no change. `Response` envelopes carry `request_id`; the
+  broker routes by lookup in `Pending` regardless of which coold stream
+  (old or restarted) delivered them. If both broker and coold restart,
+  delivery still works as long as Laravel's poller is still holding
+  `GET /v1/build/result/:id`.
+
+### Cancellation
+
+`POST /v1/build/:request_id/cancel` →
+`route_build(Cancel)` → broker finds the owning host in `Pending`,
+pushes `CancelBuild` over the stream → coold runs `systemctl kill
+--signal=SIGTERM <scope>`. The cgroup kill takes the builder, buildah,
+and git down together.
 
 ### Ports
 
-- broker coold gRPC: `:6443` (existing)
-- broker builder gRPC: `:6444` (new, `BROKER_BUILDER_GRPC_BIND`)
+- broker coold + build gRPC: `:6443` (single listener).
+- No `:6444`. The separate builder listener was removed in `1024747`.
 
 ### Single-node systemd layout
 
 ```
-coold.service   → dials broker :6443
-builder.service → dials broker :6444
-broker.service  → listens :6443 + :6444, bridges Redis ↔ gRPC
+coold.service    → dials broker :6443, advertises "builder" cap when enabled,
+                   spawns builder subprocesses in transient units per build
+broker.service   → listens :6443 (coold gRPC) + /run/coolify/broker.sock (Laravel UDS)
 ```
+
+Builder has no long-lived unit; each build runs under
+`coolify-build-<request_id>.service` (transient, cleaned by systemd on
+exit or by coold's `resume_or_reap` on next start).
+
+## 18. Cross-references
+
+- Bootstrap + CLI: `coolify-cli/CLAUDE.md`, `coolify-cli/CONTROL_PLANE.md`.
+- `coolify firewall` CLI (alpha, SSH-bounced REST client of local coold):
+  `coolify-cli/CLAUDE.md` § "`coolify firewall`".
+- Wire surface + transport: mirror of §3, §4 here ↔ `CONTROL_PLANE.md §2`.

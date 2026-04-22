@@ -16,6 +16,47 @@ const SMALL_REPO: &str = "https://github.com/mdn/beginner-html-site";
 // Kernel repo used to keep a build in-flight for cancel / restart tests.
 const SLOW_REPO: &str = "https://github.com/torvalds/linux";
 
+/// Assert the on-disk artifacts for an in-flight build have the expected
+/// mode + owner. coold creates the work dir at `0o700` and writes
+/// `request.json` at `0o600`; the builder opens `events.ndjson` at
+/// `0o600`. Called while a build is running — the work tree is torn down
+/// after the request resolves.
+fn assert_build_artifact_perms(e: &Env, host: &str, req: &str) {
+    let work_dir = format!("/var/lib/coolify-builder/work/{req}");
+    let request_json = format!("{work_dir}/request.json");
+    let events_ndjson = format!("{work_dir}/events.ndjson");
+
+    let (kind, mode, owner) = e
+        .stat_spec(host, &work_dir)
+        .unwrap_or_else(|err| panic!("stat {work_dir}: {err}"));
+    assert_eq!(kind, "directory", "{work_dir} kind={kind:?}");
+    assert_eq!(mode, "700", "{work_dir} mode={mode}, expected 700");
+    assert_eq!(owner, "root", "{work_dir} owner={owner}, expected root");
+
+    let (kind, mode, owner) = e
+        .stat_spec(host, &request_json)
+        .unwrap_or_else(|err| panic!("stat {request_json}: {err}"));
+    assert_eq!(kind, "regular file", "{request_json} kind={kind:?}");
+    assert_eq!(mode, "600", "{request_json} mode={mode}, expected 600");
+    assert_eq!(owner, "root", "{request_json} owner={owner}, expected root");
+
+    // events.ndjson is opened by the builder after exec. Poll briefly so
+    // the assertion doesn't race the spawn.
+    assert!(
+        wait_until(
+            || e.stat_spec(host, &events_ndjson).is_ok(),
+            Duration::from_secs(10),
+        ),
+        "{events_ndjson} never appeared"
+    );
+    let (kind, mode, owner) = e
+        .stat_spec(host, &events_ndjson)
+        .unwrap_or_else(|err| panic!("stat {events_ndjson}: {err}"));
+    assert_eq!(kind, "regular file", "{events_ndjson} kind={kind:?}");
+    assert_eq!(mode, "600", "{events_ndjson} mode={mode}, expected 600");
+    assert_eq!(owner, "root", "{events_ndjson} owner={owner}, expected root");
+}
+
 #[test]
 #[ignore = "requires live cluster; set BUILDER_HOST/COOLD_ONLY_HOST/... and run with --ignored"]
 fn pin_to_builder_host() {
@@ -114,6 +155,13 @@ fn build_cancel_emits_stage_cancel() {
         ),
         "transient unit never activated"
     );
+
+    // In-flight build artifacts must exist with tight perms. coold writes
+    // request.json before spawning the unit, so by the time the unit is
+    // active the work dir + envelope are guaranteed present. events.ndjson
+    // is opened by the builder process on startup; poll briefly to dodge
+    // the race with the exec.
+    assert_build_artifact_perms(&e, &e.builder_host, &req);
 
     e.cancel_build(&req);
 

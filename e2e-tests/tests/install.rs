@@ -39,6 +39,7 @@ fn assert_central_units(ssh_key: &str, host: &str) {
         ok(&format!("{host}: systemd unit {unit} active"));
     }
     assert_broker_socket(ssh_key, host);
+    assert_core_file_perms(ssh_key, host);
 }
 
 /// Verify the broker UDS is present, is a socket, has the expected
@@ -58,7 +59,9 @@ fn assert_broker_socket(ssh_key: &str, host: &str) {
     ok(&format!("{host}: {SOCK} is a unix socket"));
 
     // 2. Perms: 0600 (dev default) or 0660 (group configured). Owner must
-    //    be the broker user (root under the default systemd unit).
+    //    be root under the default systemd unit. When mode is 660 the
+    //    group must be non-empty and distinct from root (group is the
+    //    point of the relaxed mode).
     let stat_mode = ssh(ssh_key, host, &format!("stat -c '%a %U %G' {SOCK}"))
         .unwrap_or_else(|e| panic!("stat -c mode {SOCK} on {host}: {e}"));
     let stat_mode = stat_mode.trim();
@@ -70,6 +73,16 @@ fn assert_broker_socket(ssh_key: &str, host: &str) {
         mode == "600" || mode == "660",
         "{SOCK} on {host} mode={mode}, expected 600 or 660 ({stat_mode})"
     );
+    assert_eq!(
+        owner, "root",
+        "{SOCK} on {host} owner={owner}, expected root ({stat_mode})"
+    );
+    if mode == "660" {
+        assert!(
+            !group.is_empty() && group != "root",
+            "{SOCK} on {host} mode=660 but group={group:?} (expected a non-root group)"
+        );
+    }
     ok(&format!(
         "{host}: {SOCK} mode={mode} owner={owner} group={group}"
     ));
@@ -86,6 +99,64 @@ fn assert_broker_socket(ssh_key: &str, host: &str) {
         "broker UDS /v1/health did not return ok on {host}: {ping:?}"
     );
     ok(&format!("{host}: broker UDS /v1/health → ok"));
+}
+
+/// Verify the runtime dirs + systemd unit files coold relies on exist,
+/// are the right object type, and have the expected mode + owner. Called
+/// on every host that runs broker (central). Covers the broker parent
+/// dir, the builder work tree, and both systemd unit files.
+fn assert_core_file_perms(ssh_key: &str, host: &str) {
+    // (path, expected `stat -c %F` kind, allowed mode strings, expected owner)
+    let specs: &[(&str, &str, &[&str], &str)] = &[
+        ("/run/coolify", "directory", &["700", "750", "755"], "root"),
+        (
+            "/var/lib/coolify-builder",
+            "directory",
+            &["700", "750", "755"],
+            "root",
+        ),
+        (
+            "/var/lib/coolify-builder/work",
+            "directory",
+            &["700"],
+            "root",
+        ),
+        (
+            "/etc/systemd/system/coold.service",
+            "regular file",
+            &["644"],
+            "root",
+        ),
+        (
+            "/etc/systemd/system/broker.service",
+            "regular file",
+            &["644"],
+            "root",
+        ),
+    ];
+
+    for (path, want_kind, allowed_modes, want_owner) in specs {
+        let out = ssh(ssh_key, host, &format!("stat -c '%F|%a|%U' {path}"))
+            .unwrap_or_else(|e| panic!("stat {path} on {host}: {e}"));
+        let line = out.trim();
+        let mut parts = line.split('|');
+        let kind = parts.next().unwrap_or("");
+        let mode = parts.next().unwrap_or("");
+        let owner = parts.next().unwrap_or("");
+        assert_eq!(
+            kind, *want_kind,
+            "{path} on {host} kind={kind:?}, expected {want_kind:?} ({line})"
+        );
+        assert!(
+            allowed_modes.contains(&mode),
+            "{path} on {host} mode={mode}, expected one of {allowed_modes:?} ({line})"
+        );
+        assert_eq!(
+            owner, *want_owner,
+            "{path} on {host} owner={owner}, expected {want_owner} ({line})"
+        );
+        ok(&format!("{host}: {path} kind={kind} mode={mode} owner={owner}"));
+    }
 }
 
 fn step(msg: &str) {
