@@ -86,7 +86,7 @@ pub struct PendingEntry {
     pub kind: PendingKind,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PendingKind {
     Coold,
     Build,
