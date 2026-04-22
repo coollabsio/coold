@@ -1,27 +1,26 @@
 //! Live-server test harness for the coold/broker/builder stack.
 //!
-//! Tests are written as Rust integration tests under `tests/`, marked
-//! `#[ignore]` so default `cargo test` skips them. Run with:
+//! Tests are Rust integration tests under `tests/`, marked `#[ignore]` so
+//! default `cargo test` skips them. Every suite provisions its own
+//! ephemeral Hetzner cluster via [`hetzner::EphemeralCluster`], runs
+//! `coolify init apply` from the local `coolify` binary, then exercises
+//! the black-box HTTP/UDS/systemd contract over SSH. No broker/coold
+//! code is linked.
+//!
+//! Run with:
 //!
 //! ```text
-//! BUILDER_HOST=<host-a> \
-//! COOLD_ONLY_HOST=<host-b> \
-//! BUILDER_MGMT=<wg0-ip-of-host-a> \
-//! COOLD_ONLY_MGMT=<wg0-ip-of-host-b> \
-//! CENTRAL_HOST=<central-host> \
+//! HETZNER_TOKEN=... HETZNER_PROJECT=... \
 //! SSH_KEY=~/.ssh/<key> \
-//! cargo test -p e2e-tests -- --ignored --test-threads=1
+//! COOLIFY_BIN=$(which coolify) \
+//! cargo test -p e2e-tests -- --ignored --nocapture --test-threads=1
 //! ```
 //!
-//! `--test-threads=1` is mandatory: the tests dispatch real builds against
-//! a shared cluster, and running them in parallel overwhelms the
-//! `COOLD_BUILDER_CAPACITY` semaphore and races on `buildah images` state
-//! shared across hosts.
-//!
-//! The harness drives the broker UDS via `ssh + curl --unix-socket` on the
-//! central host and asserts remote state via `buildah images` and
-//! `systemctl is-active`. No broker/coold code is linked — tests exercise
-//! the black-box contract.
+//! `--test-threads=1` is mandatory: the tests dispatch real builds and
+//! running them in parallel overwhelms the `COOLD_BUILDER_CAPACITY`
+//! semaphore and races on `buildah images` state shared across hosts.
+//! VMs are deleted via [`hetzner::EphemeralCluster`]'s RAII `Drop`, so
+//! panics during assertions still clean up paid resources.
 
 use std::process::Command;
 use std::thread;
@@ -90,37 +89,34 @@ pub struct Env {
     pub cool_only_mgmt: String,
     pub central_host: String,
     pub ssh_key: String,
-    pub ssh_user: String,
 }
 
 impl Env {
-    pub fn from_env() -> Self {
-        load_dotenv();
+    /// Build from a live [`hetzner::EphemeralCluster`] provisioned with
+    /// 2 hosts (A = central + builder, B = coold-only) and the wg0
+    /// addresses resolved on each host after `coolify init apply`.
+    pub fn from_cluster(
+        cluster: &hetzner::EphemeralCluster,
+        builder_mgmt: String,
+        cool_only_mgmt: String,
+    ) -> Self {
+        let hosts = cluster.hosts();
+        assert_eq!(hosts.len(), 2, "Env::from_cluster expects 2 hosts");
         Self {
-            builder_host: must("BUILDER_HOST"),
-            cool_only_host: must("COOLD_ONLY_HOST"),
-            builder_mgmt: must("BUILDER_MGMT"),
-            cool_only_mgmt: must("COOLD_ONLY_MGMT"),
-            central_host: must("CENTRAL_HOST"),
-            ssh_key: must("SSH_KEY"),
-            ssh_user: std::env::var("SSH_USER").unwrap_or_else(|_| "root".into()),
+            builder_host: hosts[0].ipv4.clone(),
+            cool_only_host: hosts[1].ipv4.clone(),
+            builder_mgmt,
+            cool_only_mgmt,
+            central_host: hosts[0].ipv4.clone(),
+            ssh_key: cluster.ssh_key.clone(),
         }
     }
 
     pub fn ssh(&self, host: &str, cmd: &str) -> Result<String, String> {
         let out = Command::new("ssh")
-            .args([
-                "-i",
-                &self.ssh_key,
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ConnectTimeout=10",
-                &format!("{}@{}", self.ssh_user, host),
-                cmd,
-            ])
+            .args(hetzner::ephemeral_ssh_args(&self.ssh_key))
+            .arg(format!("root@{host}"))
+            .arg(cmd)
             .output()
             .map_err(|e| format!("spawn ssh: {e}"))?;
         if !out.status.success() {
@@ -265,10 +261,6 @@ impl Env {
         let owner = parts.next().unwrap_or("").to_owned();
         Ok((kind, mode, owner))
     }
-}
-
-fn must(key: &str) -> String {
-    std::env::var(key).unwrap_or_else(|_| panic!("env {key} required"))
 }
 
 /// Lowercase request_id suitable for use as an OCI image tag (OCI rejects

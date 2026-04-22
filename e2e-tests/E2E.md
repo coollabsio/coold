@@ -19,37 +19,20 @@ $EDITOR e2e-tests/.env
 cargo test -p e2e-tests --no-run
 ```
 
-## Suite 1 — `builder.rs` (pre-installed cluster)
+## Suite 1 — `builder.rs` (Hetzner-provisioned)
 
-Requires an already-bootstrapped cluster. Env vars:
-
-```bash
-export BUILDER_HOST=<ssh-addr-of-builder-host>
-export COOLD_ONLY_HOST=<ssh-addr-of-coold-only-host>
-export BUILDER_MGMT=<wg0-ip-of-builder-host>
-export COOLD_ONLY_MGMT=<wg0-ip-of-coold-only-host>
-export CENTRAL_HOST=<ssh-addr-of-central>
-export SSH_KEY=~/.ssh/<key>
-# optional:
-export SSH_USER=root
-```
-
-### Run all in suite
+Provisions 2 VMs (A = central + builder, B = coold-only), runs
+`coolify init apply`, then executes every dispatch / cancel / restart
+/ artifact-perm scenario on the shared cluster. VMs destroyed on drop.
+Uses the same env vars as the install suite (see below):
 
 ```bash
-cargo test -p e2e-tests --test builder -- --ignored --nocapture --test-threads=1
+cargo test -p e2e-tests --test builder builder_lifecycle -- --ignored --nocapture --test-threads=1
 ```
 
-### Individual tests
-
-```bash
-cargo test -p e2e-tests --test builder pin_to_builder_host             -- --ignored --nocapture
-cargo test -p e2e-tests --test builder pin_to_coold_only_host_returns_503 -- --ignored --nocapture
-cargo test -p e2e-tests --test builder unknown_host_id_returns_503     -- --ignored --nocapture
-cargo test -p e2e-tests --test builder load_balance_picks_builder_host -- --ignored --nocapture
-cargo test -p e2e-tests --test builder build_cancel_emits_stage_cancel -- --ignored --nocapture
-cargo test -p e2e-tests --test builder coold_restart_adopts_in_flight_build -- --ignored --nocapture
-```
+The whole suite is a single `#[test] fn builder_lifecycle` — there are
+no longer individual scenario tests (running each separately would
+provision its own cluster, which is wasteful).
 
 ## Suite 2 — `install.rs` (Hetzner-provisioned)
 
