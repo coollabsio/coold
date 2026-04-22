@@ -3,9 +3,3 @@ pub mod agent {
         tonic::include_proto!("coolify.agent.v1");
     }
 }
-
-pub mod builder {
-    pub mod v1 {
-        tonic::include_proto!("coolify.builder.v1");
-    }
-}

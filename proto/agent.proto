@@ -1,9 +1,9 @@
 syntax = "proto3";
 package coolify.agent.v1;
 
-// Central is the gRPC server. coold dials central and opens this stream.
+// Broker is the gRPC server. coold dials the broker and opens this stream.
 // Flow: coold → ClientMsg (Hello first, then Responses).
-//       central → ServerMsg (Commands with request_id).
+//       broker → ServerMsg (Commands with request_id).
 service Agent {
     rpc Stream(stream ClientMsg) returns (stream ServerMsg);
 }
@@ -21,13 +21,24 @@ message Hello {
     string coold_version = 2;
     uint32 schema_min = 3;
     uint32 schema_max = 4;
+
+    // Capabilities this coold advertises (e.g. "coold" always, plus
+    // "builder" when --builder-enabled). Broker cross-checks these against
+    // the JWT "caps" claim and uses them for capability-based routing.
+    repeated string capabilities = 5;
+
+    // Number of concurrent builds this coold will accept. Zero when the
+    // builder capability is disabled.
+    uint32 builder_capacity = 6;
 }
 
-// Command frame sent by central.
+// Command frame sent by broker.
 message ServerMsg {
     string request_id = 1;
     oneof command {
         ListContainersReq list_containers = 10;
+        BuildRequest      build           = 20;
+        CancelBuild       cancel_build    = 21;
     }
 }
 
@@ -36,7 +47,8 @@ message Response {
     string request_id = 1;
     oneof body {
         ListContainersResp list_containers = 10;
-        Error error = 100;
+        BuildResponseBody  build           = 20;
+        Error              error           = 100;
     }
 }
 
@@ -57,4 +69,50 @@ message ContainerSummary {
     string image = 3;
     string state = 4;
     repeated string networks = 5;
+}
+
+// ── build messages (merged from former builder.proto) ───────────────────────
+
+enum BuildStack {
+    BUILD_STACK_UNSPECIFIED = 0;
+    DOCKERFILE              = 1;
+    BUILDPACKS              = 2;
+    RAILPACK                = 3;
+    STATIC                  = 4;
+}
+
+message BuildRequest {
+    string       repo_url     = 1;
+    string       git_ref      = 2;  // commit sha preferred
+    BuildStack   stack        = 3;
+    string       target_image = 4;  // e.g. localhost/app-42
+    string       cache_key    = 5;
+    StaticConfig static_cfg   = 20;
+}
+
+message StaticConfig {
+    string output_dir = 1;  // relative to repo root; default "dist"
+    string base_image = 2;  // default: docker.io/library/nginx:alpine
+}
+
+message CancelBuild {}
+
+message BuildResponseBody {
+    oneof body {
+        BuildResult ok  = 10;
+        BuildError  err = 11;
+    }
+}
+
+message BuildResult {
+    string     digest       = 1;  // sha256:...
+    string     registry_ref = 2;  // localhost/<app>@sha256:...
+    uint64     duration_ms  = 3;
+    BuildStack stack_used   = 4;
+}
+
+message BuildError {
+    uint32 code    = 1;
+    string message = 2;
+    string stage   = 3;
 }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["coold", "broker", "builder", "proto"]
+members = ["coold", "broker", "builder", "builder-core", "proto"]
 resolver = "2"
 
 [workspace.package]

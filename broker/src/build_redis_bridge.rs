@@ -1,19 +1,29 @@
-/// Redis bridge for build dispatch: consumes `build:cmd` stream from Laravel,
-/// routes BuildRequest to the appropriate builder gRPC stream, pushes responses
+/// Redis bridge for build dispatch. Consumes `build:cmd` from Laravel,
+/// routes `BuildRequest` / `CancelBuild` over the same coold stream a
+/// builder-capable host already holds open on :6443, and pushes responses
 /// back to `build:resp:{request_id}` for Laravel to BLPOP.
+///
+/// Routing contract:
+///   * For a new build, envelope may specify `host_id` to pin it to a
+///     particular builder-capable host; otherwise the broker picks the
+///     first connected host that advertises the `builder` capability.
+///   * For a cancel, the envelope specifies only `request_id`; the broker
+///     looks up the host that owns that pending request and sends
+///     `CancelBuild` down its stream.
 use anyhow::Result;
 use redis::streams::{StreamReadOptions, StreamReadReply};
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use coolify_proto::builder::v1::{
-    builder_server_msg, BuildRequest, BuilderServerMsg, StaticConfig,
+use coolify_proto::agent::v1::{
+    server_msg, BuildRequest, BuildResponseBody as ProtoBuildResponseBody, CancelBuild, ServerMsg,
+    StaticConfig,
 };
 
 use crate::{
     config::Config,
-    state::{BuilderStreams, Pending},
+    state::{Pending, PendingKind, Streams},
 };
 
 const BUILD_CMD_STREAM: &str = "build:cmd";
@@ -24,7 +34,11 @@ const RESP_TTL_SECS: i64 = 30;
 
 #[derive(Debug, Deserialize)]
 struct BuildDispatchEnvelope {
-    builder_id: Option<String>,
+    /// Target host_id. Optional for `static_build` (load-balanced among
+    /// builder-capable hosts when absent); required for `cancel` only
+    /// indirectly via the `request_id` lookup in `Pending`.
+    #[serde(default)]
+    host_id: Option<String>,
     request_id: String,
     command: BuildCommandPayload,
 }
@@ -36,9 +50,12 @@ enum BuildCommandPayload {
         repo_url: String,
         git_ref: String,
         target_image: String,
+        #[serde(default)]
         output_dir: Option<String>,
+        #[serde(default)]
         base_image: Option<String>,
     },
+    Cancel {},
 }
 
 #[derive(Debug, Serialize)]
@@ -55,7 +72,30 @@ pub enum BuildResponseBody {
     Error { code: u32, message: String, stage: String },
 }
 
-pub async fn run(config: Config, builder_streams: BuilderStreams, pending: Pending) -> Result<()> {
+impl BuildResponseBody {
+    pub fn from_proto(body: ProtoBuildResponseBody) -> Self {
+        use coolify_proto::agent::v1::build_response_body;
+        match body.body {
+            Some(build_response_body::Body::Ok(r)) => BuildResponseBody::Ok {
+                digest: r.digest,
+                registry_ref: r.registry_ref,
+                duration_ms: r.duration_ms,
+            },
+            Some(build_response_body::Body::Err(e)) => BuildResponseBody::Error {
+                code: e.code,
+                message: e.message,
+                stage: e.stage,
+            },
+            None => BuildResponseBody::Error {
+                code: 500,
+                message: "empty build response body".into(),
+                stage: String::new(),
+            },
+        }
+    }
+}
+
+pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
     let client = redis::Client::open(config.redis_url.as_str())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
@@ -110,7 +150,7 @@ pub async fn run(config: Config, builder_streams: BuilderStreams, pending: Pendi
                     }
                 };
 
-                dispatch(&builder_streams, &mut conn, &pending, envelope).await;
+                dispatch(&streams, &mut conn, &pending, envelope).await;
                 ack(&mut conn, &stream_id).await;
             }
         }
@@ -128,68 +168,85 @@ pub async fn push_build_response(redis_url: &str, request_id: &str, body: BuildR
     Ok(())
 }
 
-pub async fn push_build_timeout_error(redis_url: &str, request_id: &str) -> Result<()> {
-    push_build_response(
-        redis_url,
-        request_id,
-        BuildResponseBody::Error {
-            code: 504,
-            message: "build dispatch timeout".into(),
-            stage: String::new(),
-        },
-    )
-    .await
-}
-
 async fn dispatch(
-    builder_streams: &BuilderStreams,
+    streams: &Streams,
     conn: &mut impl AsyncCommands,
     pending: &Pending,
     env: BuildDispatchEnvelope,
 ) {
-    let build_req = match env.command {
+    match env.command {
         BuildCommandPayload::StaticBuild {
             repo_url,
             git_ref,
             target_image,
             output_dir,
             base_image,
-        } => BuildRequest {
-            repo_url,
-            git_ref,
-            stack: coolify_proto::builder::v1::BuildStack::Static as i32,
-            target_image,
-            cache_key: String::new(),
-            static_cfg: Some(StaticConfig {
-                output_dir: output_dir.unwrap_or_else(|| "dist".into()),
-                base_image: base_image.unwrap_or_else(|| "docker.io/library/nginx:alpine".into()),
-            }),
-        },
-    };
+        } => {
+            let build_req = BuildRequest {
+                repo_url,
+                git_ref,
+                stack: coolify_proto::agent::v1::BuildStack::Static as i32,
+                target_image,
+                cache_key: String::new(),
+                static_cfg: Some(StaticConfig {
+                    output_dir: output_dir.unwrap_or_else(|| "dist".into()),
+                    base_image: base_image.unwrap_or_else(|| "docker.io/library/nginx:alpine".into()),
+                }),
+            };
 
-    let msg = BuilderServerMsg {
-        request_id: env.request_id.clone(),
-        command: Some(builder_server_msg::Command::Build(build_req)),
-    };
+            let target_host = match env.host_id.as_deref() {
+                Some(id) => {
+                    if !streams.has_cap(id, "builder") {
+                        warn!(host_id = %id, request_id = %env.request_id, "host has no builder capability");
+                        push_error(conn, &env.request_id, 503, "host has no builder capability").await;
+                        return;
+                    }
+                    id.to_string()
+                }
+                None => match streams.pick_host_with_cap("builder") {
+                    Some(id) => id,
+                    None => {
+                        warn!(request_id = %env.request_id, "no builder-capable host connected");
+                        push_error(conn, &env.request_id, 503, "no builder-capable host connected").await;
+                        return;
+                    }
+                },
+            };
 
-    let tx = if let Some(id) = &env.builder_id {
-        builder_streams.get(id)
-    } else {
-        builder_streams.pick_idle().and_then(|id| builder_streams.get(&id))
-    };
+            let Some(tx) = streams.get_tx(&target_host) else {
+                push_error(conn, &env.request_id, 503, "builder host disconnected").await;
+                return;
+            };
 
-    match tx {
-        Some(tx) => {
-            pending.insert(env.request_id.clone());
+            let msg = ServerMsg {
+                request_id: env.request_id.clone(),
+                command: Some(server_msg::Command::Build(build_req)),
+            };
+
+            pending.insert(env.request_id.clone(), target_host.clone(), PendingKind::Build);
             if let Err(e) = tx.send(msg).await {
                 pending.remove(&env.request_id);
-                warn!(request_id = %env.request_id, error = %e, "send to builder stream failed");
-                push_error(conn, &env.request_id, 503, "builder stream send failed").await;
+                warn!(request_id = %env.request_id, error = %e, "send build to host stream failed");
+                push_error(conn, &env.request_id, 503, "host stream send failed").await;
             }
         }
-        None => {
-            warn!(request_id = %env.request_id, "no builder connected");
-            push_error(conn, &env.request_id, 503, "no builder connected").await;
+        BuildCommandPayload::Cancel {} => {
+            let Some(entry) = pending.get(&env.request_id) else {
+                warn!(request_id = %env.request_id, "cancel for unknown request_id; already finished or never dispatched");
+                push_error(conn, &env.request_id, 404, "request_id not in flight").await;
+                return;
+            };
+            let Some(tx) = streams.get_tx(&entry.host_id) else {
+                warn!(request_id = %env.request_id, host_id = %entry.host_id, "cancel: owning host disconnected");
+                return;
+            };
+            let msg = ServerMsg {
+                request_id: env.request_id.clone(),
+                command: Some(server_msg::Command::CancelBuild(CancelBuild {})),
+            };
+            if let Err(e) = tx.send(msg).await {
+                warn!(request_id = %env.request_id, error = %e, "send cancel to host stream failed");
+            }
         }
     }
 }

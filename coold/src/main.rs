@@ -1,3 +1,4 @@
+mod builder;
 mod config;
 mod corrosion;
 mod dns;

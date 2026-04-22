@@ -1,6 +1,5 @@
 mod auth;
 mod build_redis_bridge;
-mod builder_grpc_server;
 mod config;
 mod redis_bridge;
 mod state;
@@ -17,21 +16,18 @@ async fn main() -> Result<()> {
     init_tracing(&config.log_level);
 
     info!(
-        grpc_bind         = %config.grpc_bind,
-        builder_grpc_bind = %config.builder_grpc_bind,
-        redis_url         = %config.redis_url,
+        grpc_bind = %config.grpc_bind,
+        redis_url = %config.redis_url,
         "broker starting",
     );
 
     let streams = state::Streams::new();
-    let builder_streams = state::BuilderStreams::new();
     let pending = state::Pending::new();
 
     tokio::try_join!(
         grpc_server::run(config.clone(), streams.clone(), pending.clone()),
         redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
-        builder_grpc_server::run(config.clone(), builder_streams.clone(), pending.clone()),
-        build_redis_bridge::run(config.clone(), builder_streams.clone(), pending.clone()),
+        build_redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
         pending_sweeper::run(config.clone(), pending.clone()),
     )?;
 
@@ -58,10 +54,16 @@ mod grpc_server {
 
     use coolify_proto::agent::v1::{
         agent_server::{Agent, AgentServer},
-        client_msg, ClientMsg, ServerMsg,
+        client_msg, response, ClientMsg, ServerMsg,
     };
 
-    use crate::{auth, config::Config, state::{Pending, Streams}};
+    use crate::{
+        auth,
+        build_redis_bridge::{self, BuildResponseBody},
+        config::Config,
+        redis_bridge,
+        state::{Pending, PendingKind, StreamHandle, Streams},
+    };
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr = config.grpc_bind.parse()?;
@@ -98,31 +100,95 @@ mod grpc_server {
                 .and_then(|v| v.strip_prefix("Bearer "))
                 .ok_or_else(|| Status::unauthenticated("missing Bearer token"))?;
 
-            let host_id = auth::verify_jwt(jwt, &self.config.jwt_public_key, "coold")
+            let verified = auth::verify_jwt(jwt, &self.config.jwt_public_key)
                 .map_err(|e| Status::unauthenticated(format!("invalid JWT: {e}")))?;
 
-            info!(%host_id, "coold stream connected");
+            let host_id = verified.host_id.clone();
+            let jwt_caps = verified.caps;
+
+            info!(%host_id, caps = ?jwt_caps, "coold stream connected");
 
             let (cmd_tx, cmd_rx) = mpsc::channel::<ServerMsg>(64);
-            self.streams.insert(host_id.clone(), cmd_tx);
+            self.streams.insert(
+                host_id.clone(),
+                StreamHandle {
+                    tx: cmd_tx,
+                    caps: jwt_caps.clone(),
+                    builder_capacity: 0,
+                },
+            );
 
             let streams = self.streams.clone();
             let pending = self.pending.clone();
-            let mut inbound = request.into_inner();
-
             let redis_url = self.config.redis_url.clone();
             let host_id_clone = host_id.clone();
+            let jwt_caps_clone = jwt_caps.clone();
+            let mut inbound = request.into_inner();
+
             tokio::spawn(async move {
                 while let Some(msg) = inbound.next().await {
                     match msg {
                         Ok(ClientMsg { payload: Some(client_msg::Payload::Response(resp)) }) => {
-                            pending.remove(&resp.request_id);
-                            if let Err(e) = crate::redis_bridge::push_response(&redis_url, resp).await {
-                                warn!(host_id = %host_id_clone, error = %e, "failed to push response to Redis");
+                            let request_id = resp.request_id.clone();
+                            let kind = pending
+                                .remove(&request_id)
+                                .map(|e| e.kind)
+                                .unwrap_or(PendingKind::Coold);
+
+                            match resp.body {
+                                Some(response::Body::Build(body)) => {
+                                    let envelope = BuildResponseBody::from_proto(body);
+                                    if let Err(e) = build_redis_bridge::push_build_response(
+                                        &redis_url,
+                                        &request_id,
+                                        envelope,
+                                    )
+                                    .await
+                                    {
+                                        warn!(%request_id, error = %e, "failed to push build response to Redis");
+                                    }
+                                }
+                                _ => {
+                                    if kind == PendingKind::Build {
+                                        warn!(%request_id, "non-build Response for build request; dropping");
+                                        continue;
+                                    }
+                                    if let Err(e) = redis_bridge::push_response(&redis_url, resp).await {
+                                        warn!(host_id = %host_id_clone, error = %e, "failed to push response to Redis");
+                                    }
+                                }
                             }
                         }
                         Ok(ClientMsg { payload: Some(client_msg::Payload::Hello(h)) }) => {
-                            info!(host_id = %host_id_clone, version = %h.coold_version, "Hello received");
+                            info!(
+                                host_id = %host_id_clone,
+                                version = %h.coold_version,
+                                capabilities = ?h.capabilities,
+                                builder_capacity = h.builder_capacity,
+                                "Hello received"
+                            );
+
+                            // Defense in depth: the host may only advertise a
+                            // capability already granted in its JWT.
+                            if let Some(missing) = h
+                                .capabilities
+                                .iter()
+                                .find(|c| !jwt_caps_clone.iter().any(|jc| jc == *c))
+                            {
+                                warn!(
+                                    host_id = %host_id_clone,
+                                    missing_cap = %missing,
+                                    jwt_caps = ?jwt_caps_clone,
+                                    "host advertised a capability not granted in JWT; dropping stream",
+                                );
+                                break;
+                            }
+
+                            streams.update_capabilities(
+                                &host_id_clone,
+                                h.capabilities,
+                                h.builder_capacity,
+                            );
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -145,21 +211,20 @@ mod pending_sweeper {
     use anyhow::Result;
     use tracing::warn;
 
-    use crate::{config::Config, state::{Pending, DISPATCH_TIMEOUT_SECS}};
+    use crate::{
+        config::Config,
+        state::{Pending, DISPATCH_TIMEOUT_SECS},
+    };
 
     pub async fn run(config: Config, pending: Pending) -> Result<()> {
         let interval = std::time::Duration::from_secs(1);
         loop {
             tokio::time::sleep(interval).await;
             let expired = pending.drain_expired();
-            for request_id in expired {
+            for (request_id, _entry) in expired {
                 warn!(%request_id, timeout_secs = DISPATCH_TIMEOUT_SECS, "dispatch timed out; pushing 504");
-                // Push timeout to both coold and build resp keys; only one will exist.
                 if let Err(e) = crate::redis_bridge::push_timeout_error(&config.redis_url, &request_id).await {
                     warn!(%request_id, error = %e, "failed to push coold timeout error");
-                }
-                if let Err(e) = crate::build_redis_bridge::push_build_timeout_error(&config.redis_url, &request_id).await {
-                    warn!(%request_id, error = %e, "failed to push build timeout error");
                 }
             }
         }

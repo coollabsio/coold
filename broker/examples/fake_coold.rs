@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
             coold_version: "fake-0.1".into(),
             schema_min: 1,
             schema_max: 1,
+            capabilities: vec!["coold".into()],
+            builder_capacity: 0,
         })),
     })
     .await?;
@@ -71,6 +73,9 @@ async fn main() -> Result<()> {
                     payload: Some(client_msg::Payload::Response(resp)),
                 })
                 .await?;
+            }
+            server_msg::Command::Build(_) | server_msg::Command::CancelBuild(_) => {
+                // fake_coold does not implement the builder capability.
             }
         }
     }

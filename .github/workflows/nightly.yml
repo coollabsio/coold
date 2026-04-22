@@ -39,7 +39,6 @@ jobs:
     env:
       COOLD_VERSION: ${{ needs.prep.outputs.tag }}
       BROKER_VERSION: ${{ needs.prep.outputs.tag }}
-      BUILDER_VERSION: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -115,9 +114,9 @@ jobs:
             echo "**Commit:** $(git log -1 --pretty=format:'%s')"
             echo
             echo "### Artifacts"
-            echo "- \`coold\` — per-host agent"
-            echo "- \`broker\` — central-side gRPC stream broker"
-            echo "- \`builder\` — OCI image build agent"
+            echo "- \`coold\` — per-host agent (holds the single gRPC stream to broker; spawns builder subprocess per BuildRequest when COOLD_BUILDER_ENABLED=1)"
+            echo "- \`broker\` — central-side gRPC stream broker (single listener on :6443; capability-aware routing)"
+            echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
             echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"

@@ -1,20 +1,16 @@
 [package]
-name = "builder"
+name = "builder-core"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "Coolify v5 build agent: short-lived subprocess that executes one OCI image build per invocation."
+description = "Coolify v5 build engine: git clone + buildah pipeline. Library used by the builder binary; no gRPC/JWT transport."
 license.workspace = true
 
-[[bin]]
-name = "builder"
-path = "src/main.rs"
-
 [dependencies]
-builder-core = { path = "../builder-core" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tempfile = "3"

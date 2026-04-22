@@ -163,6 +163,40 @@ pub struct Config {
     /// Useful for alpha hosts that are not yet enrolled with central.
     #[arg(long, env = "COOLD_GRPC_DISABLED", default_value = "false")]
     pub grpc_disabled: bool,
+
+    /// Advertise the `builder` capability and accept `BuildRequest` frames
+    /// from the broker. Each build runs as a short-lived `builder` subprocess
+    /// inside a `systemd-run --scope` transient unit for cgroup + FS
+    /// isolation.
+    #[arg(long, env = "COOLD_BUILDER_ENABLED", default_value = "false")]
+    pub builder_enabled: bool,
+
+    /// Per-request scratch root. A subdirectory named after the `request_id`
+    /// is created here for each build and removed after the subprocess exits.
+    #[arg(long, env = "COOLD_BUILDER_WORK_DIR", default_value = "/var/lib/coolify-builder/work")]
+    pub builder_work_dir: PathBuf,
+
+    /// Max concurrent builds this coold will accept. Semaphore permits.
+    #[arg(long, env = "COOLD_BUILDER_CAPACITY", default_value = "2")]
+    pub builder_capacity: u32,
+
+    /// Path to the builder binary coold spawns per request.
+    #[arg(long, env = "COOLD_BUILDER_BIN", default_value = "/usr/local/bin/builder")]
+    pub builder_bin: PathBuf,
+
+    /// Hard timeout per build. Passed to the transient scope via
+    /// `-p RuntimeMaxSec=`; systemd escalates to SIGKILL if exceeded.
+    #[arg(long, env = "COOLD_BUILDER_TIMEOUT_SECS", default_value = "1800")]
+    pub builder_timeout_secs: u64,
+
+    /// cgroup memory cap for each build scope (systemd `MemoryMax` value).
+    #[arg(long, env = "COOLD_BUILDER_MEMORY_MAX", default_value = "2G")]
+    pub builder_memory_max: String,
+
+    /// cgroup CPU quota for each build scope (systemd `CPUQuota` value; e.g.
+    /// "200%" allows two full cores).
+    #[arg(long, env = "COOLD_BUILDER_CPU_QUOTA", default_value = "200%")]
+    pub builder_cpu_quota: String,
 }
 
 impl Config {

@@ -13,14 +13,16 @@ use tracing::{info, warn};
 
 use coolify_proto::agent::v1::{server_msg, ListContainersReq, Response, ServerMsg};
 
-use crate::{config::Config, state::{Pending, Streams}};
+use crate::{
+    config::Config,
+    state::{Pending, PendingKind, Streams},
+};
 
 const CMD_STREAM: &str = "coold:cmd";
 const CONSUMER_GROUP: &str = "broker";
 const CONSUMER_NAME: &str = "broker-1";
 const BLOCK_MS: usize = 5000;
 
-/// JSON envelope Laravel writes to `coold:cmd`.
 #[derive(Debug, Deserialize)]
 struct DispatchEnvelope {
     host_id: String,
@@ -34,7 +36,6 @@ enum CommandPayload {
     ListContainers,
 }
 
-/// JSON envelope broker writes to `coold:resp:{request_id}`.
 #[derive(Debug, Serialize)]
 struct ResponseEnvelope {
     request_id: String,
@@ -55,7 +56,6 @@ pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<(
     let client = redis::Client::open(config.redis_url.as_str())?;
     let mut conn = client.get_multiplexed_async_connection().await?;
 
-    // Create consumer group if it doesn't exist yet.
     let _: Result<(), _> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(CMD_STREAM)
@@ -107,33 +107,41 @@ pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<(
                     }
                 };
 
-                dispatch(&streams, &mut conn, &config, &pending, envelope, stream_id.clone()).await;
+                dispatch(&streams, &mut conn, &pending, envelope).await;
                 ack(&mut conn, &stream_id).await;
             }
         }
     }
 }
 
-/// Push a coold Response back to Laravel via `coold:resp:{request_id}`.
 pub async fn push_response(redis_url: &str, resp: Response) -> Result<()> {
     let client = redis::Client::open(redis_url)?;
     let conn = client.get_multiplexed_async_connection().await?;
 
     let body = match resp.body {
         Some(coolify_proto::agent::v1::response::Body::ListContainers(r)) => {
-            let data = serde_json::to_value(&r.containers.iter().map(|c| {
-                serde_json::json!({
-                    "id": c.id,
-                    "name": c.name,
-                    "image": c.image,
-                    "state": c.state,
-                    "networks": c.networks,
-                })
-            }).collect::<Vec<_>>())?;
+            let data = serde_json::to_value(
+                r.containers
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "name": c.name,
+                            "image": c.image,
+                            "state": c.state,
+                            "networks": c.networks,
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )?;
             ResponseBody::Ok { data }
         }
         Some(coolify_proto::agent::v1::response::Body::Error(e)) => {
             ResponseBody::Error { code: e.code, message: e.message }
+        }
+        Some(coolify_proto::agent::v1::response::Body::Build(_)) => {
+            // Build responses go through build_redis_bridge::push_build_response.
+            return Ok(());
         }
         None => ResponseBody::Error { code: 500, message: "empty response body".into() },
     };
@@ -149,7 +157,6 @@ pub async fn push_response(redis_url: &str, resp: Response) -> Result<()> {
     Ok(())
 }
 
-/// Push a `code=504` timeout error for `request_id`. Called by the pending sweeper.
 pub async fn push_timeout_error(redis_url: &str, request_id: &str) -> Result<()> {
     let client = redis::Client::open(redis_url)?;
     let mut conn = client.get_multiplexed_async_connection().await?;
@@ -167,10 +174,8 @@ pub async fn push_timeout_error(redis_url: &str, request_id: &str) -> Result<()>
 async fn dispatch(
     streams: &Streams,
     conn: &mut impl AsyncCommands,
-    _config: &Config,
     pending: &Pending,
     env: DispatchEnvelope,
-    _stream_id: String,
 ) {
     let cmd = match env.command {
         CommandPayload::ListContainers => {
@@ -183,9 +188,9 @@ async fn dispatch(
         command: Some(cmd),
     };
 
-    match streams.get(&env.host_id) {
+    match streams.get_tx(&env.host_id) {
         Some(tx) => {
-            pending.insert(env.request_id.clone());
+            pending.insert(env.request_id.clone(), env.host_id.clone(), PendingKind::Coold);
             if let Err(e) = tx.send(msg).await {
                 pending.remove(&env.request_id);
                 warn!(host_id = %env.host_id, error = %e, "failed to send to stream");
@@ -218,4 +223,3 @@ async fn ack(conn: &mut impl AsyncCommands, stream_id: &str) {
         .query_async(conn)
         .await;
 }
-

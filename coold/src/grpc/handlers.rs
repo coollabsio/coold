@@ -1,25 +1,68 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use futures_util::future::join_all;
-use tracing::debug;
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
 
+use crate::builder::BuilderCtx;
 use crate::grpc::proto::{
-    response, server_msg, ContainerSummary, Error, ListContainersResp, Response,
+    client_msg, response, server_msg, BuildResponseBody, ClientMsg, ContainerSummary, Error,
+    ListContainersResp, Response,
 };
 use crate::podman::PodmanClient;
 
-pub async fn handle(request_id: String, command: server_msg::Command, podman: &PodmanClient) -> Response {
-    let body = match command {
-        server_msg::Command::ListContainers(_) => match list_containers(podman).await {
-            Ok(resp) => response::Body::ListContainers(resp),
-            Err(e) => response::Body::Error(Error {
-                code: 500,
-                message: format!("{e:#}"),
-            }),
+pub async fn handle(
+    request_id: String,
+    command: server_msg::Command,
+    podman: &PodmanClient,
+    builder_ctx: Option<Arc<BuilderCtx>>,
+    tx: mpsc::Sender<ClientMsg>,
+) {
+    match command {
+        server_msg::Command::ListContainers(_) => {
+            let body = match list_containers(podman).await {
+                Ok(resp) => response::Body::ListContainers(resp),
+                Err(e) => response::Body::Error(Error {
+                    code: 500,
+                    message: format!("{e:#}"),
+                }),
+            };
+            send_response(&tx, Response { request_id, body: Some(body) }).await;
+        }
+        server_msg::Command::Build(req) => match builder_ctx {
+            Some(ctx) => ctx.dispatch(request_id, req, tx),
+            None => {
+                let body = response::Body::Build(BuildResponseBody {
+                    body: Some(crate::grpc::proto::build_response_body::Body::Err(
+                        crate::grpc::proto::BuildError {
+                            code: 501,
+                            message: "builder capability not enabled on this host".into(),
+                            stage: "dispatch".into(),
+                        },
+                    )),
+                });
+                send_response(&tx, Response { request_id, body: Some(body) }).await;
+            }
         },
+        server_msg::Command::CancelBuild(_) => match builder_ctx {
+            Some(ctx) => {
+                if !ctx.cancel(&request_id).await {
+                    warn!(%request_id, "cancel for unknown or already-finished request_id");
+                }
+            }
+            None => warn!(%request_id, "received CancelBuild but builder capability disabled"),
+        },
+    }
+}
+
+async fn send_response(tx: &mpsc::Sender<ClientMsg>, response: Response) {
+    let request_id = response.request_id.clone();
+    let msg = ClientMsg {
+        payload: Some(client_msg::Payload::Response(response)),
     };
-    Response {
-        request_id,
-        body: Some(body),
+    if let Err(e) = tx.send(msg).await {
+        warn!(%request_id, error = %e, "failed to enqueue response");
     }
 }
 

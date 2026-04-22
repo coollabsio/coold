@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -8,6 +9,7 @@ use tonic::transport::Channel;
 use tonic::Request;
 use tracing::{info, warn};
 
+use crate::builder::{BuilderCtx, BuilderSettings};
 use crate::config::{Config, VERSION};
 use crate::grpc::handlers::handle;
 use crate::grpc::proto::{
@@ -35,9 +37,31 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
         ));
     }
 
+    let builder_ctx = if config.builder_enabled {
+        let ctx = Arc::new(BuilderCtx::new(BuilderSettings {
+            work_root: config.builder_work_dir.clone(),
+            builder_bin: config.builder_bin.clone(),
+            capacity: config.builder_capacity,
+            timeout_secs: config.builder_timeout_secs,
+            memory_max: config.builder_memory_max.clone(),
+            cpu_quota: config.builder_cpu_quota.clone(),
+        }));
+        ctx.ensure_work_root()
+            .await
+            .with_context(|| format!("mkdir -p {}", config.builder_work_dir.display()))?;
+        info!(
+            work_dir = %config.builder_work_dir.display(),
+            capacity = config.builder_capacity,
+            "builder capability enabled",
+        );
+        Some(ctx)
+    } else {
+        None
+    };
+
     let mut backoff = Duration::from_secs(1);
     loop {
-        match connect_and_serve(&url, &jwt, &config, &podman).await {
+        match connect_and_serve(&url, &jwt, &config, &podman, builder_ctx.clone()).await {
             Ok(()) => {
                 warn!("grpc stream closed cleanly; reconnecting");
                 backoff = Duration::from_secs(1);
@@ -60,12 +84,13 @@ async fn connect_and_serve(
     jwt: &str,
     config: &Config,
     podman: &PodmanClient,
+    builder_ctx: Option<Arc<BuilderCtx>>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
-        .context("invalid central URL")?
+        .context("invalid broker URL")?
         .connect()
         .await
-        .context("connect to central")?;
+        .context("connect to broker")?;
 
     let bearer: MetadataValue<_> = format!("Bearer {jwt}")
         .parse()
@@ -79,12 +104,21 @@ async fn connect_and_serve(
 
     let (tx, rx) = mpsc::channel::<ClientMsg>(64);
 
+    let mut capabilities = vec!["coold".to_string()];
+    let mut builder_capacity = 0u32;
+    if config.builder_enabled {
+        capabilities.push("builder".to_string());
+        builder_capacity = config.builder_capacity;
+    }
+
     tx.send(ClientMsg {
         payload: Some(client_msg::Payload::Hello(Hello {
             host_mgmt_ip: config.host_mgmt_ip.clone(),
             coold_version: VERSION.to_string(),
             schema_min: 1,
             schema_max: 1,
+            capabilities,
+            builder_capacity,
         })),
     })
     .await
@@ -97,7 +131,7 @@ async fn connect_and_serve(
         .context("open stream")?
         .into_inner();
 
-    info!(central_url = url, "grpc stream established");
+    info!(broker_url = url, "grpc stream established");
 
     while let Some(msg) = inbound.message().await.context("receive ServerMsg")? {
         let request_id = msg.request_id.clone();
@@ -108,16 +142,9 @@ async fn connect_and_serve(
 
         let tx = tx.clone();
         let podman = podman.clone();
+        let builder_ctx = builder_ctx.clone();
         tokio::spawn(async move {
-            let response = handle(request_id.clone(), command, &podman).await;
-            if let Err(e) = tx
-                .send(ClientMsg {
-                    payload: Some(client_msg::Payload::Response(response)),
-                })
-                .await
-            {
-                warn!(%request_id, error = %e, "failed to enqueue response");
-            }
+            handle(request_id, command, &podman, builder_ctx, tx).await;
         });
     }
 
