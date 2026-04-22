@@ -1,14 +1,20 @@
 //! Builder dispatch adapter.
 //!
-//! coold spawns one `builder` subprocess per `BuildRequest` under a
-//! `systemd-run --scope` transient unit. The scope provides cgroup/FS
-//! isolation and, because coold itself runs as a systemd service, is
-//! nested under coold's cgroup — coold termination tears every active
-//! scope down with it.
+//! coold spawns one `builder` subprocess per `BuildRequest` inside a
+//! transient systemd service unit via `systemd-run --pipe`. That gives
+//! the build a cgroup with memory/CPU caps plus filesystem sandboxing
+//! (PrivateTmp, ProtectSystem=strict, ReadWritePaths allowlist) while
+//! still piping stdout/stderr back to coold so the NDJSON event frames
+//! can be parsed in real time.
 //!
-//! Cancellation is wired through `systemctl kill` against the scope
-//! unit name. The same mechanism kills `buildah` and `git` children in
-//! a single sweep via the cgroup.
+//! (A `systemd-run --scope` was the original design but scopes are
+//! process-adoption wrappers and reject service-only properties like
+//! PrivateTmp — building with them errors `Unknown assignment:
+//! PrivateTmp=yes`. Transient services accept the full sandbox set.)
+//!
+//! Cancellation uses `systemctl kill --signal=SIGTERM` against the
+//! transient unit name; the cgroup kill takes `buildah` and `git`
+//! children down in the same sweep.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,7 +43,7 @@ pub struct BuilderCtx {
 }
 
 struct BuildHandle {
-    scope_unit: String,
+    unit_name: String,
 }
 
 pub struct BuilderSettings {
@@ -99,25 +105,25 @@ impl BuilderCtx {
     /// reported via the normal outbound response path once the subprocess
     /// exits.
     pub async fn cancel(&self, request_id: &str) -> bool {
-        let scope_unit = match self.active.lock().await.get(request_id) {
-            Some(h) => h.scope_unit.clone(),
+        let unit_name = match self.active.lock().await.get(request_id) {
+            Some(h) => h.unit_name.clone(),
             None => return false,
         };
         match Command::new("systemctl")
-            .args(["kill", "--signal=SIGTERM", &scope_unit])
+            .args(["kill", "--signal=SIGTERM", &unit_name])
             .status()
             .await
         {
             Ok(s) if s.success() => {
-                info!(%request_id, %scope_unit, "cancel SIGTERM sent");
+                info!(%request_id, %unit_name, "cancel SIGTERM sent");
                 true
             }
             Ok(s) => {
-                warn!(%request_id, %scope_unit, status = ?s, "systemctl kill non-zero");
+                warn!(%request_id, %unit_name, status = ?s, "systemctl kill non-zero");
                 true
             }
             Err(e) => {
-                warn!(%request_id, %scope_unit, error = %e, "systemctl kill failed");
+                warn!(%request_id, %unit_name, error = %e, "systemctl kill failed");
                 false
             }
         }
@@ -136,11 +142,12 @@ impl BuilderCtx {
             .await
             .map_err(|e| build_err(500, "setup", format!("write request.json: {e}")))?;
 
-        let scope_unit = format!("coolify-build-{request_id}.scope");
+        let unit_name = format!("coolify-build-{request_id}.service");
         let mut cmd = Command::new("systemd-run");
-        cmd.arg("--scope")
+        cmd.arg("--pipe")
             .arg("--quiet")
-            .arg(format!("--unit={scope_unit}"))
+            .arg("--collect")
+            .arg(format!("--unit={unit_name}"))
             .arg("-p")
             .arg(format!("RuntimeMaxSec={}", self.timeout_secs))
             .arg("-p")
@@ -168,7 +175,7 @@ impl BuilderCtx {
         self.active
             .lock()
             .await
-            .insert(request_id.to_string(), BuildHandle { scope_unit: scope_unit.clone() });
+            .insert(request_id.to_string(), BuildHandle { unit_name: unit_name.clone() });
 
         let outcome = self.spawn_and_reap(&mut cmd, request_id, &work_dir).await;
 
