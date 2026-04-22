@@ -2,23 +2,31 @@
 //!
 //! Spawned by coold as a one-shot per `BuildRequest`. Reads the request JSON
 //! from `<request_path>`, runs the build against `<work_dir>`, and emits
-//! NDJSON event frames on stdout:
+//! NDJSON event frames both on stdout (live) and into
+//! `<work_dir>/events.ndjson` (durable log coold can replay on restart):
 //!
 //!   {"type":"progress","stage":"git","log":"...","percent":10}
 //!   {"type":"result","ok":{"digest":"sha256:..","registry_ref":"..","duration_ms":1234,"stack_used":"static"}}
 //!   {"type":"error","err":{"code":500,"message":"...","stage":"build"}}
 //!
-//! Exit codes: 0 on success, 1 on build error, 2 on usage/IO error, 130 on
-//! SIGTERM. On SIGTERM the builder emits a final `{"type":"error","err":
-//! {"code":499,"message":"cancelled",...}}` before exiting.
+//! A final `result.json` or `error.json` is written into the work dir before
+//! exit so coold can deliver a Response even if it restarts mid-build and
+//! adopts the running unit, or was entirely absent when the build finished.
+//!
+//! Exit codes: 0 success, 1 build error, 2 usage/IO error, 130 on SIGTERM.
+//!
+//! Stdout is best-effort. When coold dies the pipe closes and subsequent
+//! writes return `BrokenPipe`; we swallow the error and keep writing to the
+//! durable file. `SIGPIPE` is ignored at startup so a dead reader never
+//! terminates the build.
 //!
 //! Isolation and cgroup/FS sandboxing are imposed externally by the parent
-//! (typically `systemd-run --scope` wrapping this invocation). The builder
-//! itself assumes it owns `work_dir` exclusively and may write anywhere
-//! underneath.
+//! (coold's `systemd-run --pipe` transient service). The builder owns
+//! `work_dir` exclusively.
 
+use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use serde::Serialize;
@@ -35,24 +43,46 @@ enum Frame<'a> {
     Error { err: &'a BuildError },
 }
 
-struct NdjsonSink;
+/// Emit a frame to both stdout (live) and the durable events file.
+fn emit_frame(frame: Frame<'_>, events: &mut File) {
+    let Ok(line) = serde_json::to_string(&frame) else { return };
+    // Best-effort stdout. coold may be dead; we don't care.
+    let _ = writeln!(std::io::stdout().lock(), "{line}");
+    let _ = std::io::stdout().flush();
+    // Durable file. Best-effort too but much less likely to fail.
+    let _ = writeln!(events, "{line}");
+    let _ = events.flush();
+}
 
-impl ProgressSink for NdjsonSink {
+struct DualSink<'a> {
+    events: &'a mut File,
+}
+
+impl<'a> ProgressSink for DualSink<'a> {
     fn emit(&mut self, ev: &ProgressEvent) {
-        emit_frame(Frame::Progress(ev));
+        emit_frame(Frame::Progress(ev), self.events);
     }
 }
 
-fn emit_frame(frame: Frame<'_>) {
-    let mut stdout = std::io::stdout().lock();
-    if let Ok(line) = serde_json::to_string(&frame) {
-        let _ = writeln!(stdout, "{line}");
-        let _ = stdout.flush();
+fn write_json_atomic(path: &Path, bytes: &[u8]) {
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(tmp, path);
+    }
+}
+
+fn install_sigpipe_ignore() {
+    // Ignore SIGPIPE so a write to a dead stdout pipe never terminates us.
+    // Safe: no handler code runs; we inspect write errors on each write.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_IGN);
     }
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    install_sigpipe_ignore();
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with_writer(std::io::stderr)
@@ -68,15 +98,29 @@ async fn main() -> ExitCode {
     let req_path = PathBuf::from(&args[1]);
     let work_dir = PathBuf::from(&args[2]);
 
+    // Open the durable events log first — needed for *any* frame we emit,
+    // including startup errors.
+    let mut events = match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(work_dir.join("events.ndjson"))
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("open events.ndjson: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
     let req: BuildRequest = match std::fs::read(&req_path)
         .map_err(|e| format!("read {}: {e}", req_path.display()))
         .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| format!("parse request: {e}")))
     {
         Ok(r) => r,
         Err(e) => {
-            emit_frame(Frame::Error {
-                err: &BuildError { code: 400, message: e, stage: "load".into() },
-            });
+            let err = BuildError { code: 400, message: e, stage: "load".into() };
+            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+            emit_frame(Frame::Error { err: &err }, &mut events);
             return ExitCode::from(2);
         }
     };
@@ -84,25 +128,33 @@ async fn main() -> ExitCode {
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => {
-            emit_frame(Frame::Error {
-                err: &BuildError { code: 500, message: format!("install SIGTERM: {e}"), stage: "init".into() },
-            });
+            let err = BuildError { code: 500, message: format!("install SIGTERM: {e}"), stage: "init".into() };
+            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+            emit_frame(Frame::Error { err: &err }, &mut events);
             return ExitCode::from(2);
         }
     };
 
-    let mut sink = NdjsonSink;
+    let mut sink = DualSink { events: &mut events };
     let build_fut = builder_core::run_build(req, &work_dir, &mut sink);
 
     tokio::select! {
         res = build_fut => match res {
-            Ok(ok)  => { emit_frame(Frame::Result { ok: &ok }); ExitCode::SUCCESS }
-            Err(err) => { emit_frame(Frame::Error { err: &err }); ExitCode::from(1) }
+            Ok(ok) => {
+                write_json_atomic(&work_dir.join("result.json"), &serde_json::to_vec(&ok).unwrap_or_default());
+                emit_frame(Frame::Result { ok: &ok }, &mut events);
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+                emit_frame(Frame::Error { err: &err }, &mut events);
+                ExitCode::from(1)
+            }
         },
         _ = sigterm.recv() => {
-            emit_frame(Frame::Error {
-                err: &BuildError { code: 499, message: "cancelled".into(), stage: "cancel".into() },
-            });
+            let err = BuildError { code: 499, message: "cancelled".into(), stage: "cancel".into() };
+            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+            emit_frame(Frame::Error { err: &err }, &mut events);
             ExitCode::from(130)
         }
     }

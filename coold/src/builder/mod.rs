@@ -82,49 +82,96 @@ impl BuilderCtx {
         tokio::fs::create_dir_all(&self.work_root).await
     }
 
-    /// Stop any `coolify-build-*.service` transient units left behind by a
-    /// prior coold run. A clean coold shutdown lets `systemd-run --pipe
-    /// --wait` tear its unit down via SIGTERM propagation, but SIGKILL / OOM
-    /// / host crash leaves the unit running under PID 1 until RuntimeMaxSec
-    /// hits. This sweeper reclaims them on startup.
-    pub async fn reap_orphan_units() {
-        let out = match Command::new("systemctl")
-            .args([
-                "list-units",
-                "--all",
-                "--no-legend",
-                "--plain",
-                "--type=service",
-                "coolify-build-*.service",
-            ])
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) => {
-                warn!(error = %e, "systemctl list-units failed; skipping orphan sweep");
-                return;
-            }
-        };
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        let names: Vec<String> = stdout
-            .lines()
-            .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
-            .filter(|n| n.starts_with("coolify-build-") && n.ends_with(".service"))
-            .collect();
-        if names.is_empty() {
+    /// Resume or reap builder transient units left by a prior coold run.
+    /// Units still running are adopted: a background task polls until the
+    /// unit exits, reads the on-disk `result.json` / `error.json` the
+    /// builder wrote, and emits a `Response` on `tx` so Laravel eventually
+    /// sees the outcome. Units that finished while coold was dead are
+    /// emitted immediately. Units with no on-disk trace (hard kill) get a
+    /// fabricated 500.
+    pub async fn resume_or_reap(self: &Arc<Self>, tx: mpsc::Sender<ClientMsg>) {
+        let units = list_coolify_build_units().await;
+        if units.is_empty() {
             return;
         }
-        warn!(count = names.len(), units = ?names,
-              "reaping orphaned builder units from a prior coold run");
-        let _ = Command::new("systemctl")
-            .arg("stop")
-            .args(&names)
-            .status()
-            .await;
+        info!(count = units.len(), "resuming builder units from prior coold run");
+        for unit in units {
+            let Some(request_id) = parse_request_id(&unit) else { continue };
+            let work_dir = self.work_root.join(&request_id);
+            let active = systemctl_is_active(&unit).await;
+            let result_path = work_dir.join("result.json");
+            let error_path = work_dir.join("error.json");
+
+            if active {
+                // Adopt the running unit. Register in active_builds so an
+                // incoming CancelBuild for this request routes correctly,
+                // then spawn a waiter task.
+                self.active.lock().await.insert(
+                    request_id.clone(),
+                    BuildHandle { unit_name: unit.clone() },
+                );
+                let ctx = self.clone();
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    info!(%request_id, %unit, "adopting in-flight builder unit");
+                    ctx.wait_and_emit(request_id, unit, work_dir, tx).await;
+                });
+                continue;
+            }
+
+            // Unit no longer running — deliver whatever the builder managed
+            // to write, then clean up.
+            let body = if let Ok(bytes) = tokio::fs::read(&result_path).await {
+                body_from_result_bytes(&bytes)
+            } else if let Ok(bytes) = tokio::fs::read(&error_path).await {
+                body_from_error_bytes(&bytes)
+            } else {
+                warn!(%request_id, "orphan unit exited without a result/error file");
+                body_fabricated_error("builder exited without result file")
+            };
+            emit_build_response(&tx, &request_id, body).await;
+            let _ = tokio::fs::remove_dir_all(&work_dir).await;
+            let _ = Command::new("systemctl")
+                .arg("reset-failed")
+                .arg(&unit)
+                .status()
+                .await;
+        }
+    }
+
+    /// Poll an adopted unit until it goes inactive, then emit the Response
+    /// from whatever the builder persisted. Used by `resume_or_reap` and
+    /// conceptually equivalent to `spawn_and_reap` minus the stdout drain
+    /// (which is already gone for an adopted unit).
+    async fn wait_and_emit(
+        self: Arc<Self>,
+        request_id: String,
+        unit: String,
+        work_dir: std::path::PathBuf,
+        tx: mpsc::Sender<ClientMsg>,
+    ) {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            if !systemctl_is_active(&unit).await {
+                break;
+            }
+        }
+        let result_path = work_dir.join("result.json");
+        let error_path = work_dir.join("error.json");
+        let body = if let Ok(bytes) = tokio::fs::read(&result_path).await {
+            body_from_result_bytes(&bytes)
+        } else if let Ok(bytes) = tokio::fs::read(&error_path).await {
+            body_from_error_bytes(&bytes)
+        } else {
+            warn!(%request_id, %unit, "adopted unit exited without a result/error file");
+            body_fabricated_error("adopted unit exited without result file")
+        };
+        emit_build_response(&tx, &request_id, body).await;
+        self.active.lock().await.remove(&request_id);
+        let _ = tokio::fs::remove_dir_all(&work_dir).await;
         let _ = Command::new("systemctl")
             .arg("reset-failed")
-            .args(&names)
+            .arg(&unit)
             .status()
             .await;
     }
@@ -496,5 +543,129 @@ struct FrameError {
 impl FrameError {
     fn into_proto(self) -> BuildError {
         BuildError { code: self.code, message: self.message, stage: self.stage }
+    }
+}
+
+// ── resume helpers ──────────────────────────────────────────────────────
+//
+// `list_coolify_build_units` + `parse_request_id` + the JSON parsers below
+// let `BuilderCtx::resume_or_reap` reconstruct in-flight builds across a
+// coold restart without relying on any in-memory state.
+
+async fn list_coolify_build_units() -> Vec<String> {
+    let out = match Command::new("systemctl")
+        .args([
+            "list-units",
+            "--all",
+            "--no-legend",
+            "--plain",
+            "--type=service",
+            "coolify-build-*.service",
+        ])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            warn!(error = %e, "systemctl list-units failed; skipping resume");
+            return vec![];
+        }
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next().map(str::to_owned))
+        .filter(|n| n.starts_with("coolify-build-") && n.ends_with(".service"))
+        .collect()
+}
+
+async fn systemctl_is_active(unit: &str) -> bool {
+    Command::new("systemctl")
+        .args(["is-active", unit])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn parse_request_id(unit_name: &str) -> Option<String> {
+    unit_name
+        .strip_prefix("coolify-build-")
+        .and_then(|rest| rest.strip_suffix(".service"))
+        .map(str::to_owned)
+}
+
+/// Shape of `result.json` the builder persists on success. Mirrors
+/// `builder_core::BuildResult` (which is where the type originates).
+#[derive(Debug, Deserialize)]
+struct StoredResult {
+    digest: String,
+    registry_ref: String,
+    duration_ms: u64,
+    stack_used: SubprocessStack,
+}
+
+impl StoredResult {
+    fn into_proto(self) -> BuildResult {
+        BuildResult {
+            digest: self.digest,
+            registry_ref: self.registry_ref,
+            duration_ms: self.duration_ms,
+            stack_used: self.stack_used.into_proto() as i32,
+        }
+    }
+}
+
+/// Shape of `error.json` the builder persists on failure/cancel.
+#[derive(Debug, Deserialize)]
+struct StoredError {
+    code: u32,
+    message: String,
+    #[serde(default)]
+    stage: String,
+}
+
+impl StoredError {
+    fn into_proto(self) -> BuildError {
+        BuildError { code: self.code, message: self.message, stage: self.stage }
+    }
+}
+
+fn body_from_result_bytes(bytes: &[u8]) -> BuildResponseBody {
+    match serde_json::from_slice::<StoredResult>(bytes) {
+        Ok(r) => BuildResponseBody { body: Some(build_response_body::Body::Ok(r.into_proto())) },
+        Err(e) => body_fabricated_error(&format!("malformed result.json: {e}")),
+    }
+}
+
+fn body_from_error_bytes(bytes: &[u8]) -> BuildResponseBody {
+    match serde_json::from_slice::<StoredError>(bytes) {
+        Ok(e) => BuildResponseBody { body: Some(build_response_body::Body::Err(e.into_proto())) },
+        Err(e) => body_fabricated_error(&format!("malformed error.json: {e}")),
+    }
+}
+
+fn body_fabricated_error(message: &str) -> BuildResponseBody {
+    BuildResponseBody {
+        body: Some(build_response_body::Body::Err(BuildError {
+            code: 500,
+            message: message.to_owned(),
+            stage: "reap".into(),
+        })),
+    }
+}
+
+async fn emit_build_response(
+    tx: &mpsc::Sender<ClientMsg>,
+    request_id: &str,
+    body: BuildResponseBody,
+) {
+    let msg = ClientMsg {
+        payload: Some(crate::grpc::proto::client_msg::Payload::Response(Response {
+            request_id: request_id.to_owned(),
+            body: Some(response::Body::Build(body)),
+        })),
+    };
+    if let Err(e) = tx.send(msg).await {
+        warn!(%request_id, error = %e, "failed to enqueue resumed build response");
     }
 }

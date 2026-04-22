@@ -50,7 +50,6 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
         ctx.ensure_work_root()
             .await
             .with_context(|| format!("mkdir -p {}", config.builder_work_dir.display()))?;
-        BuilderCtx::reap_orphan_units().await;
         info!(
             work_dir = %config.builder_work_dir.display(),
             capacity = config.builder_capacity,
@@ -105,6 +104,14 @@ async fn connect_and_serve(
     });
 
     let (tx, rx) = mpsc::channel::<ClientMsg>(64);
+
+    // Resume any in-flight builder units left by a prior coold invocation.
+    // Must happen after the mpsc channel is live so adopted builds can enqueue
+    // their final Response onto the stream (it will drain once the stream
+    // binds below). Safe when builder_ctx is None — nothing to resume.
+    if let Some(ctx) = builder_ctx.as_ref().cloned() {
+        ctx.resume_or_reap(tx.clone()).await;
+    }
 
     let mut capabilities = vec!["coold".to_string()];
     let mut builder_capacity = 0u32;
