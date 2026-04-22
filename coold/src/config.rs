@@ -197,6 +197,16 @@ pub struct Config {
     /// "200%" allows two full cores).
     #[arg(long, env = "COOLD_BUILDER_CPU_QUOTA", default_value = "200%")]
     pub builder_cpu_quota: String,
+
+    /// Comma-separated list of CIDRs the builder subprocess is forbidden to
+    /// reach at the socket layer (systemd `IPAddressDeny`, enforced via eBPF).
+    /// Typically the mesh management and container pools — populated by
+    /// coolify-cli from `--wg-mgmt-pool` and `--container-pool`. coold
+    /// additionally blocks a fixed set (`127.0.0.1`, `169.254.0.0/16`,
+    /// `::1/128`, `fc00::/7`, `fe80::/10`) so the operator does not need to
+    /// repeat them; `127.0.0.53` stays reachable so DNS keeps working.
+    #[arg(long, env = "COOLD_BUILDER_DENY_NETS", value_delimiter = ',', default_value = "")]
+    pub builder_deny_nets: Vec<String>,
 }
 
 impl Config {

@@ -39,6 +39,7 @@ pub struct BuilderCtx {
     timeout_secs: u64,
     memory_max: String,
     cpu_quota: String,
+    deny_nets: Vec<String>,
     active: Arc<Mutex<HashMap<String, BuildHandle>>>,
 }
 
@@ -53,6 +54,9 @@ pub struct BuilderSettings {
     pub timeout_secs: u64,
     pub memory_max: String,
     pub cpu_quota: String,
+    /// Extra CIDRs the build subprocess is forbidden to reach. Combined with
+    /// a fixed localhost/link-local/ULA set below.
+    pub deny_nets: Vec<String>,
 }
 
 impl BuilderCtx {
@@ -64,6 +68,12 @@ impl BuilderCtx {
             timeout_secs: settings.timeout_secs,
             memory_max: settings.memory_max,
             cpu_quota: settings.cpu_quota,
+            deny_nets: settings
+                .deny_nets
+                .into_iter()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
             active: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -248,7 +258,27 @@ impl BuilderCtx {
             .arg("-p")
             .arg("RestrictNamespaces=mnt user")
             .arg("-p")
-            .arg("SystemCallArchitectures=native")
+            .arg("SystemCallArchitectures=native");
+        // Network deny list via eBPF (IPAddressDeny). Evaluated with
+        // longest-prefix match; no Allow entries means the default is
+        // allow-all, which we intentionally keep so git clone + registry
+        // pulls reach the public internet. We deliberately do NOT block
+        // 127.0.0.0/8 wholesale — systemd-resolved's 127.0.0.53:53 stub
+        // resolver needs to stay reachable for DNS. Instead we block
+        // 127.0.0.1 specifically (Redis, Corrosion API, etc.).
+        for net in [
+            "127.0.0.1",
+            "169.254.0.0/16",
+            "::1/128",
+            "fc00::/7",
+            "fe80::/10",
+        ] {
+            cmd.arg("-p").arg(format!("IPAddressDeny={net}"));
+        }
+        for net in &self.deny_nets {
+            cmd.arg("-p").arg(format!("IPAddressDeny={net}"));
+        }
+        cmd
             .arg("--")
             .arg(&self.builder_bin)
             .arg(&req_path)

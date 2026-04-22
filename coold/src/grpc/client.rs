@@ -45,6 +45,7 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
             timeout_secs: config.builder_timeout_secs,
             memory_max: config.builder_memory_max.clone(),
             cpu_quota: config.builder_cpu_quota.clone(),
+            deny_nets: config.builder_deny_nets.clone(),
         }));
         ctx.ensure_work_root()
             .await
