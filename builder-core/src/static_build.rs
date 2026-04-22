@@ -112,12 +112,41 @@ fn emit(sink: &mut dyn ProgressSink, stage: &str, log: impl Into<String>, percen
 }
 
 async fn run_ok(bin: &str, args: &[&str], cwd: &Path) -> Result<bool, BuildError> {
-    let status = Command::new(bin)
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = Command::new(bin)
         .args(args)
         .current_dir(cwd)
-        .status()
-        .await
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| err(500, "spawn", format!("{bin} spawn: {e}")))?;
+
+    let stdout = child.stdout.take().expect("piped");
+    let stderr = child.stderr.take().expect("piped");
+    let tag = bin.to_owned();
+    let tag2 = bin.to_owned();
+    // Forward everything the child writes to *our* stderr via tracing so the
+    // parent (coold) can keep reading a pure NDJSON stream on our stdout.
+    let o = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            tracing::info!(target: "subprocess", "{tag}: {l}");
+        }
+    });
+    let e = tokio::spawn(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(l)) = lines.next_line().await {
+            tracing::info!(target: "subprocess", "{tag2}: {l}");
+        }
+    });
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| err(500, "spawn", format!("{bin} wait: {e}")))?;
+    let _ = o.await;
+    let _ = e.await;
     Ok(status.success())
 }
 

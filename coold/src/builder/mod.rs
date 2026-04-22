@@ -156,14 +156,23 @@ impl BuilderCtx {
             .arg(format!("CPUQuota={}", self.cpu_quota))
             .arg("-p")
             .arg("PrivateTmp=yes")
+            // ProtectSystem=full keeps /usr, /boot, /efi read-only but leaves
+            // /var, /run, /etc writable — buildah needs to touch
+            // /var/lib/containers/storage and /run/containers (netavark locks,
+            // image overlay mountpoints), so "strict" breaks the build with
+            // "open /run/lock/netavark.lock: read-only file system".
             .arg("-p")
-            .arg("ProtectSystem=strict")
+            .arg("ProtectSystem=full")
             .arg("-p")
             .arg("ProtectHome=yes")
             .arg("-p")
             .arg(format!("ReadWritePaths={}", work_dir.display()))
             .arg("-p")
             .arg("ReadWritePaths=/var/lib/containers/storage")
+            .arg("-p")
+            .arg("ReadWritePaths=/run/containers")
+            .arg("-p")
+            .arg("ReadWritePaths=/run/lock")
             .arg("--")
             .arg(&self.builder_bin)
             .arg(&req_path)
