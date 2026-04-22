@@ -218,14 +218,18 @@ impl BuilderCtx {
             .arg("ProtectHome=yes")
             .arg("-p")
             .arg(format!("ReadWritePaths={}", work_dir.display()))
+            // "-" prefix = tolerate missing path. /run/containers and
+            // /run/netavark are created lazily by buildah/netavark on first
+            // use; without the prefix systemd refuses to start the unit with
+            // "Failed to set up mount namespacing: No such file or directory".
             .arg("-p")
             .arg("ReadWritePaths=/var/lib/containers")
             .arg("-p")
-            .arg("ReadWritePaths=/run/containers")
+            .arg("ReadWritePaths=-/run/containers")
             .arg("-p")
-            .arg("ReadWritePaths=/run/netavark")
+            .arg("ReadWritePaths=-/run/netavark")
             .arg("-p")
-            .arg("ReadWritePaths=/run/lock")
+            .arg("ReadWritePaths=-/run/lock")
             // Defense-in-depth. Builder runs as root for buildah's benefit,
             // so lock down everything not strictly required. CAP_* trim and
             // SystemCallFilter are deferred until the ReadWritePaths set is
