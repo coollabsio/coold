@@ -15,5 +15,9 @@ serde_json = { workspace = true }
 name = "builder"
 path = "tests/builder.rs"
 
+[[test]]
+name = "install"
+path = "tests/install.rs"
+
 [lib]
 path = "src/lib.rs"

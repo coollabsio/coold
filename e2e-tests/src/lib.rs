@@ -28,6 +28,60 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
+pub mod hetzner;
+pub mod install;
+
+use std::cell::RefCell;
+
+thread_local! {
+    static TAG: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Set a short prefix included by [`log_step`] / [`log_ok`] / hetzner
+/// progress lines. Each test calls this at entry so interleaved parallel
+/// output can be disambiguated.
+pub fn set_tag(t: impl Into<String>) {
+    TAG.with(|c| *c.borrow_mut() = t.into());
+}
+
+pub fn tag() -> String {
+    TAG.with(|c| c.borrow().clone())
+}
+
+/// Prefix `msg` with the thread-local tag (if set) and emit to stderr.
+pub fn log_line(msg: &str) {
+    let t = tag();
+    if t.is_empty() {
+        eprintln!("{msg}");
+    } else {
+        eprintln!("[{t}] {msg}");
+    }
+}
+
+/// Populate `std::env` from `<crate>/.env` if the file exists. Values in the
+/// file never override existing env vars — a shell-exported var always wins.
+/// Idempotent across calls; safe to invoke from every `from_env()`.
+pub fn load_dotenv() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".env");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return;
+    };
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        let v = v.trim().trim_matches('"').trim_matches('\'');
+        if std::env::var_os(k).is_none() {
+            std::env::set_var(k, v);
+        }
+    }
+}
+
 pub struct Env {
     pub builder_host: String,
     pub cool_only_host: String,
@@ -40,6 +94,7 @@ pub struct Env {
 
 impl Env {
     pub fn from_env() -> Self {
+        load_dotenv();
         Self {
             builder_host: must("BUILDER_HOST"),
             cool_only_host: must("COOLD_ONLY_HOST"),

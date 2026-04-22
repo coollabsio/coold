@@ -26,6 +26,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -66,7 +67,14 @@ impl<'a> ProgressSink for DualSink<'a> {
 
 fn write_json_atomic(path: &Path, bytes: &[u8]) {
     let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, bytes).is_ok() {
+    let ok = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()));
+    if ok.is_ok() {
         let _ = std::fs::rename(tmp, path);
     }
 }
@@ -103,6 +111,7 @@ async fn main() -> ExitCode {
     let mut events = match OpenOptions::new()
         .create(true)
         .append(true)
+        .mode(0o600)
         .open(work_dir.join("events.ndjson"))
     {
         Ok(f) => f,

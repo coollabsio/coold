@@ -1,2 +1,6 @@
 /target
 Cargo.lock.bak
+
+# e2e-tests may keep a local .env with Hetzner tokens etc.
+.env
+!.env.example

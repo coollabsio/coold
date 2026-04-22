@@ -1,0 +1,7 @@
+target
+Cargo.lock.bak
+.git
+
+# Never ship local secrets into an image.
+.env
+!.env.example

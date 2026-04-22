@@ -17,12 +17,13 @@
 //! children down in the same sweep.
 
 use std::collections::HashMap;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tracing::{info, warn};
@@ -79,7 +80,12 @@ impl BuilderCtx {
     }
 
     pub async fn ensure_work_root(&self) -> std::io::Result<()> {
-        tokio::fs::create_dir_all(&self.work_root).await
+        tokio::fs::create_dir_all(&self.work_root).await?;
+        tokio::fs::set_permissions(
+            &self.work_root,
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .await
     }
 
     /// Resume or reap builder transient units left by a prior coold run.
@@ -235,14 +241,29 @@ impl BuilderCtx {
 
     async fn run_build(&self, request_id: &str, req: BuildRequest) -> Result<BuildResult, BuildError> {
         let work_dir = self.work_root.join(request_id);
-        tokio::fs::create_dir_all(&work_dir)
-            .await
-            .map_err(|e| build_err(500, "setup", format!("mkdir work: {e}")))?;
+        let wd = work_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&wd)
+        })
+        .await
+        .map_err(|e| build_err(500, "setup", format!("mkdir join: {e}")))?
+        .map_err(|e| build_err(500, "setup", format!("mkdir work: {e}")))?;
 
         let req_path = work_dir.join("request.json");
         let req_json = serde_json::to_vec(&SubprocessRequest::from_proto(&req))
             .map_err(|e| build_err(500, "setup", format!("encode request: {e}")))?;
-        tokio::fs::write(&req_path, &req_json)
+        let mut f = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&req_path)
+            .await
+            .map_err(|e| build_err(500, "setup", format!("open request.json: {e}")))?;
+        f.write_all(&req_json)
             .await
             .map_err(|e| build_err(500, "setup", format!("write request.json: {e}")))?;
 
