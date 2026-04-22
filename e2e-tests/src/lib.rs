@@ -18,9 +18,10 @@
 //! `COOLD_BUILDER_CAPACITY` semaphore and races on `buildah images` state
 //! shared across hosts.
 //!
-//! The harness drives Redis via `ssh + redis-cli` on the central host and
-//! asserts remote state via `buildah images` and `systemctl is-active`.
-//! No broker/coold code is linked — tests exercise the black-box contract.
+//! The harness drives the broker UDS via `ssh + curl --unix-socket` on the
+//! central host and asserts remote state via `buildah images` and
+//! `systemctl is-active`. No broker/coold code is linked — tests exercise
+//! the black-box contract.
 
 use std::process::Command;
 use std::thread;
@@ -132,43 +133,94 @@ impl Env {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    pub fn redis_xadd(&self, payload: &str) -> Result<(), String> {
-        // single-quote the payload in the remote shell; payload is JSON so
-        // it already uses double quotes and will survive the single-quote
-        // wrapping.
-        self.ssh(
-            &self.central_host,
-            &format!("redis-cli XADD build:cmd '*' payload '{}'", payload),
-        )
-        .map(|_| ())
+    /// POST a JSON payload to the broker UDS via `ssh + curl` on the
+    /// central host. Returns (status_code, body). Payload must be valid
+    /// JSON — double-quoted strings, no single quotes.
+    pub fn uds_post(&self, path: &str, payload: &str) -> Result<(u16, String), String> {
+        let cmd = format!(
+            "curl --unix-socket {sock} -sS -X POST -H 'Content-Type: application/json' --data '{payload}' -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
+            sock = BROKER_SOCKET
+        );
+        parse_curl_output(self.ssh(&self.central_host, &cmd)?)
     }
 
-    pub fn redis_lpop(&self, request_id: &str) -> Result<Option<String>, String> {
-        let out = self.ssh(
-            &self.central_host,
-            &format!("redis-cli LPOP build:resp:{request_id}"),
-        )?;
-        let trimmed = out.trim();
-        if trimmed.is_empty() || trimmed == "(nil)" {
-            Ok(None)
+    pub fn uds_get(&self, path: &str) -> Result<(u16, String), String> {
+        let cmd = format!(
+            "curl --unix-socket {sock} -sS -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
+            sock = BROKER_SOCKET
+        );
+        parse_curl_output(self.ssh(&self.central_host, &cmd)?)
+    }
+
+    /// Submit a build dispatch envelope. Returns `Accepted` on 202 with
+    /// the assigned `request_id`, or `Rejected` when the broker refused
+    /// pre-dispatch (unknown host, no builder, capacity cap) — the
+    /// response body is the final error for this request_id.
+    pub fn dispatch_build(&self, payload: &str) -> DispatchResult {
+        let (code, body) = self
+            .uds_post("/v1/build/dispatch", payload)
+            .expect("dispatch POST");
+        if code == 202 {
+            let ack: DispatchAck =
+                serde_json::from_str(&body).unwrap_or_else(|e| panic!("parse ack {body:?}: {e}"));
+            DispatchResult::Accepted(ack)
         } else {
-            Ok(Some(trimmed.to_owned()))
+            let resp: BuildResponse = serde_json::from_str(&body)
+                .unwrap_or_else(|e| panic!("parse error body {body:?}: {e}"));
+            DispatchResult::Rejected(resp)
         }
     }
 
-    pub fn wait_build_resp(&self, request_id: &str, timeout: Duration) -> BuildResponse {
+    /// Long-poll `GET /v1/build/result/{request_id}` until the response
+    /// lands or `timeout` elapses. 404 is tolerated briefly — dispatches
+    /// can race the poller.
+    pub fn wait_build_result(&self, request_id: &str, timeout: Duration) -> BuildResponse {
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
-            match self.redis_lpop(request_id) {
-                Ok(Some(line)) => {
-                    return serde_json::from_str(&line)
-                        .unwrap_or_else(|e| panic!("parse response {line:?}: {e}"))
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let poll_ms = remaining.as_millis().clamp(1_000, 25_000) as u64;
+            let (code, body) = self
+                .uds_get(&format!(
+                    "/v1/build/result/{request_id}?timeout_ms={poll_ms}"
+                ))
+                .expect("result GET");
+            match code {
+                200 => {
+                    return serde_json::from_str(&body)
+                        .unwrap_or_else(|e| panic!("parse result {body:?}: {e}"));
                 }
-                Ok(None) => thread::sleep(Duration::from_secs(2)),
-                Err(e) => panic!("LPOP build:resp:{request_id}: {e}"),
+                408 => continue,
+                404 => {
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
+                _ => {
+                    return serde_json::from_str(&body)
+                        .unwrap_or_else(|e| panic!("parse err {body:?}: {e}"));
+                }
             }
         }
-        panic!("no build:resp:{request_id} within {timeout:?}");
+        panic!("no result for {request_id} within {timeout:?}");
+    }
+
+    /// Combined `dispatch + wait`. If dispatch is rejected pre-flight,
+    /// returns the error body directly (no polling).
+    pub fn dispatch_and_wait(
+        &self,
+        payload: &str,
+        request_id: &str,
+        timeout: Duration,
+    ) -> BuildResponse {
+        match self.dispatch_build(payload) {
+            DispatchResult::Rejected(r) => r,
+            DispatchResult::Accepted(_) => self.wait_build_result(request_id, timeout),
+        }
+    }
+
+    pub fn cancel_build(&self, request_id: &str) {
+        let _ = self
+            .uds_post(&format!("/v1/build/{request_id}/cancel"), "")
+            .expect("cancel POST");
     }
 
     pub fn has_image(&self, host: &str, tag: &str) -> bool {
@@ -240,12 +292,31 @@ pub fn build_envelope(
     obj.to_string()
 }
 
-pub fn cancel_envelope(request_id: &str) -> String {
-    serde_json::json!({
-        "request_id": request_id,
-        "command": { "type": "cancel" },
-    })
-    .to_string()
+pub const BROKER_SOCKET: &str = "/run/coolify/broker.sock";
+
+#[derive(Debug, Deserialize)]
+pub struct DispatchAck {
+    pub request_id: String,
+}
+
+#[derive(Debug)]
+pub enum DispatchResult {
+    Accepted(DispatchAck),
+    Rejected(BuildResponse),
+}
+
+/// Parse curl -sS output ending in `\n__CODE__<status>__`. Returns
+/// (status, body-without-marker).
+fn parse_curl_output(out: String) -> Result<(u16, String), String> {
+    let (body, code_part) = out
+        .rsplit_once("__CODE__")
+        .ok_or_else(|| format!("missing __CODE__ marker in curl output: {out:?}"))?;
+    let code: u16 = code_part
+        .trim_end_matches('_')
+        .trim()
+        .parse()
+        .map_err(|e| format!("parse http code {code_part:?}: {e}"))?;
+    Ok((code, body.trim_end().to_owned()))
 }
 
 #[derive(Debug, Deserialize)]

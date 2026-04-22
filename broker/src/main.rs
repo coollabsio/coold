@@ -1,8 +1,9 @@
 mod auth;
-mod build_redis_bridge;
 mod config;
-mod redis_bridge;
+mod envelope;
+mod routing;
 mod state;
+mod unix_bridge;
 
 use anyhow::Result;
 use tracing::info;
@@ -17,7 +18,7 @@ async fn main() -> Result<()> {
 
     info!(
         grpc_bind = %config.grpc_bind,
-        redis_url = %config.redis_url,
+        uds_path = %config.unix_socket_path.display(),
         "broker starting",
     );
 
@@ -26,9 +27,8 @@ async fn main() -> Result<()> {
 
     tokio::try_join!(
         grpc_server::run(config.clone(), streams.clone(), pending.clone()),
-        redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
-        build_redis_bridge::run(config.clone(), streams.clone(), pending.clone()),
-        pending_sweeper::run(config.clone(), pending.clone()),
+        unix_bridge::run(config.clone(), streams.clone(), pending.clone()),
+        pending_sweeper::run(pending.clone()),
     )?;
 
     Ok(())
@@ -59,10 +59,9 @@ mod grpc_server {
 
     use crate::{
         auth,
-        build_redis_bridge::{self, BuildResponseBody},
         config::Config,
-        redis_bridge,
-        state::{Pending, PendingKind, StreamHandle, Streams},
+        envelope::{BuildResponseBody, ResponseBody},
+        state::{Pending, PendingKind, ResponseData, StreamHandle, Streams},
     };
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
@@ -120,7 +119,6 @@ mod grpc_server {
 
             let streams = self.streams.clone();
             let pending = self.pending.clone();
-            let redis_url = self.config.redis_url.clone();
             let host_id_clone = host_id.clone();
             let jwt_caps_clone = jwt_caps.clone();
             let mut inbound = request.into_inner();
@@ -129,35 +127,7 @@ mod grpc_server {
                 while let Some(msg) = inbound.next().await {
                     match msg {
                         Ok(ClientMsg { payload: Some(client_msg::Payload::Response(resp)) }) => {
-                            let request_id = resp.request_id.clone();
-                            let kind = pending
-                                .remove(&request_id)
-                                .map(|e| e.kind)
-                                .unwrap_or(PendingKind::Coold);
-
-                            match resp.body {
-                                Some(response::Body::Build(body)) => {
-                                    let envelope = BuildResponseBody::from_proto(body);
-                                    if let Err(e) = build_redis_bridge::push_build_response(
-                                        &redis_url,
-                                        &request_id,
-                                        envelope,
-                                    )
-                                    .await
-                                    {
-                                        warn!(%request_id, error = %e, "failed to push build response to Redis");
-                                    }
-                                }
-                                _ => {
-                                    if kind == PendingKind::Build {
-                                        warn!(%request_id, "non-build Response for build request; dropping");
-                                        continue;
-                                    }
-                                    if let Err(e) = redis_bridge::push_response(&redis_url, resp).await {
-                                        warn!(host_id = %host_id_clone, error = %e, "failed to push response to Redis");
-                                    }
-                                }
-                            }
+                            deliver_response(&pending, resp);
                         }
                         Ok(ClientMsg { payload: Some(client_msg::Payload::Hello(h)) }) => {
                             info!(
@@ -205,26 +175,73 @@ mod grpc_server {
             Ok(Response::new(Box::pin(outbound)))
         }
     }
+
+    /// Map a coold gRPC `Response` to the right lane's `ResponseData` and
+    /// hand it to the pending entry. If the dispatch was for a build, an
+    /// `Error` body is translated to `BuildResponseBody::Error`; otherwise
+    /// to `ResponseBody::Error`. Unknown request_id → drop.
+    fn deliver_response(pending: &Pending, resp: coolify_proto::agent::v1::Response) {
+        let request_id = resp.request_id.clone();
+        let kind = match pending.get(&request_id) {
+            Some(e) => e.kind,
+            None => {
+                warn!(%request_id, "response for unknown request_id; dropping");
+                return;
+            }
+        };
+
+        let data = match (kind, resp.body) {
+            (_, Some(response::Body::Build(b))) => {
+                ResponseData::Build(BuildResponseBody::from_proto(b))
+            }
+            (PendingKind::Build, Some(response::Body::Error(e))) => {
+                ResponseData::Build(BuildResponseBody::Error {
+                    code: e.code,
+                    message: e.message,
+                    stage: String::new(),
+                })
+            }
+            (PendingKind::Build, _) => {
+                warn!(%request_id, "non-build Response for build request; dropping");
+                return;
+            }
+            (PendingKind::Coold, body) => {
+                let resp = coolify_proto::agent::v1::Response {
+                    request_id: request_id.clone(),
+                    body,
+                };
+                match ResponseBody::try_from_proto(resp) {
+                    Some(rb) => ResponseData::Coold(rb),
+                    None => {
+                        warn!(%request_id, "build body on coold request; dropping");
+                        return;
+                    }
+                }
+            }
+        };
+
+        pending.deliver(&request_id, data);
+    }
 }
 
 mod pending_sweeper {
     use anyhow::Result;
     use tracing::warn;
 
-    use crate::{
-        config::Config,
-        state::{Pending, DISPATCH_TIMEOUT_SECS},
-    };
+    use crate::state::{Pending, PendingKind, DISPATCH_TIMEOUT_SECS};
 
-    pub async fn run(config: Config, pending: Pending) -> Result<()> {
+    pub async fn run(pending: Pending) -> Result<()> {
         let interval = std::time::Duration::from_secs(1);
         loop {
             tokio::time::sleep(interval).await;
             let expired = pending.drain_expired();
-            for (request_id, _entry) in expired {
-                warn!(%request_id, timeout_secs = DISPATCH_TIMEOUT_SECS, "dispatch timed out; pushing 504");
-                if let Err(e) = crate::redis_bridge::push_timeout_error(&config.redis_url, &request_id).await {
-                    warn!(%request_id, error = %e, "failed to push coold timeout error");
+            for (request_id, entry) in expired {
+                if matches!(entry.kind, PendingKind::Coold) {
+                    warn!(
+                        %request_id,
+                        timeout_secs = DISPATCH_TIMEOUT_SECS,
+                        "coold dispatch timed out; handler will return 504"
+                    );
                 }
             }
         }

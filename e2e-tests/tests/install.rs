@@ -26,8 +26,8 @@ const CONTAINER_POOL: &str = "10.210.0.0/16";
 // Systemd units that must be `active` on every coold host post-install.
 const CORE_UNITS: &[&str] = &["coold", "corrosion", "coolify-mesh-fw", "wg-quick@wg0"];
 
-// Central-only units. `redis-server` on Debian/Ubuntu is sometimes registered
-// as `redis` instead — [`assert_central_units`] accepts either.
+// Central-only units. Broker runs the UDS command bus — Redis is no
+// longer installed by the CLI.
 const CENTRAL_UNITS: &[&str] = &["broker"];
 
 fn assert_central_units(ssh_key: &str, host: &str) {
@@ -38,16 +38,54 @@ fn assert_central_units(ssh_key: &str, host: &str) {
         );
         ok(&format!("{host}: systemd unit {unit} active"));
     }
-    let r = unit_active(ssh_key, host, "redis-server");
-    let r2 = !r && unit_active(ssh_key, host, "redis");
+    assert_broker_socket(ssh_key, host);
+}
+
+/// Verify the broker UDS is present, is a socket, has the expected
+/// filesystem perms (0600 when no group is configured, 0660 when one is),
+/// and is live on `/v1/health`.
+fn assert_broker_socket(ssh_key: &str, host: &str) {
+    const SOCK: &str = "/run/coolify/broker.sock";
+
+    // 1. File type: socket.
+    let stat_type = ssh(ssh_key, host, &format!("stat -c %F {SOCK}"))
+        .unwrap_or_else(|e| panic!("stat -c %F {SOCK} on {host}: {e}"));
+    let stat_type = stat_type.trim();
+    assert_eq!(
+        stat_type, "socket",
+        "{SOCK} on {host} is {stat_type:?}, expected 'socket'"
+    );
+    ok(&format!("{host}: {SOCK} is a unix socket"));
+
+    // 2. Perms: 0600 (dev default) or 0660 (group configured). Owner must
+    //    be the broker user (root under the default systemd unit).
+    let stat_mode = ssh(ssh_key, host, &format!("stat -c '%a %U %G' {SOCK}"))
+        .unwrap_or_else(|e| panic!("stat -c mode {SOCK} on {host}: {e}"));
+    let stat_mode = stat_mode.trim();
+    let mut parts = stat_mode.split_whitespace();
+    let mode = parts.next().unwrap_or("");
+    let owner = parts.next().unwrap_or("");
+    let group = parts.next().unwrap_or("");
     assert!(
-        r || r2,
-        "neither redis-server nor redis active on central host {host}"
+        mode == "600" || mode == "660",
+        "{SOCK} on {host} mode={mode}, expected 600 or 660 ({stat_mode})"
     );
     ok(&format!(
-        "{host}: systemd unit {} active",
-        if r { "redis-server" } else { "redis" }
+        "{host}: {SOCK} mode={mode} owner={owner} group={group}"
     ));
+
+    // 3. Liveness: /v1/health via curl-over-UDS.
+    let ping = ssh(
+        ssh_key,
+        host,
+        &format!("curl -sS --unix-socket {SOCK} http://localhost/v1/health"),
+    )
+    .unwrap_or_default();
+    assert!(
+        ping.contains("\"ok\":true"),
+        "broker UDS /v1/health did not return ok on {host}: {ping:?}"
+    );
+    ok(&format!("{host}: broker UDS /v1/health → ok"));
 }
 
 fn step(msg: &str) {

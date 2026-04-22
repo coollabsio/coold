@@ -6,7 +6,9 @@
 
 use std::time::Duration;
 
-use e2e_tests::{build_envelope, cancel_envelope, uniq_req_id, wait_until, Env};
+use e2e_tests::{
+    build_envelope, uniq_req_id, wait_until, DispatchResult, Env,
+};
 
 // Small static-site repo for the happy-path fixture.
 const SMALL_REPO: &str = "https://github.com/mdn/beginner-html-site";
@@ -22,9 +24,7 @@ fn pin_to_builder_host() {
     let target = format!("localhost/{req}");
 
     let payload = build_envelope(&req, &e.builder_mgmt, SMALL_REPO, "main", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
-
-    let resp = e.wait_build_resp(&req, Duration::from_secs(180));
+    let resp = e.dispatch_and_wait(&payload, &req, Duration::from_secs(180));
     assert_eq!(resp.status, "ok", "unexpected response: {resp:?}");
     assert!(resp.digest.starts_with("sha256:"), "digest={:?}", resp.digest);
     assert!(e.has_image(&e.builder_host, &req), "image missing on builder");
@@ -44,9 +44,10 @@ fn pin_to_coold_only_host_returns_503() {
     let target = format!("localhost/{req}");
 
     let payload = build_envelope(&req, &e.cool_only_mgmt, SMALL_REPO, "main", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
-
-    let resp = e.wait_build_resp(&req, Duration::from_secs(30));
+    let resp = match e.dispatch_build(&payload) {
+        DispatchResult::Rejected(r) => r,
+        DispatchResult::Accepted(a) => panic!("unexpected accept: {a:?}"),
+    };
     assert_eq!(resp.status, "error");
     assert_eq!(resp.code, 503);
     assert!(
@@ -64,9 +65,10 @@ fn unknown_host_id_returns_503() {
     let target = format!("localhost/{req}");
 
     let payload = build_envelope(&req, "100.64.99.99", SMALL_REPO, "main", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
-
-    let resp = e.wait_build_resp(&req, Duration::from_secs(30));
+    let resp = match e.dispatch_build(&payload) {
+        DispatchResult::Rejected(r) => r,
+        DispatchResult::Accepted(a) => panic!("unexpected accept: {a:?}"),
+    };
     assert_eq!(resp.status, "error");
     assert_eq!(resp.code, 503);
 }
@@ -80,9 +82,7 @@ fn load_balance_picks_builder_host() {
 
     // host_id empty → broker picks
     let payload = build_envelope(&req, "", SMALL_REPO, "main", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
-
-    let resp = e.wait_build_resp(&req, Duration::from_secs(180));
+    let resp = e.dispatch_and_wait(&payload, &req, Duration::from_secs(180));
     assert_eq!(resp.status, "ok", "unexpected response: {resp:?}");
     assert!(
         e.has_image(&e.builder_host, &req),
@@ -101,7 +101,10 @@ fn build_cancel_emits_stage_cancel() {
 
     // Slow repo so the build is still cloning when we cancel.
     let payload = build_envelope(&req, &e.builder_mgmt, SLOW_REPO, "master", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
+    match e.dispatch_build(&payload) {
+        DispatchResult::Accepted(_) => {}
+        DispatchResult::Rejected(r) => panic!("dispatch rejected: {r:?}"),
+    }
 
     // Wait for the transient unit to appear.
     assert!(
@@ -112,9 +115,9 @@ fn build_cancel_emits_stage_cancel() {
         "transient unit never activated"
     );
 
-    e.redis_xadd(&cancel_envelope(&req)).expect("cancel XADD");
+    e.cancel_build(&req);
 
-    let resp = e.wait_build_resp(&req, Duration::from_secs(30));
+    let resp = e.wait_build_result(&req, Duration::from_secs(30));
     assert_eq!(resp.status, "error");
     assert_eq!(resp.code, 499);
     assert_eq!(resp.stage, "cancel", "unexpected stage: {:?}", resp.stage);
@@ -137,7 +140,10 @@ fn coold_restart_adopts_in_flight_build() {
     let target = format!("localhost/{req}");
 
     let payload = build_envelope(&req, &e.builder_mgmt, SLOW_REPO, "master", &target, ".");
-    e.redis_xadd(&payload).expect("XADD");
+    match e.dispatch_build(&payload) {
+        DispatchResult::Accepted(_) => {}
+        DispatchResult::Rejected(r) => panic!("dispatch rejected: {r:?}"),
+    }
 
     assert!(
         wait_until(
@@ -158,9 +164,9 @@ fn coold_restart_adopts_in_flight_build() {
     );
 
     // Cancel so we don't block 30 min on kernel clone.
-    e.redis_xadd(&cancel_envelope(&req)).expect("cancel XADD");
+    e.cancel_build(&req);
 
-    let resp = e.wait_build_resp(&req, Duration::from_secs(60));
+    let resp = e.wait_build_result(&req, Duration::from_secs(60));
     assert_eq!(resp.status, "error");
     assert_eq!(resp.code, 499);
 

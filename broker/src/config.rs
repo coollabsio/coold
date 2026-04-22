@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 
 pub const VERSION: &str = match option_env!("BROKER_VERSION") {
@@ -14,9 +16,26 @@ pub struct Config {
     #[arg(long, env = "BROKER_GRPC_BIND", default_value = "0.0.0.0:6443")]
     pub grpc_bind: String,
 
-    /// Redis URL for the Laravel bridge.
-    #[arg(long, env = "BROKER_REDIS_URL", default_value = "redis://127.0.0.1:6379")]
-    pub redis_url: String,
+    /// Path to the Unix domain socket the central-plane caller (Laravel)
+    /// connects to. Access control = filesystem perms: the socket is
+    /// `0660` if a group is configured, `0600` otherwise.
+    #[arg(
+        long,
+        env = "BROKER_UNIX_SOCKET_PATH",
+        default_value = "/run/coolify/broker.sock"
+    )]
+    pub unix_socket_path: PathBuf,
+
+    /// POSIX group name granted read/write on the socket. When unset, the
+    /// socket stays mode `0600` and only the broker user can read/write —
+    /// suitable for dev. Production deploys set this to the PHP-FPM group.
+    #[arg(long, env = "BROKER_UNIX_SOCKET_GROUP")]
+    pub unix_socket_group: Option<String>,
+
+    /// Cap on the number of in-flight + recently-landed pending entries.
+    /// Bounds memory against a rogue local caller spamming dispatches.
+    #[arg(long, env = "BROKER_PENDING_MAX", default_value = "10000")]
+    pub pending_max: usize,
 
     /// PEM-encoded RSA/EC public key used to verify per-host JWTs issued by Laravel.
     /// Path to the file (read at startup).
