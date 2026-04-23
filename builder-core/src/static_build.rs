@@ -55,12 +55,24 @@ pub async fn run(
     emit(sink, "build", format!("buildah bud → {}", req.target_image), 20);
     info!(target_image = %req.target_image, "starting buildah bud");
 
+    // `--iidfile` writes the image ID (sha256:… of the OCI config) during
+    // `bud`. Reading it from disk after the build avoids a second buildah
+    // process, which on some kernels would trip
+    // `remount /var/lib/containers/storage/overlay, flags: 0x40000:
+    // invalid argument` inside coold's `systemd-run` sandbox because
+    // buildah's overlay driver tries to MS_PRIVATE-remount a bind mount
+    // that its predecessor `bud` already placed at that path.
+    let iid_path = work_dir.join("image-id");
+    let iid_arg = iid_path.to_string_lossy().into_owned();
+
     if !run_ok(
         "buildah",
         &[
             "bud",
             "--storage-driver",
             "overlay",
+            "--iidfile",
+            &iid_arg,
             "-t",
             &req.target_image,
             "-f",
@@ -77,46 +89,13 @@ pub async fn run(
     emit(sink, "build", "build complete", 80);
 
     emit(sink, "store", "reading image digest", 90);
-    // `buildah` under coold's systemd-run sandbox occasionally fails the
-    // overlay store shutdown-remount with
-    // `remount /var/lib/containers/storage/overlay, flags: 0x40000:
-    // invalid argument` AFTER already writing the digest to stdout. The
-    // image is correctly committed by `bud`, so tolerate a non-zero exit
-    // when stdout still carries a well-formed sha256:... digest; only the
-    // shutdown path misbehaves.
-    let images_out = Command::new("buildah")
-        .args([
-            "--storage-driver",
-            "overlay",
-            "images",
-            "--format",
-            "{{.Digest}}",
-            &req.target_image,
-        ])
-        .output()
+    let digest = tokio::fs::read_to_string(&iid_path)
         .await
-        .map_err(|e| err(500, "store", format!("buildah images spawn: {e}")))?;
-    let stdout = String::from_utf8_lossy(&images_out.stdout);
-    let digest = stdout
-        .lines()
-        .find(|l| l.trim().starts_with("sha256:"))
-        .map(|l| l.trim().to_owned())
-        .unwrap_or_default();
-    if digest.is_empty() {
-        let stderr = String::from_utf8_lossy(&images_out.stderr).trim().to_owned();
-        return Err(err(
-            500,
-            "store",
-            format!(
-                "buildah images: exit={:?}, no digest found; stderr: {stderr}",
-                images_out.status.code()
-            ),
-        ));
-    }
-    if !images_out.status.success() {
-        let stderr = String::from_utf8_lossy(&images_out.stderr).trim().to_owned();
-        info!(%digest, stderr, status = ?images_out.status.code(),
-            "buildah images exit non-zero but digest parsed from stdout; continuing");
+        .map_err(|e| err(500, "store", format!("read iidfile {}: {e}", iid_path.display())))?
+        .trim()
+        .to_owned();
+    if !digest.starts_with("sha256:") {
+        return Err(err(500, "store", format!("unexpected iidfile content: {digest:?}")));
     }
 
     let registry_ref = format!("{}@{}", req.target_image, digest);
