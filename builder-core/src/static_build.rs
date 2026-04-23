@@ -77,37 +77,31 @@ pub async fn run(
     emit(sink, "build", "build complete", 80);
 
     emit(sink, "store", "reading image digest", 90);
-    // Match `bud`'s explicit storage driver so a non-default system
-    // `storage.conf` doesn't send inspect to a different store than the one
-    // bud just wrote to. Retry a few times with backoff to absorb overlay
-    // lock contention that can briefly follow `bud` on slower hosts.
-    let mut last_err = String::new();
-    let mut digest = String::new();
-    for attempt in 0..3u32 {
-        let out = Command::new("buildah")
-            .args([
-                "--storage-driver",
-                "overlay",
-                "inspect",
-                "--format",
-                "{{.FromImageDigest}}",
-                &req.target_image,
-            ])
-            .output()
-            .await
-            .map_err(|e| err(500, "store", format!("buildah inspect spawn: {e}")))?;
-        if out.status.success() {
-            digest = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-            break;
-        }
-        last_err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
-        info!(%attempt, %last_err, "buildah inspect non-zero, retrying");
-        tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
+    // `buildah inspect` remounts the overlay store with MS_PRIVATE, which
+    // fails inside the systemd-run sandbox coold wraps the builder in
+    // (`remount /var/lib/containers/storage/overlay, flags: 0x40000:
+    // invalid argument`). `buildah images` reads metadata without
+    // remounting, so use it instead. `--storage-driver overlay` matches
+    // the driver explicitly passed to `bud` so a non-default
+    // `storage.conf` can't send us to a different store.
+    let images_out = Command::new("buildah")
+        .args([
+            "--storage-driver",
+            "overlay",
+            "images",
+            "--format",
+            "{{.Digest}}",
+            &req.target_image,
+        ])
+        .output()
+        .await
+        .map_err(|e| err(500, "store", format!("buildah images spawn: {e}")))?;
+    if !images_out.status.success() {
+        let stderr = String::from_utf8_lossy(&images_out.stderr).trim().to_owned();
+        return Err(err(500, "store", format!("buildah images failed: {stderr}")));
     }
-    if digest.is_empty() {
-        return Err(err(500, "store", format!("buildah inspect failed: {last_err}")));
-    }
-    if !digest.starts_with("sha256:") {
+    let digest = String::from_utf8_lossy(&images_out.stdout).trim().to_owned();
+    if digest.is_empty() || !digest.starts_with("sha256:") {
         return Err(err(500, "store", format!("unexpected digest format: {digest:?}")));
     }
 
