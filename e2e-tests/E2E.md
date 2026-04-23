@@ -77,6 +77,52 @@ Deletes every Hetzner server + ssh_key labeled `coolify-e2e=1` in the project. U
 CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner -- --ignored --nocapture
 ```
 
+## Suite 3 — `stub.rs` (coolify-stub dashboard smoke)
+
+Provisions a single Hetzner VM, runs `coolify init apply`, scp's the prebuilt
+`coolify-stub` Bun binary next to the broker, and drives a real static build
+through the stub's `/api/*` surface.
+
+### Build the binary once
+
+```bash
+cd coolify-stub
+bun install
+(cd web && bun install)
+BUN_TARGET=bun-linux-x64 bun scripts/build-binary.ts
+cd ..
+```
+
+### Run the suite
+
+```bash
+COOLIFY_STUB_BIN=$PWD/coolify-stub/dist/coolify-stub \
+  cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
+```
+
+The test kills the stub process and tails its log on teardown, so a panic
+still surfaces the stub's stderr for triage.
+
+### Keep the VM + stub alive to poke the UI
+
+Set `E2E_KEEP_VMS=1` to skip both the stub `pkill` and the Hetzner VM
+teardown. The test prints an SSH port-forward command on success — open
+`http://localhost:3000` after running it.
+
+```bash
+E2E_KEEP_VMS=1 \
+COOLIFY_STUB_BIN=$PWD/coolify-stub/dist/coolify-stub \
+  cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
+```
+
+`E2E_KEEP_VMS` works for every e2e suite, not just stub. Clean up leaked
+resources with the sweeper when you're done:
+
+```bash
+CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner \
+  -- --ignored --nocapture
+```
+
 ## Manual spot-checks (post-install failure triage)
 
 ```bash

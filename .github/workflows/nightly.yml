@@ -32,9 +32,11 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             arch: amd64
+            bun_target: bun-linux-x64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             arch: arm64
+            bun_target: bun-linux-arm64
     runs-on: ${{ matrix.runner }}
     env:
       COOLD_VERSION: ${{ needs.prep.outputs.tag }}
@@ -52,6 +54,10 @@ jobs:
           cache-all-crates: true
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: Install protoc
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
@@ -80,6 +86,20 @@ jobs:
           tar -czf dist/builder-linux-${{ matrix.arch }}.tar.gz -C dist builder
           rm dist/builder
           (cd dist && sha256sum builder-linux-${{ matrix.arch }}.tar.gz > builder-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - name: Build coolify-stub
+        working-directory: coolify-stub
+        run: |
+          bun install --frozen-lockfile || bun install
+          (cd web && (bun install --frozen-lockfile || bun install))
+          BUN_TARGET=${{ matrix.bun_target }} bun scripts/build-binary.ts
+
+      - name: Package coolify-stub
+        run: |
+          cp coolify-stub/dist/coolify-stub dist/coolify-stub
+          tar -czf dist/coolify-stub-linux-${{ matrix.arch }}.tar.gz -C dist coolify-stub
+          rm dist/coolify-stub
+          (cd dist && sha256sum coolify-stub-linux-${{ matrix.arch }}.tar.gz > coolify-stub-linux-${{ matrix.arch }}.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -117,6 +137,7 @@ jobs:
             echo "- \`coold\` — per-host agent (holds the single gRPC stream to broker; spawns builder subprocess per BuildRequest when COOLD_BUILDER_ENABLED=1)"
             echo "- \`broker\` — central-side gRPC stream broker (single listener on :6443; capability-aware routing)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
+            echo "- \`coolify-stub\` — single-binary stub dashboard (Bun + Svelte) that drives coold via the broker UDS; used by the e2e stub suite"
             echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"
@@ -147,6 +168,10 @@ jobs:
             dist/builder-linux-amd64.tar.gz.sha256
             dist/builder-linux-arm64.tar.gz
             dist/builder-linux-arm64.tar.gz.sha256
+            dist/coolify-stub-linux-amd64.tar.gz
+            dist/coolify-stub-linux-amd64.tar.gz.sha256
+            dist/coolify-stub-linux-arm64.tar.gz
+            dist/coolify-stub-linux-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -169,4 +194,8 @@ jobs:
             dist/builder-linux-amd64.tar.gz \
             dist/builder-linux-amd64.tar.gz.sha256 \
             dist/builder-linux-arm64.tar.gz \
-            dist/builder-linux-arm64.tar.gz.sha256
+            dist/builder-linux-arm64.tar.gz.sha256 \
+            dist/coolify-stub-linux-amd64.tar.gz \
+            dist/coolify-stub-linux-amd64.tar.gz.sha256 \
+            dist/coolify-stub-linux-arm64.tar.gz \
+            dist/coolify-stub-linux-arm64.tar.gz.sha256

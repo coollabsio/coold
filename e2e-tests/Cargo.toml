@@ -19,5 +19,9 @@ path = "tests/builder.rs"
 name = "install"
 path = "tests/install.rs"
 
+[[test]]
+name = "stub"
+path = "tests/stub.rs"
+
 [lib]
 path = "src/lib.rs"

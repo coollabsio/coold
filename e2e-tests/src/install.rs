@@ -256,3 +256,50 @@ pub fn api_token_path() -> PathBuf {
 pub fn wait_for<F: FnMut() -> bool>(cond: F, timeout: Duration) -> bool {
     wait_until(cond, timeout)
 }
+
+/// Upload a local file to `root@<host>:<remote_path>` via scp, reusing the
+/// same ephemeral SSH flags as the rest of the suite.
+pub fn scp_upload(ssh_key: &str, host: &str, local: &str, remote: &str) -> Result<(), String> {
+    let out = Command::new("scp")
+        .args(ephemeral_ssh_args(ssh_key))
+        .arg(local)
+        .arg(format!("root@{host}:{remote}"))
+        .output()
+        .map_err(|e| format!("scp spawn: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "scp {local} -> {host}:{remote} exit {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+/// Issue an HTTP request to `url` from `host` via `ssh + curl`, returning
+/// `(status_code, body)`. Body reassembly mirrors `Env::uds_*` parsing.
+pub fn ssh_http(
+    ssh_key: &str,
+    host: &str,
+    method: &str,
+    url: &str,
+    json_body: Option<&str>,
+) -> Result<(u16, String), String> {
+    let body_arg = match json_body {
+        Some(b) => format!(" -H 'Content-Type: application/json' --data '{b}'"),
+        None => String::new(),
+    };
+    let cmd = format!(
+        "curl -sS -X {method}{body_arg} -w '\\n__CODE__%{{http_code}}__' {url}"
+    );
+    let out = ssh(ssh_key, host, &cmd)?;
+    let (body, code_part) = out
+        .rsplit_once("__CODE__")
+        .ok_or_else(|| format!("missing __CODE__ marker in curl output: {out:?}"))?;
+    let code: u16 = code_part
+        .trim_end_matches('_')
+        .trim()
+        .parse()
+        .map_err(|e| format!("parse http code {code_part:?}: {e}"))?;
+    Ok((code, body.trim_end().to_owned()))
+}

@@ -359,6 +359,22 @@ impl EphemeralCluster {
 
 impl Drop for EphemeralCluster {
     fn drop(&mut self) {
+        // Opt-in bypass: set E2E_KEEP_VMS=1 to skip teardown and leave VMs
+        // running for manual poking. Clean them up later with the
+        // cleanup_leaked_hetzner sweeper (CONFIRM_SWEEP=1) or the Hetzner UI.
+        if std::env::var("E2E_KEEP_VMS").as_deref() == Ok("1") {
+            hlog!("E2E_KEEP_VMS=1 — keeping {} server(s) alive:", self.servers.len());
+            for s in &self.servers {
+                hlog!("  kept server {} ({}) {}", s.id, s.name, s.ipv4);
+            }
+            hlog!(
+                "  kept ssh_key id={} (owned={})",
+                self.key_id,
+                self.key_owned
+            );
+            hlog!("  tear down later: CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner -- --ignored --nocapture");
+            return;
+        }
         for s in &self.servers {
             match self.client.delete_server(s.id) {
                 Ok(()) => hlog!("deleted server {} ({})", s.id, s.name),

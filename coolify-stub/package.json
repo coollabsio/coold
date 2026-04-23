@@ -1,0 +1,17 @@
+{
+  "name": "coolify-stub",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/server.ts",
+    "build:frontend": "cd web && bun run build",
+    "build:embed": "bun scripts/embed-dist.ts",
+    "build:binary": "bun scripts/build-binary.ts",
+    "build": "bun run build:frontend && bun run build:embed && bun run build:binary"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.5.0"
+  }
+}
