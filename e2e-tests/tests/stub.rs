@@ -250,14 +250,24 @@ fn stub_smoke() {
     ok("broker UDS /v1/health → ok");
 
     // 3. Upload the prebuilt stub binary and kick it off. We start it under
-    //    `setsid` so closing the ssh session doesn't SIGHUP the child.
+    //    `setsid` so closing the ssh session doesn't SIGHUP the child. Stub
+    //    binds 0.0.0.0:<STUB_PORT> so the dashboard is reachable directly
+    //    from outside the VM as well as via SSH port-forward.
     step("3/7  scp + launch coolify-stub");
     scp_upload(&cfg.ssh_key, &host, &stub_bin, REMOTE_BIN).expect("scp stub binary");
     ssh(&cfg.ssh_key, &host, &format!("chmod +x {REMOTE_BIN}")).expect("chmod stub");
+    // coold's INPUT chain is default-deny via the coolify firewall scaffold,
+    // so we explicitly accept inbound connections to the stub's port before
+    // starting it. Idempotent: -C checks before -I inserts.
+    let open_port = format!(
+        "iptables -C INPUT -p tcp --dport {STUB_PORT} -j ACCEPT 2>/dev/null || \
+         iptables -I INPUT -p tcp --dport {STUB_PORT} -j ACCEPT"
+    );
+    let _ = ssh(&cfg.ssh_key, &host, &open_port);
     let wg_ip = wg0_ip(&cfg.ssh_key, &host);
     let launch = format!(
         "rm -f {REMOTE_LOG}; \
-         COOLIFY_HOSTS={wg_ip} BROKER_SOCKET_PATH=/run/coolify/broker.sock PORT={STUB_PORT} HOST=127.0.0.1 \
+         COOLIFY_HOSTS={wg_ip} BROKER_SOCKET_PATH=/run/coolify/broker.sock PORT={STUB_PORT} HOST=0.0.0.0 \
          setsid nohup {REMOTE_BIN} >{REMOTE_LOG} 2>&1 < /dev/null & \
          echo $!",
     );
@@ -265,7 +275,7 @@ fn stub_smoke() {
         .unwrap_or_else(|e| panic!("launch stub on {host}: {e}"))
         .trim()
         .to_string();
-    ok(&format!("stub launched pid={pid}"));
+    ok(&format!("stub launched pid={pid} (0.0.0.0:{STUB_PORT})"));
 
     // Ensure cleanup even on panic. Drop order: this runs *before*
     // EphemeralCluster::drop so logs are always retrievable for triage.
@@ -394,14 +404,25 @@ fn stub_smoke() {
     if std::env::var("E2E_KEEP_VMS").as_deref() == Ok("1") {
         e2e_tests::log_line("");
         e2e_tests::log_line(&format!("E2E_KEEP_VMS=1 — stub left running on {host}"));
-        e2e_tests::log_line("Reach the dashboard via SSH port-forward (stub binds 127.0.0.1 + firewall default-deny):");
         e2e_tests::log_line(&format!(
-            "  ssh -i {key} -N -L 3000:127.0.0.1:{STUB_PORT} root@{host}",
+            "Direct URL:        http://{host}:{STUB_PORT}"
+        ));
+        e2e_tests::log_line("SSH port-forward:");
+        e2e_tests::log_line(&format!(
+            "  ssh -i {key} -N -L {STUB_PORT}:127.0.0.1:{STUB_PORT} root@{host}",
             key = cfg.ssh_key
         ));
-        e2e_tests::log_line("Then open http://localhost:3000 in your browser.");
-        e2e_tests::log_line(&format!("Tail stub log:     ssh -i {key} root@{host} 'tail -f {REMOTE_LOG}'", key = cfg.ssh_key));
-        e2e_tests::log_line(&format!("Kill stub:         ssh -i {key} root@{host} pkill -f coolify-stub", key = cfg.ssh_key));
+        e2e_tests::log_line(&format!(
+            "  → open http://localhost:{STUB_PORT}"
+        ));
+        e2e_tests::log_line(&format!(
+            "Tail stub log:     ssh -i {key} root@{host} 'tail -f {REMOTE_LOG}'",
+            key = cfg.ssh_key
+        ));
+        e2e_tests::log_line(&format!(
+            "Kill stub:         ssh -i {key} root@{host} pkill -f coolify-stub",
+            key = cfg.ssh_key
+        ));
         e2e_tests::log_line("Destroy VM later:  CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner -- --ignored --nocapture");
     }
     // StubGuard kills the stub (unless E2E_KEEP_VMS=1); EphemeralCluster::drop
