@@ -77,16 +77,37 @@ pub async fn run(
     emit(sink, "build", "build complete", 80);
 
     emit(sink, "store", "reading image digest", 90);
-    let inspect_out = Command::new("buildah")
-        .args(["inspect", "--format", "{{.FromImageDigest}}", &req.target_image])
-        .output()
-        .await
-        .map_err(|e| err(500, "store", format!("buildah inspect spawn: {e}")))?;
-    if !inspect_out.status.success() {
-        return Err(err(500, "store", "buildah inspect failed"));
+    // Match `bud`'s explicit storage driver so a non-default system
+    // `storage.conf` doesn't send inspect to a different store than the one
+    // bud just wrote to. Retry a few times with backoff to absorb overlay
+    // lock contention that can briefly follow `bud` on slower hosts.
+    let mut last_err = String::new();
+    let mut digest = String::new();
+    for attempt in 0..3u32 {
+        let out = Command::new("buildah")
+            .args([
+                "--storage-driver",
+                "overlay",
+                "inspect",
+                "--format",
+                "{{.FromImageDigest}}",
+                &req.target_image,
+            ])
+            .output()
+            .await
+            .map_err(|e| err(500, "store", format!("buildah inspect spawn: {e}")))?;
+        if out.status.success() {
+            digest = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+            break;
+        }
+        last_err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+        info!(%attempt, %last_err, "buildah inspect non-zero, retrying");
+        tokio::time::sleep(std::time::Duration::from_millis(400 * (attempt as u64 + 1))).await;
     }
-    let digest = String::from_utf8_lossy(&inspect_out.stdout).trim().to_owned();
-    if digest.is_empty() || !digest.starts_with("sha256:") {
+    if digest.is_empty() {
+        return Err(err(500, "store", format!("buildah inspect failed: {last_err}")));
+    }
+    if !digest.starts_with("sha256:") {
         return Err(err(500, "store", format!("unexpected digest format: {digest:?}")));
     }
 
