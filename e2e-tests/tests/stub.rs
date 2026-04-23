@@ -3,15 +3,20 @@
 //! prebuilt `coolify-stub` binary onto the VM, launches it next to the
 //! broker UDS, and drives a real static build through its `/api/*` surface.
 //!
-//! Requires an env var pointing at a prebuilt linux-x64 binary:
+//! Binary selection (first match wins):
+//!   1. `COOLIFY_STUB_BIN=/abs/path/to/coolify-stub` — explicit override.
+//!   2. `COOLIFY_STUB_SOURCE=local` — build locally via
+//!      `coolify-stub/scripts/build-binary.ts` and use the resulting
+//!      `coolify-stub/dist/coolify-stub`.
+//!   3. Default: download `coolify-stub-linux-amd64.tar.gz` from the
+//!      `coolify-stub-tag` release (env `COOLIFY_STUB_TAG`, default
+//!      `nightly`) on `COOLIFY_STUB_REPO` (default `coollabsio/coold`) into
+//!      `target/coolify-stub-cache/<tag>/` and use it.
+//!
+//! Typical run:
 //!
 //! ```text
-//! cd coolify-stub
-//! bun install && (cd web && bun install)
-//! BUN_TARGET=bun-linux-x64 bun scripts/build-binary.ts
-//! cd ..
-//! COOLIFY_STUB_BIN=$PWD/coolify-stub/dist/coolify-stub \
-//!   cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
+//! cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
 //! ```
 
 use std::time::Duration;
@@ -42,13 +47,111 @@ fn ok(msg: &str) {
 
 fn stub_bin_path() -> String {
     e2e_tests::load_dotenv();
-    let p = std::env::var("COOLIFY_STUB_BIN")
-        .expect("env COOLIFY_STUB_BIN required (path to prebuilt linux-x64 binary)");
-    let meta = std::fs::metadata(&p).unwrap_or_else(|e| {
-        panic!("COOLIFY_STUB_BIN={p} not readable: {e} — build via `bun scripts/build-binary.ts`")
-    });
-    assert!(meta.is_file(), "COOLIFY_STUB_BIN={p} is not a regular file");
-    p
+
+    if let Ok(p) = std::env::var("COOLIFY_STUB_BIN") {
+        let meta = std::fs::metadata(&p)
+            .unwrap_or_else(|e| panic!("COOLIFY_STUB_BIN={p} not readable: {e}"));
+        assert!(meta.is_file(), "COOLIFY_STUB_BIN={p} is not a regular file");
+        return p;
+    }
+
+    if std::env::var("COOLIFY_STUB_SOURCE").as_deref() == Ok("local") {
+        return build_local_stub();
+    }
+
+    fetch_stub_from_release()
+}
+
+fn crate_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn repo_root() -> std::path::PathBuf {
+    // CARGO_MANIFEST_DIR is the e2e-tests crate. Workspace root is one up.
+    crate_root().parent().unwrap().to_path_buf()
+}
+
+fn build_local_stub() -> String {
+    let stub_dir = repo_root().join("coolify-stub");
+    assert!(
+        stub_dir.is_dir(),
+        "COOLIFY_STUB_SOURCE=local but {stub_dir} not found",
+        stub_dir = stub_dir.display()
+    );
+    eprintln!("[stub  ] building coolify-stub locally (linux-x64)");
+    let status = std::process::Command::new("bun")
+        .args(["scripts/build-binary.ts"])
+        .env("BUN_TARGET", "bun-linux-x64")
+        .current_dir(&stub_dir)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn bun (is bun installed?): {e}"));
+    assert!(status.success(), "local stub build failed (exit {:?})", status.code());
+    let out = stub_dir.join("dist").join("coolify-stub");
+    assert!(out.is_file(), "expected build output at {}", out.display());
+    out.to_string_lossy().into_owned()
+}
+
+fn fetch_stub_from_release() -> String {
+    let tag = std::env::var("COOLIFY_STUB_TAG").unwrap_or_else(|_| "nightly".into());
+    let repo = std::env::var("COOLIFY_STUB_REPO").unwrap_or_else(|_| "coollabsio/coold".into());
+    let asset = "coolify-stub-linux-amd64.tar.gz";
+
+    let cache_dir = repo_root()
+        .join("target")
+        .join("coolify-stub-cache")
+        .join(&tag);
+    let binary = cache_dir.join("coolify-stub");
+    let stamp = cache_dir.join(".stamp");
+
+    // `nightly` is a rolling tag — re-download if older than 10 minutes so
+    // the test picks up fresh pushes. Pinned tags (not `nightly`) are
+    // immutable; always reuse once cached.
+    let fresh = binary.is_file()
+        && stamp.is_file()
+        && (tag != "nightly"
+            || std::fs::metadata(&stamp)
+                .and_then(|m| m.modified())
+                .map(|t| t.elapsed().unwrap_or(Duration::from_secs(0)).as_secs() < 600)
+                .unwrap_or(false));
+
+    if fresh {
+        eprintln!("[stub  ] using cached stub binary from {}", binary.display());
+        return binary.to_string_lossy().into_owned();
+    }
+
+    std::fs::create_dir_all(&cache_dir).expect("create cache dir");
+    let tarball = cache_dir.join(asset);
+    let url = format!("https://github.com/{repo}/releases/download/{tag}/{asset}");
+    eprintln!("[stub  ] downloading {url}");
+    let status = std::process::Command::new("curl")
+        .args(["-fsSL", "-o"])
+        .arg(&tarball)
+        .arg(&url)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn curl: {e}"));
+    assert!(
+        status.success(),
+        "download {url} failed (exit {:?}) — set COOLIFY_STUB_BIN or COOLIFY_STUB_SOURCE=local to bypass",
+        status.code()
+    );
+
+    let status = std::process::Command::new("tar")
+        .args(["-xzf"])
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&cache_dir)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn tar: {e}"));
+    assert!(status.success(), "extract {} failed", tarball.display());
+
+    assert!(
+        binary.is_file(),
+        "expected {} after extract — archive layout changed?",
+        binary.display()
+    );
+    // Leave execute bit alone; scp_upload preserves file mode.
+    let _ = std::fs::write(&stamp, "");
+    binary.to_string_lossy().into_owned()
 }
 
 fn parse_body(body: &str) -> serde_json::Value {

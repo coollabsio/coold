@@ -79,26 +79,40 @@ CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner --
 
 ## Suite 3 — `stub.rs` (coolify-stub dashboard smoke)
 
-Provisions a single Hetzner VM, runs `coolify init apply`, scp's the prebuilt
+Provisions a single Hetzner VM, runs `coolify init apply`, scp's the
 `coolify-stub` Bun binary next to the broker, and drives a real static build
 through the stub's `/api/*` surface.
 
-### Build the binary once
+### Run the suite (default — fetch from nightly release)
+
+```bash
+cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
+```
+
+The harness auto-downloads `coolify-stub-linux-amd64.tar.gz` from the
+`nightly` release of `coollabsio/coold` into `target/coolify-stub-cache/`
+on first run, then reuses it (re-downloading only after 10 min for the
+`nightly` tag). Zero extra setup.
+
+### Binary-selection knobs (first match wins)
+
+| Env                       | Effect                                                                 |
+|---------------------------|------------------------------------------------------------------------|
+| `COOLIFY_STUB_BIN=<path>` | Use this prebuilt binary as-is.                                        |
+| `COOLIFY_STUB_SOURCE=local` | Build locally: `coolify-stub/scripts/build-binary.ts` (needs `bun`). |
+| `COOLIFY_STUB_TAG=<tag>`  | Pin a specific release (default `nightly`).                            |
+| `COOLIFY_STUB_REPO=<o/r>` | Pull from a fork (default `coollabsio/coold`).                         |
+
+### Build the binary locally (optional)
 
 ```bash
 cd coolify-stub
-bun install
-(cd web && bun install)
+bun install && (cd web && bun install)
 BUN_TARGET=bun-linux-x64 bun scripts/build-binary.ts
-cd ..
 ```
 
-### Run the suite
-
-```bash
-COOLIFY_STUB_BIN=$PWD/coolify-stub/dist/coolify-stub \
-  cargo test -p e2e-tests --test stub -- --ignored --nocapture --test-threads=1
-```
+Then either set `COOLIFY_STUB_BIN=$PWD/coolify-stub/dist/coolify-stub` or
+run the suite with `COOLIFY_STUB_SOURCE=local`.
 
 The test kills the stub process and tails its log on teardown, so a panic
 still surfaces the stub's stderr for triage.
