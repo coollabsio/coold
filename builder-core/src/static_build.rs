@@ -77,13 +77,13 @@ pub async fn run(
     emit(sink, "build", "build complete", 80);
 
     emit(sink, "store", "reading image digest", 90);
-    // `buildah inspect` remounts the overlay store with MS_PRIVATE, which
-    // fails inside the systemd-run sandbox coold wraps the builder in
-    // (`remount /var/lib/containers/storage/overlay, flags: 0x40000:
-    // invalid argument`). `buildah images` reads metadata without
-    // remounting, so use it instead. `--storage-driver overlay` matches
-    // the driver explicitly passed to `bud` so a non-default
-    // `storage.conf` can't send us to a different store.
+    // `buildah` under coold's systemd-run sandbox occasionally fails the
+    // overlay store shutdown-remount with
+    // `remount /var/lib/containers/storage/overlay, flags: 0x40000:
+    // invalid argument` AFTER already writing the digest to stdout. The
+    // image is correctly committed by `bud`, so tolerate a non-zero exit
+    // when stdout still carries a well-formed sha256:... digest; only the
+    // shutdown path misbehaves.
     let images_out = Command::new("buildah")
         .args([
             "--storage-driver",
@@ -96,13 +96,27 @@ pub async fn run(
         .output()
         .await
         .map_err(|e| err(500, "store", format!("buildah images spawn: {e}")))?;
+    let stdout = String::from_utf8_lossy(&images_out.stdout);
+    let digest = stdout
+        .lines()
+        .find(|l| l.trim().starts_with("sha256:"))
+        .map(|l| l.trim().to_owned())
+        .unwrap_or_default();
+    if digest.is_empty() {
+        let stderr = String::from_utf8_lossy(&images_out.stderr).trim().to_owned();
+        return Err(err(
+            500,
+            "store",
+            format!(
+                "buildah images: exit={:?}, no digest found; stderr: {stderr}",
+                images_out.status.code()
+            ),
+        ));
+    }
     if !images_out.status.success() {
         let stderr = String::from_utf8_lossy(&images_out.stderr).trim().to_owned();
-        return Err(err(500, "store", format!("buildah images failed: {stderr}")));
-    }
-    let digest = String::from_utf8_lossy(&images_out.stdout).trim().to_owned();
-    if digest.is_empty() || !digest.starts_with("sha256:") {
-        return Err(err(500, "store", format!("unexpected digest format: {digest:?}")));
+        info!(%digest, stderr, status = ?images_out.status.code(),
+            "buildah images exit non-zero but digest parsed from stdout; continuing");
     }
 
     let registry_ref = format!("{}@{}", req.target_image, digest);
