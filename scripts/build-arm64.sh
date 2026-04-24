@@ -21,7 +21,15 @@ container_exists() {
   docker inspect "$CONTAINER" >/dev/null 2>&1
 }
 
+container_has_target_volume() {
+  [ "$(docker inspect -f '{{range .Mounts}}{{if and (eq .Destination "/cargo-target") (eq .Name "'"$TARGET_VOL"'")}}true{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)" = "true" ]
+}
+
 start() {
+  if container_exists && ! container_has_target_volume; then
+    docker rm -f "$CONTAINER" >/dev/null
+    echo "container $CONTAINER recreated for isolated target cache"
+  fi
   if container_running; then
     echo "container $CONTAINER already running"
     return
