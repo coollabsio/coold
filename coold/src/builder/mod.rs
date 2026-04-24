@@ -48,9 +48,6 @@ struct BuildHandle {
     unit_name: String,
 }
 
-const INVALID_REQUEST_ID: &str = "invalid request_id";
-const MAX_REQUEST_ID_LEN: usize = 128;
-
 pub struct BuilderSettings {
     pub work_root: PathBuf,
     pub builder_bin: PathBuf,
@@ -631,6 +628,9 @@ fn parse_request_id(unit_name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+const INVALID_REQUEST_ID: &str = "invalid request_id";
+const MAX_REQUEST_ID_LEN: usize = 128;
+
 fn is_valid_request_id(request_id: &str) -> bool {
     if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_LEN {
         return false;
@@ -719,7 +719,7 @@ async fn emit_build_response(
 }
 
 #[cfg(test)]
-mod tests {
+mod request_id_tests {
     use super::*;
 
     #[test]
