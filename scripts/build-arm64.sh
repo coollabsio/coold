@@ -25,6 +25,15 @@ container_has_target_volume() {
   [ "$(docker inspect -f '{{range .Mounts}}{{if and (eq .Destination "/cargo-target") (eq .Name "'"$TARGET_VOL"'")}}true{{end}}{{end}}' "$CONTAINER" 2>/dev/null || true)" = "true" ]
 }
 
+require_running_container() {
+  if container_running; then
+    return
+  fi
+  docker logs "$CONTAINER" >&2 2>/dev/null || true
+  echo "container $CONTAINER exited immediately; ensure Docker can run $PLATFORM containers (qemu/binfmt)" >&2
+  exit 1
+}
+
 start() {
   if container_exists && ! container_has_target_volume; then
     docker rm -f "$CONTAINER" >/dev/null
@@ -36,6 +45,7 @@ start() {
   fi
   if container_exists; then
     docker start "$CONTAINER" >/dev/null
+    require_running_container
     echo "container $CONTAINER resumed"
     return
   fi
@@ -47,6 +57,7 @@ start() {
     -v "$TARGET_VOL":/cargo-target \
     -e CARGO_TARGET_DIR=/cargo-target \
     "$IMAGE" sleep infinity >/dev/null
+  require_running_container
   echo "installing clang + mold..."
   docker exec "$CONTAINER" bash -c "apt-get update -qq && apt-get install -y -qq clang mold >/dev/null"
   echo "container $CONTAINER ready"
