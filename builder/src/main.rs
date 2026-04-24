@@ -25,7 +25,7 @@
 //! `work_dir` exclusively.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -65,7 +65,7 @@ impl<'a> ProgressSink for DualSink<'a> {
     }
 }
 
-fn write_json_atomic(path: &Path, bytes: &[u8]) {
+fn write_json_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let ok = OpenOptions::new()
         .create(true)
@@ -74,8 +74,89 @@ fn write_json_atomic(path: &Path, bytes: &[u8]) {
         .mode(0o600)
         .open(&tmp)
         .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()));
-    if ok.is_ok() {
-        let _ = std::fs::rename(tmp, path);
+    if let Err(e) = ok {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+fn persist_result_json(work_dir: &Path, ok: &BuildResult) -> Result<(), BuildError> {
+    let bytes = serde_json::to_vec(ok).unwrap_or_default();
+    write_json_atomic(&work_dir.join("result.json"), &bytes).map_err(|e| persist_error("result.json", e))
+}
+
+fn persist_error_json(work_dir: &Path, err: &BuildError) -> Result<(), BuildError> {
+    let bytes = serde_json::to_vec(err).unwrap_or_default();
+    write_json_atomic(&work_dir.join("error.json"), &bytes).map_err(|e| persist_error("error.json", e))
+}
+
+fn persist_error(file_name: &str, error: io::Error) -> BuildError {
+    BuildError {
+        code: 500,
+        message: format!("write {file_name}: {error}"),
+        stage: "persist".into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "coold-builder-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create test dir");
+        dir
+    }
+
+    #[test]
+    fn write_json_atomic_writes_final_file() {
+        let dir = test_dir("json-ok");
+        let path = dir.join("result.json");
+
+        write_json_atomic(&path, br#"{"ok":true}"#).expect("write json");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read result"),
+            br#"{"ok":true}"#
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file should not remain after successful rename"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn write_json_atomic_returns_final_rename_error() {
+        let dir = test_dir("json-rename-error");
+        let path = dir.join("result.json");
+        std::fs::create_dir(&path).expect("create destination directory");
+
+        let err = write_json_atomic(&path, br#"{"ok":true}"#).expect_err("rename should fail");
+
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file should be removed after failed rename"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }
 }
 
@@ -128,8 +209,10 @@ async fn main() -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             let err = BuildError { code: 400, message: e, stage: "load".into() };
-            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
-            emit_frame(Frame::Error { err: &err }, &mut events);
+            match persist_error_json(&work_dir, &err) {
+                Ok(()) => emit_frame(Frame::Error { err: &err }, &mut events),
+                Err(persist_err) => emit_frame(Frame::Error { err: &persist_err }, &mut events),
+            }
             return ExitCode::from(2);
         }
     };
@@ -138,8 +221,10 @@ async fn main() -> ExitCode {
         Ok(s) => s,
         Err(e) => {
             let err = BuildError { code: 500, message: format!("install SIGTERM: {e}"), stage: "init".into() };
-            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
-            emit_frame(Frame::Error { err: &err }, &mut events);
+            match persist_error_json(&work_dir, &err) {
+                Ok(()) => emit_frame(Frame::Error { err: &err }, &mut events),
+                Err(persist_err) => emit_frame(Frame::Error { err: &persist_err }, &mut events),
+            }
             return ExitCode::from(2);
         }
     };
@@ -150,21 +235,42 @@ async fn main() -> ExitCode {
     tokio::select! {
         res = build_fut => match res {
             Ok(ok) => {
-                write_json_atomic(&work_dir.join("result.json"), &serde_json::to_vec(&ok).unwrap_or_default());
-                emit_frame(Frame::Result { ok: &ok }, &mut events);
-                ExitCode::SUCCESS
+                match persist_result_json(&work_dir, &ok) {
+                    Ok(()) => {
+                        emit_frame(Frame::Result { ok: &ok }, &mut events);
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        emit_frame(Frame::Error { err: &err }, &mut events);
+                        ExitCode::from(2)
+                    }
+                }
             }
             Err(err) => {
-                write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
-                emit_frame(Frame::Error { err: &err }, &mut events);
-                ExitCode::from(1)
+                match persist_error_json(&work_dir, &err) {
+                    Ok(()) => {
+                        emit_frame(Frame::Error { err: &err }, &mut events);
+                        ExitCode::from(1)
+                    }
+                    Err(persist_err) => {
+                        emit_frame(Frame::Error { err: &persist_err }, &mut events);
+                        ExitCode::from(2)
+                    }
+                }
             }
         },
         _ = sigterm.recv() => {
             let err = BuildError { code: 499, message: "cancelled".into(), stage: "cancel".into() };
-            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
-            emit_frame(Frame::Error { err: &err }, &mut events);
-            ExitCode::from(130)
+            match persist_error_json(&work_dir, &err) {
+                Ok(()) => {
+                    emit_frame(Frame::Error { err: &err }, &mut events);
+                    ExitCode::from(130)
+                }
+                Err(persist_err) => {
+                    emit_frame(Frame::Error { err: &persist_err }, &mut events);
+                    ExitCode::from(2)
+                }
+            }
         }
     }
 }
