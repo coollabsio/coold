@@ -48,11 +48,6 @@ struct BuildHandle {
     unit_name: String,
 }
 
-const BUILDER_IP_ALLOW_NETS: &[&str] = &[
-    // Keep systemd-resolved reachable while denying the rest of 127.0.0.0/8.
-    "127.0.0.53/32",
-];
-
 const BUILDER_IP_DENY_NETS: &[&str] = &[
     "127.0.0.0/8",
     "169.254.0.0/16",
@@ -60,6 +55,8 @@ const BUILDER_IP_DENY_NETS: &[&str] = &[
     "fc00::/7",
     "fe80::/10",
 ];
+const RESOLVED_UPSTREAM_RESOLV_CONF: &str = "/run/systemd/resolve/resolv.conf";
+const UNIT_RESOLV_CONF: &str = "/etc/resolv.conf";
 
 pub struct BuilderSettings {
     pub work_root: PathBuf,
@@ -340,12 +337,15 @@ impl BuilderCtx {
             .arg("RestrictNamespaces=mnt user")
             .arg("-p")
             .arg("SystemCallArchitectures=native");
-        // Network deny list via eBPF. IPAddressAllow/IPAddressDeny use
-        // longest-prefix match, so the resolver stub stays reachable while
-        // the rest of loopback/link-local/ULA stays blocked.
-        for net in BUILDER_IP_ALLOW_NETS {
-            cmd.arg("-p").arg(format!("IPAddressAllow={net}"));
+        // If systemd-resolved is in use, bind the upstream resolver view over
+        // /etc/resolv.conf so DNS does not require the 127.0.0.53 stub.
+        if std::path::Path::new(RESOLVED_UPSTREAM_RESOLV_CONF).exists() {
+            cmd.arg("-p").arg(format!(
+                "BindReadOnlyPaths={RESOLVED_UPSTREAM_RESOLV_CONF}:{UNIT_RESOLV_CONF}"
+            ));
         }
+        // Network deny list via eBPF. No loopback allow entry is used because
+        // IPAddressAllow is address-wide, not port-specific.
         for net in BUILDER_IP_DENY_NETS {
             cmd.arg("-p").arg(format!("IPAddressDeny={net}"));
         }
@@ -702,11 +702,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loopback_deny_covers_full_ipv4_subnet_with_dns_stub_exception() {
-        assert!(
-            BUILDER_IP_ALLOW_NETS.contains(&"127.0.0.53/32"),
-            "systemd-resolved stub must remain reachable"
-        );
+    fn loopback_deny_covers_full_ipv4_subnet_without_allow_holes() {
         assert!(
             BUILDER_IP_DENY_NETS.contains(&"127.0.0.0/8"),
             "all IPv4 loopback addresses must be blocked by default"
@@ -714,6 +710,10 @@ mod tests {
         assert!(
             !BUILDER_IP_DENY_NETS.contains(&"127.0.0.1"),
             "single-address loopback denial leaves 127.0.0.2+ reachable"
+        );
+        assert!(
+            !BUILDER_IP_DENY_NETS.contains(&"127.0.0.53/32"),
+            "resolved's loopback address should not be allowlisted by address"
         );
     }
 }

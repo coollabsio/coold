@@ -204,7 +204,8 @@ pub struct Config {
     /// coolify-cli from `--wg-mgmt-pool` and `--container-pool`. coold
     /// additionally blocks a fixed set (`127.0.0.0/8`, `169.254.0.0/16`,
     /// `::1/128`, `fc00::/7`, `fe80::/10`) so the operator does not need to
-    /// repeat them; `127.0.0.53/32` is explicitly allowed so DNS keeps working.
+    /// repeat them. When systemd-resolved is present, coold bind-mounts the
+    /// upstream resolver view so DNS does not require the 127.0.0.53 stub.
     #[arg(long, env = "COOLD_BUILDER_DENY_NETS", value_delimiter = ',', default_value = "")]
     pub builder_deny_nets: Vec<String>,
 }
