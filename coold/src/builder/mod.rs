@@ -48,6 +48,19 @@ struct BuildHandle {
     unit_name: String,
 }
 
+const BUILDER_IP_ALLOW_NETS: &[&str] = &[
+    // Keep systemd-resolved reachable while denying the rest of 127.0.0.0/8.
+    "127.0.0.53/32",
+];
+
+const BUILDER_IP_DENY_NETS: &[&str] = &[
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "::1/128",
+    "fc00::/7",
+    "fe80::/10",
+];
+
 pub struct BuilderSettings {
     pub work_root: PathBuf,
     pub builder_bin: PathBuf,
@@ -327,20 +340,13 @@ impl BuilderCtx {
             .arg("RestrictNamespaces=mnt user")
             .arg("-p")
             .arg("SystemCallArchitectures=native");
-        // Network deny list via eBPF (IPAddressDeny). Evaluated with
-        // longest-prefix match; no Allow entries means the default is
-        // allow-all, which we intentionally keep so git clone + registry
-        // pulls reach the public internet. We deliberately do NOT block
-        // 127.0.0.0/8 wholesale — systemd-resolved's 127.0.0.53:53 stub
-        // resolver needs to stay reachable for DNS. Instead we block
-        // 127.0.0.1 specifically (Redis, Corrosion API, etc.).
-        for net in [
-            "127.0.0.1",
-            "169.254.0.0/16",
-            "::1/128",
-            "fc00::/7",
-            "fe80::/10",
-        ] {
+        // Network deny list via eBPF. IPAddressAllow/IPAddressDeny use
+        // longest-prefix match, so the resolver stub stays reachable while
+        // the rest of loopback/link-local/ULA stays blocked.
+        for net in BUILDER_IP_ALLOW_NETS {
+            cmd.arg("-p").arg(format!("IPAddressAllow={net}"));
+        }
+        for net in BUILDER_IP_DENY_NETS {
             cmd.arg("-p").arg(format!("IPAddressDeny={net}"));
         }
         for net in &self.deny_nets {
@@ -688,5 +694,26 @@ async fn emit_build_response(
     };
     if let Err(e) = tx.send(msg).await {
         warn!(%request_id, error = %e, "failed to enqueue resumed build response");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_deny_covers_full_ipv4_subnet_with_dns_stub_exception() {
+        assert!(
+            BUILDER_IP_ALLOW_NETS.contains(&"127.0.0.53/32"),
+            "systemd-resolved stub must remain reachable"
+        );
+        assert!(
+            BUILDER_IP_DENY_NETS.contains(&"127.0.0.0/8"),
+            "all IPv4 loopback addresses must be blocked by default"
+        );
+        assert!(
+            !BUILDER_IP_DENY_NETS.contains(&"127.0.0.1"),
+            "single-address loopback denial leaves 127.0.0.2+ reachable"
+        );
     }
 }

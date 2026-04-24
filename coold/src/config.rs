@@ -202,9 +202,9 @@ pub struct Config {
     /// reach at the socket layer (systemd `IPAddressDeny`, enforced via eBPF).
     /// Typically the mesh management and container pools — populated by
     /// coolify-cli from `--wg-mgmt-pool` and `--container-pool`. coold
-    /// additionally blocks a fixed set (`127.0.0.1`, `169.254.0.0/16`,
+    /// additionally blocks a fixed set (`127.0.0.0/8`, `169.254.0.0/16`,
     /// `::1/128`, `fc00::/7`, `fe80::/10`) so the operator does not need to
-    /// repeat them; `127.0.0.53` stays reachable so DNS keeps working.
+    /// repeat them; `127.0.0.53/32` is explicitly allowed so DNS keeps working.
     #[arg(long, env = "COOLD_BUILDER_DENY_NETS", value_delimiter = ',', default_value = "")]
     pub builder_deny_nets: Vec<String>,
 }
