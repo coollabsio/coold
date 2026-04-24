@@ -7,7 +7,9 @@ IMAGE=rust:1.89-bookworm
 PLATFORM=linux/arm64
 REGISTRY_VOL=coold-cargo-registry
 GIT_VOL=coold-cargo-git
+TARGET_VOL=coold-cargo-target-arm64
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARTIFACT_DIR="$REPO_ROOT/target/arm64/release"
 
 cmd="${1:-build}"
 
@@ -34,6 +36,8 @@ start() {
     -v "$REPO_ROOT":/src -w /src \
     -v "$REGISTRY_VOL":/usr/local/cargo/registry \
     -v "$GIT_VOL":/usr/local/cargo/git \
+    -v "$TARGET_VOL":/cargo-target \
+    -e CARGO_TARGET_DIR=/cargo-target \
     "$IMAGE" sleep infinity >/dev/null
   echo "installing clang + mold..."
   docker exec "$CONTAINER" bash -c "apt-get update -qq && apt-get install -y -qq clang mold >/dev/null"
@@ -43,8 +47,10 @@ start() {
 build() {
   start
   trap 'docker stop "$CONTAINER" >/dev/null 2>&1 || true; echo "container $CONTAINER stopped"' EXIT
-  docker exec "$CONTAINER" cargo build --release
-  echo "binary: $REPO_ROOT/target/release/coold"
+  docker exec -e CARGO_TARGET_DIR=/cargo-target "$CONTAINER" cargo build --release
+  mkdir -p "$ARTIFACT_DIR"
+  docker cp "$CONTAINER":/cargo-target/release/coold "$ARTIFACT_DIR/coold"
+  echo "binary: $ARTIFACT_DIR/coold"
 }
 
 shell_cmd() {
@@ -61,7 +67,7 @@ stop_cmd() {
 
 clean() {
   stop_cmd
-  docker volume rm "$REGISTRY_VOL" "$GIT_VOL" 2>/dev/null || true
+  docker volume rm "$REGISTRY_VOL" "$GIT_VOL" "$TARGET_VOL" 2>/dev/null || true
   echo "volumes removed"
 }
 
