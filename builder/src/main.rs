@@ -158,6 +158,30 @@ mod tests {
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }
+
+    #[test]
+    fn result_persist_failure_can_be_saved_as_error_json() {
+        let dir = test_dir("json-persist-error");
+        std::fs::create_dir(dir.join("result.json")).expect("create result.json directory");
+        let ok = BuildResult {
+            digest: "sha256:abc".into(),
+            registry_ref: "localhost/app@sha256:abc".into(),
+            duration_ms: 1,
+            stack_used: builder_core::BuildStack::Static,
+        };
+
+        let err = persist_result_json(&dir, &ok).expect_err("result persistence should fail");
+        persist_error_json(&dir, &err).expect("persist fallback error json");
+        let stored: BuildError = serde_json::from_slice(
+            &std::fs::read(dir.join("error.json")).expect("read error.json"),
+        )
+        .expect("parse error.json");
+
+        assert_eq!(stored.stage, "persist");
+        assert!(stored.message.contains("write result.json"));
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
 }
 
 fn install_sigpipe_ignore() {
@@ -241,6 +265,7 @@ async fn main() -> ExitCode {
                         ExitCode::SUCCESS
                     }
                     Err(err) => {
+                        let _ = persist_error_json(&work_dir, &err);
                         emit_frame(Frame::Error { err: &err }, &mut events);
                         ExitCode::from(2)
                     }
