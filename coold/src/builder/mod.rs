@@ -642,6 +642,31 @@ fn is_valid_request_id(request_id: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
+#[cfg(test)]
+mod request_id_tests {
+    use super::*;
+
+    #[test]
+    fn request_id_validation_rejects_path_and_unit_unsafe_values() {
+        for request_id in ["", ".", "..", "/tmp/build", "r/../x", "-starts-with-dash", "snowman-☃"] {
+            assert!(
+                !is_valid_request_id(request_id),
+                "request_id should be rejected: {request_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_id_validation_accepts_safe_identifier_values() {
+        for request_id in ["r1", "Build_01.alpha-2", "01HX9Z6XG2V8J7FQ6P2R9T0ABC"] {
+            assert!(
+                is_valid_request_id(request_id),
+                "request_id should be accepted: {request_id:?}"
+            );
+        }
+    }
+}
+
 /// Shape of `result.json` the builder persists on success. Mirrors
 /// `builder_core::BuildResult` (which is where the type originates).
 #[derive(Debug, Deserialize)]
@@ -715,30 +740,5 @@ async fn emit_build_response(
     };
     if let Err(e) = tx.send(msg).await {
         warn!(%request_id, error = %e, "failed to enqueue resumed build response");
-    }
-}
-
-#[cfg(test)]
-mod request_id_tests {
-    use super::*;
-
-    #[test]
-    fn request_id_validation_rejects_path_and_unit_unsafe_values() {
-        for request_id in ["", ".", "..", "/tmp/build", "r/../x", "-starts-with-dash", "snowman-☃"] {
-            assert!(
-                !is_valid_request_id(request_id),
-                "request_id should be rejected: {request_id:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn request_id_validation_accepts_safe_identifier_values() {
-        for request_id in ["r1", "Build_01.alpha-2", "01HX9Z6XG2V8J7FQ6P2R9T0ABC"] {
-            assert!(
-                is_valid_request_id(request_id),
-                "request_id should be accepted: {request_id:?}"
-            );
-        }
     }
 }
