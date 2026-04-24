@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -136,7 +136,7 @@ impl BuilderCtx {
                 body_fabricated_error("builder exited without result file")
             };
             emit_build_response(&tx, &request_id, body).await;
-            let _ = tokio::fs::remove_dir_all(&work_dir).await;
+            remove_work_dir(&request_id, &work_dir).await;
             let _ = Command::new("systemctl")
                 .arg("reset-failed")
                 .arg(&unit)
@@ -174,7 +174,7 @@ impl BuilderCtx {
         };
         emit_build_response(&tx, &request_id, body).await;
         self.active.lock().await.remove(&request_id);
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        remove_work_dir(&request_id, &work_dir).await;
         let _ = Command::new("systemctl")
             .arg("reset-failed")
             .arg(&unit)
@@ -363,9 +363,7 @@ impl BuilderCtx {
         let outcome = self.spawn_and_reap(&mut cmd, request_id, &work_dir).await;
 
         self.active.lock().await.remove(request_id);
-        if let Err(e) = tokio::fs::remove_dir_all(&work_dir).await {
-            warn!(%request_id, error = %e, "workdir cleanup failed");
-        }
+        remove_work_dir(request_id, &work_dir).await;
 
         outcome
     }
@@ -445,6 +443,17 @@ async fn send_err(tx: &mpsc::Sender<ClientMsg>, request_id: &str, code: u32, mes
         })),
     };
     let _ = tx.send(msg).await;
+}
+
+async fn remove_work_dir(request_id: &str, work_dir: &Path) {
+    if let Err(e) = tokio::fs::remove_dir_all(work_dir).await {
+        warn!(
+            %request_id,
+            work_dir = %work_dir.display(),
+            error = %e,
+            "workdir cleanup failed"
+        );
+    }
 }
 
 // ── wire format with the builder subprocess ───────────────────────────────
