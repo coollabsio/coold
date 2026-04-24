@@ -17,8 +17,9 @@
 //! children down in the same sweep.
 
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv6Addr};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 
@@ -337,13 +338,7 @@ impl BuilderCtx {
             .arg("RestrictNamespaces=mnt user")
             .arg("-p")
             .arg("SystemCallArchitectures=native");
-        // If systemd-resolved is in use, bind the upstream resolver view over
-        // /etc/resolv.conf so DNS does not require the 127.0.0.53 stub.
-        if std::path::Path::new(RESOLVED_UPSTREAM_RESOLV_CONF).exists() {
-            cmd.arg("-p").arg(format!(
-                "BindReadOnlyPaths={RESOLVED_UPSTREAM_RESOLV_CONF}:{UNIT_RESOLV_CONF}"
-            ));
-        }
+        configure_resolver_for_loopback_deny(&mut cmd)?;
         // Network deny list via eBPF. No loopback allow entry is used because
         // IPAddressAllow is address-wide, not port-specific.
         for net in BUILDER_IP_DENY_NETS {
@@ -438,6 +433,46 @@ fn build_err(code: u32, stage: &str, message: impl Into<String>) -> BuildError {
         message: message.into(),
         stage: stage.into(),
     }
+}
+
+fn configure_resolver_for_loopback_deny(cmd: &mut Command) -> Result<(), BuildError> {
+    if Path::new(RESOLVED_UPSTREAM_RESOLV_CONF).exists() {
+        cmd.arg("-p").arg(format!(
+            "BindReadOnlyPaths={RESOLVED_UPSTREAM_RESOLV_CONF}:{UNIT_RESOLV_CONF}"
+        ));
+        return Ok(());
+    }
+
+    let resolv_conf = std::fs::read_to_string(UNIT_RESOLV_CONF)
+        .map_err(|e| build_err(500, "setup", format!("read {UNIT_RESOLV_CONF}: {e}")))?;
+    if resolv_conf_has_loopback_nameserver(&resolv_conf) {
+        return Err(build_err(
+            500,
+            "setup",
+            format!(
+                "{UNIT_RESOLV_CONF} uses a loopback nameserver but {RESOLVED_UPSTREAM_RESOLV_CONF} is unavailable; refusing to start builder with loopback denied"
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
+fn resolv_conf_has_loopback_nameserver(contents: &str) -> bool {
+    contents.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let mut fields = line.split_whitespace();
+        if fields.next() != Some("nameserver") {
+            return false;
+        }
+        let Some(addr) = fields.next().and_then(|s| s.parse::<IpAddr>().ok()) else {
+            return false;
+        };
+        match addr {
+            IpAddr::V4(addr) => addr.octets()[0] == 127,
+            IpAddr::V6(addr) => addr == Ipv6Addr::LOCALHOST,
+        }
+    })
 }
 
 async fn send_err(tx: &mpsc::Sender<ClientMsg>, request_id: &str, code: u32, message: &str, stage: &str) {
@@ -715,5 +750,25 @@ mod tests {
             !BUILDER_IP_DENY_NETS.contains(&"127.0.0.53/32"),
             "resolved's loopback address should not be allowlisted by address"
         );
+    }
+
+    #[test]
+    fn resolv_conf_loopback_detection_catches_stub_nameservers() {
+        assert!(resolv_conf_has_loopback_nameserver(
+            "nameserver 127.0.0.53\nsearch example.com\n"
+        ));
+        assert!(resolv_conf_has_loopback_nameserver(
+            "nameserver ::1 # local resolver\n"
+        ));
+    }
+
+    #[test]
+    fn resolv_conf_loopback_detection_allows_non_loopback_nameservers() {
+        assert!(!resolv_conf_has_loopback_nameserver(
+            "nameserver 10.255.255.254\nnameserver 2001:4860:4860::8888\n"
+        ));
+        assert!(!resolv_conf_has_loopback_nameserver(
+            "# nameserver 127.0.0.53\noptions edns0 trust-ad\n"
+        ));
     }
 }
