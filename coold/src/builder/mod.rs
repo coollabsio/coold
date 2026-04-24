@@ -48,6 +48,9 @@ struct BuildHandle {
     unit_name: String,
 }
 
+const INVALID_REQUEST_ID: &str = "invalid request_id";
+const MAX_REQUEST_ID_LEN: usize = 128;
+
 pub struct BuilderSettings {
     pub work_root: PathBuf,
     pub builder_bin: PathBuf,
@@ -103,6 +106,10 @@ impl BuilderCtx {
         info!(count = units.len(), "resuming builder units from prior coold run");
         for unit in units {
             let Some(request_id) = parse_request_id(&unit) else { continue };
+            if !is_valid_request_id(&request_id) {
+                warn!(%request_id, %unit, "skipping builder unit with invalid request_id");
+                continue;
+            }
             let work_dir = self.work_root.join(&request_id);
             let active = systemctl_is_active(&unit).await;
             let result_path = work_dir.join("result.json");
@@ -188,6 +195,11 @@ impl BuilderCtx {
     pub fn dispatch(self: Arc<Self>, request_id: String, req: BuildRequest, tx: mpsc::Sender<ClientMsg>) {
         let ctx = self;
         tokio::spawn(async move {
+            if !is_valid_request_id(&request_id) {
+                send_err(&tx, &request_id, 400, INVALID_REQUEST_ID, "dispatch").await;
+                return;
+            }
+
             let Ok(permit) = ctx.sem.clone().acquire_owned().await else {
                 send_err(&tx, &request_id, 500, "build semaphore closed", "dispatch").await;
                 return;
@@ -240,6 +252,10 @@ impl BuilderCtx {
     }
 
     async fn run_build(&self, request_id: &str, req: BuildRequest) -> Result<BuildResult, BuildError> {
+        if !is_valid_request_id(request_id) {
+            return Err(build_err(400, "dispatch", INVALID_REQUEST_ID));
+        }
+
         let work_dir = self.work_root.join(request_id);
         let wd = work_dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -615,6 +631,17 @@ fn parse_request_id(unit_name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+fn is_valid_request_id(request_id: &str) -> bool {
+    if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_LEN {
+        return false;
+    }
+
+    let mut bytes = request_id.bytes();
+    let Some(first) = bytes.next() else { return false };
+    first.is_ascii_alphanumeric()
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+}
+
 /// Shape of `result.json` the builder persists on success. Mirrors
 /// `builder_core::BuildResult` (which is where the type originates).
 #[derive(Debug, Deserialize)]
@@ -688,5 +715,30 @@ async fn emit_build_response(
     };
     if let Err(e) = tx.send(msg).await {
         warn!(%request_id, error = %e, "failed to enqueue resumed build response");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_id_validation_rejects_path_and_unit_unsafe_values() {
+        for request_id in ["", ".", "..", "/tmp/build", "r/../x", "-starts-with-dash", "snowman-☃"] {
+            assert!(
+                !is_valid_request_id(request_id),
+                "request_id should be rejected: {request_id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_id_validation_accepts_safe_identifier_values() {
+        for request_id in ["r1", "Build_01.alpha-2", "01HX9Z6XG2V8J7FQ6P2R9T0ABC"] {
+            assert!(
+                is_valid_request_id(request_id),
+                "request_id should be accepted: {request_id:?}"
+            );
+        }
     }
 }

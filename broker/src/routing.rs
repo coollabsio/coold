@@ -7,6 +7,9 @@ use coolify_proto::agent::v1::{server_msg, BuildRequest, CancelBuild, ListContai
 use crate::envelope::{BuildCommandPayload, BuildDispatchEnvelope, CommandPayload, DispatchEnvelope};
 use crate::state::{Pending, PendingKind, Streams};
 
+const INVALID_REQUEST_ID: &str = "invalid request_id";
+const MAX_REQUEST_ID_LEN: usize = 128;
+
 /// What the caller should do next. `SendCoold` / `SendBuild` / `SendCancel`
 /// all carry a fully-formed `ServerMsg` ready to push down the host's
 /// `mpsc` tx. `PushError` maps to an HTTP error response. `DropCancelHostGone`
@@ -56,6 +59,13 @@ pub fn route_build(
     pending_max: usize,
     env: BuildDispatchEnvelope,
 ) -> RouteOutcome {
+    if !is_valid_request_id(&env.request_id) {
+        return RouteOutcome::PushError {
+            code: 400,
+            message: INVALID_REQUEST_ID,
+        };
+    }
+
     match env.command {
         BuildCommandPayload::StaticBuild {
             repo_url,
@@ -131,6 +141,17 @@ pub fn route_build(
             RouteOutcome::SendCancel { host_id: entry.host_id, msg }
         }
     }
+}
+
+fn is_valid_request_id(request_id: &str) -> bool {
+    if request_id.is_empty() || request_id.len() > MAX_REQUEST_ID_LEN {
+        return false;
+    }
+
+    let mut bytes = request_id.bytes();
+    let Some(first) = bytes.next() else { return false };
+    first.is_ascii_alphanumeric()
+        && bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
 }
 
 #[cfg(test)]
@@ -256,6 +277,44 @@ mod tests {
                 assert_eq!(message, "no builder-capable host connected");
             }
             other => panic!("expected 503, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_invalid_request_ids_before_pending_insert() {
+        let streams = Streams::new();
+        let pending = Pending::new();
+        insert_host(&streams, "A", &["coold", "builder"]);
+
+        for request_id in ["", ".", "..", "/tmp/build", "r/../x", "-starts-with-dash", "snowman-☃"] {
+            let out = route_build(&streams, &pending, CAP, static_env(request_id, Some("A")));
+            match out {
+                RouteOutcome::PushError { code, message } => {
+                    assert_eq!(code, 400, "request_id={request_id:?}");
+                    assert_eq!(message, INVALID_REQUEST_ID, "request_id={request_id:?}");
+                }
+                other => panic!("expected invalid request_id for {request_id:?}, got {other:?}"),
+            }
+            assert!(
+                pending.get(request_id).is_none(),
+                "invalid request_id must not enter Pending"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_accepts_safe_request_id_characters() {
+        let streams = Streams::new();
+        let pending = Pending::new();
+        insert_host(&streams, "A", &["coold", "builder"]);
+
+        let out = route_build(&streams, &pending, CAP, static_env("Build_01.alpha-2", Some("A")));
+        match out {
+            RouteOutcome::SendBuild { host_id, msg } => {
+                assert_eq!(host_id, "A");
+                assert_eq!(msg.request_id, "Build_01.alpha-2");
+            }
+            other => panic!("expected valid request_id to route, got {other:?}"),
         }
     }
 
