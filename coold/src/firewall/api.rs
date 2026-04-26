@@ -201,6 +201,9 @@ fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
 }
 
 /// Constant-time byte compare. Avoids timing oracles on the bearer token.
+/// Marked `#[inline(never)]` to reduce the chance that LLVM introduces
+/// variable-time or early-exit optimizations.
+#[inline(never)]
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -225,7 +228,7 @@ impl ApiError {
         warn!(error = format!("{e:#}"), "firewall api: internal error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("{e:#}"),
+            message: "internal error".to_string(),
         }
     }
     fn bad_request(e: anyhow::Error) -> Self {

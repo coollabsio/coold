@@ -46,13 +46,18 @@ enum Frame<'a> {
 
 /// Emit a frame to both stdout (live) and the durable events file.
 fn emit_frame(frame: Frame<'_>, events: &mut File) {
-    let Ok(line) = serde_json::to_string(&frame) else { return };
+    let Ok(line) = serde_json::to_string(&frame) else {
+        tracing::warn!("failed to serialize builder frame");
+        return;
+    };
     // Best-effort stdout. coold may be dead; we don't care.
-    let _ = writeln!(std::io::stdout().lock(), "{line}");
-    let _ = std::io::stdout().flush();
+    if let Err(e) = writeln!(std::io::stdout().lock(), "{line}") {
+        tracing::debug!(error = %e, "stdout write failed");
+    }
     // Durable file. Best-effort too but much less likely to fail.
-    let _ = writeln!(events, "{line}");
-    let _ = events.flush();
+    if let Err(e) = writeln!(events, "{line}") {
+        tracing::warn!(error = %e, "events file write failed");
+    }
 }
 
 struct DualSink<'a> {
@@ -75,7 +80,11 @@ fn write_json_atomic(path: &Path, bytes: &[u8]) {
         .open(&tmp)
         .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()));
     if ok.is_ok() {
-        let _ = std::fs::rename(tmp, path);
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            tracing::warn!(error = %e, path = %path.display(), "failed to rename atomic write result");
+        }
+    } else {
+        tracing::warn!(path = %path.display(), "failed to write result tmp file");
     }
 }
 

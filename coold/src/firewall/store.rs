@@ -16,7 +16,7 @@ use std::{
     },
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::{
     fs,
     io::AsyncWriteExt,
@@ -344,21 +344,26 @@ impl FirewallStore {
         let fragment = render_bridge_fragment(rules);
 
         // Pipe to nft -f - first.
-        let mut cmd = Command::new("nft");
-        cmd.arg("-f")
-            .arg("-")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = cmd.spawn().context("spawn nft -f -")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(fragment.as_bytes())
-                .await
-                .context("write nft stdin")?;
-            stdin.flush().await.ok();
-        }
-        let out = child.wait_with_output().await.context("wait nft -f -")?;
+        let fut = async {
+            let mut cmd = Command::new("nft");
+            cmd.arg("-f")
+                .arg("-")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = cmd.spawn().context("spawn nft -f -")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(fragment.as_bytes())
+                    .await
+                    .context("write nft stdin")?;
+                stdin.flush().await.ok();
+            }
+            child.wait_with_output().await.context("wait nft -f -")
+        };
+        let out = tokio::time::timeout(std::time::Duration::from_secs(30), fut)
+            .await
+            .map_err(|_| anyhow::anyhow!("nft -f - timed out after 30s"))??;
 
         if out.status.success() {
             // nft applied cleanly — clear warned flag and persist to disk.
@@ -489,29 +494,34 @@ fn render_bridge_fragment(rules: &[AllowRule]) -> String {
 
 /// Pipe bytes into `iptables-restore` (with or without --noflush).
 async fn iptables_restore(bytes: &[u8], noflush: bool) -> Result<()> {
-    let mut cmd = Command::new("iptables-restore");
-    if noflush {
-        cmd.arg("--noflush");
-    }
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = cmd.spawn().context("spawn iptables-restore")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(bytes)
-            .await
-            .context("write iptables-restore stdin")?;
-        stdin.flush().await.ok();
-    }
-    let out = child.wait_with_output().await.context("wait iptables-restore")?;
-    if !out.status.success() {
-        bail!(
-            "iptables-restore failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(())
+    let fut = async {
+        let mut cmd = Command::new("iptables-restore");
+        if noflush {
+            cmd.arg("--noflush");
+        }
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn().context("spawn iptables-restore")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(bytes)
+                .await
+                .context("write iptables-restore stdin")?;
+            stdin.flush().await.ok();
+        }
+        let out = child.wait_with_output().await.context("wait iptables-restore")?;
+        if !out.status.success() {
+            bail!(
+                "iptables-restore failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        Ok(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(30), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("iptables-restore timed out after 30s"))?
 }
 
 async fn iptables_exit(args: &[String]) -> Result<std::process::ExitStatus> {

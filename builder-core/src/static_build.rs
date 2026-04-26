@@ -26,17 +26,17 @@ pub async fn run(
 
     emit(sink, "git", format!("cloning {} @ {}", req.repo_url, req.git_ref), 0);
 
-    if !run_ok("git", &["clone", "--depth", "1", "--no-tags", &req.repo_url, "repo"], work_dir).await? {
+    if !run_ok("git", &["clone", "--depth", "1", "--no-tags", "--", &req.repo_url, "repo"], work_dir).await? {
         return Err(err(500, "git", "git clone failed"));
     }
 
     let repo_dir = work_dir.join("repo");
-    let checkout_ok = run_ok("git", &["checkout", &req.git_ref], &repo_dir).await?;
+    let checkout_ok = run_ok("git", &["checkout", "--", &req.git_ref], &repo_dir).await?;
     if !checkout_ok {
-        if !run_ok("git", &["fetch", "--depth", "1", "origin", &req.git_ref], &repo_dir).await? {
+        if !run_ok("git", &["fetch", "--depth", "1", "origin", "--", &req.git_ref], &repo_dir).await? {
             return Err(err(500, "git", format!("git fetch ref {} failed", req.git_ref)));
         }
-        run_ok("git", &["checkout", "FETCH_HEAD"], &repo_dir).await?;
+        run_ok("git", &["checkout", "--", "FETCH_HEAD"], &repo_dir).await?;
     }
 
     emit(sink, "git", "clone complete", 10);
@@ -47,6 +47,12 @@ pub async fn run(
         return Err(err(400, "detect", format!("output_dir '{output_dir}' not found in repo")));
     }
 
+    if base_image.contains('\n') || base_image.contains('\r') {
+        return Err(err(400, "detect", "invalid base_image: newlines are not allowed"));
+    }
+    if output_dir.contains('\n') || output_dir.contains('\r') || output_dir.contains("..") {
+        return Err(err(400, "detect", "invalid output_dir: newlines or path traversal are not allowed"));
+    }
     let containerfile = format!("FROM {base_image}\nCOPY ./{output_dir} /usr/share/nginx/html\n");
     tokio::fs::write(repo_dir.join("Containerfile.coolify"), &containerfile)
         .await
@@ -128,6 +134,7 @@ async fn run_ok(bin: &str, args: &[&str], cwd: &Path) -> Result<bool, BuildError
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| err(500, "spawn", format!("{bin} spawn: {e}")))?;
 

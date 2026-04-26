@@ -265,7 +265,7 @@ async fn build_result(
         }
         ParkResult::NotFound => build_err(&request_id, 404, "unknown request_id", "result"),
         ParkResult::Parked(rx) => {
-            let timeout = Duration::from_millis(q.timeout_ms.unwrap_or(30_000));
+            let timeout = Duration::from_millis(q.timeout_ms.unwrap_or(30_000).min(300_000));
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(ResponseData::Build(body))) => {
                     Json(BuildResponseEnvelope { request_id, body }).into_response()

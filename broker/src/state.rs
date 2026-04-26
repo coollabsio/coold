@@ -163,6 +163,9 @@ impl Pending {
         if self.0.len() >= max {
             return false;
         }
+        if self.0.contains_key(&request_id) {
+            return false;
+        }
         self.0.insert(
             request_id,
             PendingEntry {
@@ -194,20 +197,21 @@ impl Pending {
     /// oneshot pair is created, the sender pushed into the `Waiting` set,
     /// and the receiver returned for the handler to await.
     pub fn park(&self, request_id: &str) -> ParkResult {
-        // Take the entry out entirely so we can transition its state under
-        // a single lock; re-insert `Waiting` when necessary. DashMap's
-        // `get_mut` would also work but composes awkwardly with moves.
-        let Some((_, mut entry)) = self.0.remove(request_id) else {
-            return ParkResult::NotFound;
+        let mut entry = match self.0.get_mut(request_id) {
+            Some(e) => e,
+            None => return ParkResult::NotFound,
         };
 
-        match entry.state {
-            PendingState::Landed { body, .. } => ParkResult::AlreadyLanded(body),
-            PendingState::Waiting { mut sinks } => {
+        match &mut entry.state {
+            PendingState::Landed { body, .. } => {
+                let body = body.clone();
+                drop(entry);
+                self.0.remove(request_id);
+                ParkResult::AlreadyLanded(body)
+            }
+            PendingState::Waiting { sinks } => {
                 let (tx, rx) = oneshot::channel();
                 sinks.push(tx);
-                entry.state = PendingState::Waiting { sinks };
-                self.0.insert(request_id.to_owned(), entry);
                 ParkResult::Parked(rx)
             }
         }
@@ -217,8 +221,9 @@ impl Pending {
     /// transitions the entry to `Landed` with `LANDED_TTL_SECS` TTL so a
     /// late poller can still claim the body.
     pub fn deliver(&self, request_id: &str, body: ResponseData) {
-        let Some((_, mut entry)) = self.0.remove(request_id) else {
-            return;
+        let mut entry = match self.0.get_mut(request_id) {
+            Some(e) => e,
+            None => return,
         };
 
         if let PendingState::Waiting { sinks } = std::mem::replace(
@@ -232,8 +237,6 @@ impl Pending {
                 let _ = sink.send(body.clone());
             }
         }
-
-        self.0.insert(request_id.to_owned(), entry);
     }
 
     /// Evict expired entries.

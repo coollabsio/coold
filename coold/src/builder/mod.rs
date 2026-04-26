@@ -62,8 +62,14 @@ pub struct BuilderSettings {
 
 impl BuilderCtx {
     pub fn new(settings: BuilderSettings) -> Self {
+        let capacity = if settings.capacity == 0 {
+            warn!("builder capacity was 0, defaulting to 1");
+            1
+        } else {
+            settings.capacity
+        };
         Self {
-            sem: Arc::new(Semaphore::new(settings.capacity as usize)),
+            sem: Arc::new(Semaphore::new(capacity as usize)),
             work_root: settings.work_root,
             builder_bin: settings.builder_bin,
             timeout_secs: settings.timeout_secs,
@@ -240,6 +246,9 @@ impl BuilderCtx {
     }
 
     async fn run_build(&self, request_id: &str, req: BuildRequest) -> Result<BuildResult, BuildError> {
+        if !is_safe_request_id(request_id) {
+            return Err(build_err(400, "dispatch", "invalid request_id"));
+        }
         let work_dir = self.work_root.join(request_id);
         let wd = work_dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -432,6 +441,15 @@ fn build_err(code: u32, stage: &str, message: impl Into<String>) -> BuildError {
         message: message.into(),
         stage: stage.into(),
     }
+}
+
+/// Validate that a request_id is safe to use as a path component and systemd
+/// unit name. Rejects empty, overly long, or non-alphanumeric ids to prevent
+/// path traversal and command injection.
+fn is_safe_request_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 async fn send_err(tx: &mpsc::Sender<ClientMsg>, request_id: &str, code: u32, message: &str, stage: &str) {

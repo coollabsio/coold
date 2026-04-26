@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -20,12 +20,25 @@ pub struct VerifiedJwt {
 /// Verify a per-host JWT. Audience is fixed to "coold" — capability-based
 /// authorization (e.g. accepting a build dispatch) is decided from the
 /// `caps` claim, not from audience splits.
+///
+/// The algorithm is inferred from the JWT header (`alg`) so RSA and EC keys
+/// are both supported without extra configuration.
 pub fn verify_jwt(token: &str, public_key_pem: &str) -> Result<VerifiedJwt> {
-    let key = DecodingKey::from_ec_pem(public_key_pem.as_bytes())
-        .or_else(|_| DecodingKey::from_rsa_pem(public_key_pem.as_bytes()))
-        .map_err(|e| anyhow!("load JWT pubkey: {e}"))?;
+    let header = decode_header(token).map_err(|e| anyhow!("decode JWT header: {e}"))?;
 
-    let mut validation = Validation::new(Algorithm::ES256);
+    let (key, mut validation) = match header.alg {
+        Algorithm::ES256 | Algorithm::ES384 => {
+            let key = DecodingKey::from_ec_pem(public_key_pem.as_bytes())
+                .map_err(|e| anyhow!("load EC JWT pubkey: {e}"))?;
+            (key, Validation::new(header.alg))
+        }
+        Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {
+            let key = DecodingKey::from_rsa_pem(public_key_pem.as_bytes())
+                .map_err(|e| anyhow!("load RSA JWT pubkey: {e}"))?;
+            (key, Validation::new(header.alg))
+        }
+        other => return Err(anyhow!("unsupported JWT algorithm: {other:?}")),
+    };
     validation.set_audience(&["coold"]);
 
     let data =
