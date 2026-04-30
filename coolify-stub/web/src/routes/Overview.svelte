@@ -54,7 +54,7 @@
       <div class="space-y-1">
         <Card.Title class="flex items-center gap-2 text-sm">
           <Activity class="h-4 w-4 text-muted-foreground" />
-          Broker health
+          Scheduler health
         </Card.Title>
         <Card.Description>Live probe of /api/health every 5s.</Card.Description>
       </div>
@@ -69,7 +69,7 @@
         <Badge variant="success">
           <CheckCircle2 class="mr-1 h-3 w-3" /> Healthy
         </Badge>
-        <span class="text-xs text-muted-foreground">broker reachable via UDS</span>
+        <span class="text-xs text-muted-foreground">scheduler reachable via UDS</span>
       {:else}
         <Badge variant="destructive">
           <XCircle class="mr-1 h-3 w-3" /> Offline
@@ -88,7 +88,7 @@
           <Server class="h-4 w-4 text-muted-foreground" />
           Known hosts
         </Card.Title>
-        <Card.Description>Agents registered with the broker.</Card.Description>
+        <Card.Description>Agents registered with the scheduler.</Card.Description>
       </div>
       <Button
         variant="ghost"

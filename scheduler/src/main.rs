@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     info!(
         grpc_bind = %config.grpc_bind,
         uds_path = %config.unix_socket_path.display(),
-        "broker starting",
+        "scheduler starting",
     );
 
     let streams = state::Streams::new();
@@ -66,7 +66,7 @@ mod grpc_server {
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr = config.grpc_bind.parse()?;
-        let svc = BrokerAgent { config, streams, pending };
+        let svc = SchedulerAgent { config, streams, pending };
 
         info!(%addr, "gRPC server listening");
         Server::builder()
@@ -76,7 +76,7 @@ mod grpc_server {
         Ok(())
     }
 
-    struct BrokerAgent {
+    struct SchedulerAgent {
         config: Config,
         streams: Streams,
         pending: Pending,
@@ -85,7 +85,7 @@ mod grpc_server {
     type ServerMsgStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send + 'static>>;
 
     #[tonic::async_trait]
-    impl Agent for BrokerAgent {
+    impl Agent for SchedulerAgent {
         type StreamStream = ServerMsgStream;
 
         async fn stream(

@@ -93,7 +93,7 @@ pub fn route_build(
             ) {
                 return RouteOutcome::PushError {
                     code: 503,
-                    message: "broker at pending-dispatch capacity",
+                    message: "scheduler at pending-dispatch capacity",
                 };
             }
 

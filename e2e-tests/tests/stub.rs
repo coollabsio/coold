@@ -1,7 +1,7 @@
 //! Stub-dashboard smoke e2e. Provisions a single Hetzner VM, runs
-//! `coolify init apply` (bringing up coold + broker + builder), scp's the
+//! `coolify init bootstrap` (bringing up coold + scheduler + builder), scp's the
 //! prebuilt `coolify-stub` binary onto the VM, launches it next to the
-//! broker UDS, and drives a real static build through its `/api/*` surface.
+//! scheduler UDS, and drives a real static build through its `/api/*` surface.
 //!
 //! Binary selection (first match wins):
 //!   1. `COOLIFY_STUB_BIN=/abs/path/to/coolify-stub` — explicit override.
@@ -167,13 +167,13 @@ fn stub_smoke() {
     let cluster = EphemeralCluster::provision(1, "stub");
     let host = cluster.hosts()[0].ipv4.clone();
 
-    // 1. Install stack (coold + broker + builder colocated on the VM).
-    step("1/7  coolify init apply (install stack)");
+    // 1. Install stack (coold + scheduler + builder colocated on the VM).
+    step("1/7  coolify init bootstrap (install stack)");
     local_coolify(
         &cfg.coolify_bin,
         &[
             "init",
-            "apply",
+            "bootstrap",
             "--servers",
             &host,
             "--central",
@@ -190,18 +190,18 @@ fn stub_smoke() {
             "--yes",
         ],
     )
-    .expect("coolify init apply");
-    ok("init apply returned success");
+    .expect("coolify init bootstrap");
+    ok("init bootstrap returned success");
 
-    // 1b. Optional override: swap the nightly-provisioned builder/coold/broker
+    // 1b. Optional override: swap the nightly-provisioned builder/coold/scheduler
     //     binaries with a locally-built copy so in-flight fixes can be tested
     //     without a GitHub release round-trip. Restart the affected systemd
-    //     units for coold/broker; builder has no daemon (coold spawns it per
+    //     units for coold/scheduler; builder has no daemon (coold spawns it per
     //     dispatch) so no restart needed.
     for (var_name, remote_path, unit) in [
         ("E2E_BUILDER_BIN", "/usr/local/bin/builder", None),
         ("E2E_COOLD_BIN", "/usr/local/bin/coold", Some("coold")),
-        ("E2E_BROKER_BIN", "/usr/local/bin/broker", Some("broker")),
+        ("E2E_SCHEDULER_BIN", "/usr/local/bin/scheduler", Some("scheduler")),
     ] {
         if let Ok(local) = std::env::var(var_name) {
             if local.is_empty() {
@@ -231,23 +231,23 @@ fn stub_smoke() {
         }
     }
 
-    // 2. Confirm broker came up before we pile the stub on top.
-    step("2/7  wait for broker socket + /v1/health");
+    // 2. Confirm scheduler came up before we pile the stub on top.
+    step("2/7  wait for scheduler socket + /v1/health");
     assert!(
         wait_for(
-            || unit_active(&cfg.ssh_key, &host, "broker"),
+            || unit_active(&cfg.ssh_key, &host, "scheduler"),
             Duration::from_secs(30),
         ),
-        "broker unit never became active on {host}"
+        "scheduler unit never became active on {host}"
     );
     let ping = ssh(
         &cfg.ssh_key,
         &host,
-        "curl -sS --unix-socket /run/coolify/broker.sock http://localhost/v1/health",
+        "curl -sS --unix-socket /run/coolify/scheduler.sock http://localhost/v1/health",
     )
     .unwrap_or_default();
-    assert!(ping.contains("\"ok\":true"), "broker health: {ping:?}");
-    ok("broker UDS /v1/health → ok");
+    assert!(ping.contains("\"ok\":true"), "scheduler health: {ping:?}");
+    ok("scheduler UDS /v1/health → ok");
 
     // 3. Upload the prebuilt stub binary and kick it off. We start it under
     //    `setsid` so closing the ssh session doesn't SIGHUP the child. Stub
@@ -267,7 +267,7 @@ fn stub_smoke() {
     let wg_ip = wg0_ip(&cfg.ssh_key, &host);
     let launch = format!(
         "rm -f {REMOTE_LOG}; \
-         COOLIFY_HOSTS={wg_ip} BROKER_SOCKET_PATH=/run/coolify/broker.sock PORT={STUB_PORT} HOST=0.0.0.0 \
+         COOLIFY_HOSTS={wg_ip} SCHEDULER_SOCKET_PATH=/run/coolify/scheduler.sock PORT={STUB_PORT} HOST=0.0.0.0 \
          setsid nohup {REMOTE_BIN} >{REMOTE_LOG} 2>&1 < /dev/null & \
          echo $!",
     );
@@ -308,7 +308,7 @@ fn stub_smoke() {
         host: &host,
     };
 
-    // 4. Wait for /api/health to flip green (broker behind it).
+    // 4. Wait for /api/health to flip green (scheduler behind it).
     step("4/7  poll /api/health from inside the VM");
     let health_url = format!("http://127.0.0.1:{STUB_PORT}/api/health");
     let healthy = wait_for(

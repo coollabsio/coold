@@ -1,13 +1,13 @@
 [package]
-name = "broker"
+name = "scheduler"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "gRPC stream broker: terminates coold streams, exposes HTTP-over-UDS dispatch to the central plane."
+description = "gRPC stream scheduler: terminates coold streams, exposes HTTP-over-UDS dispatch to the central plane."
 license.workspace = true
 
 [[bin]]
-name = "broker"
+name = "scheduler"
 path = "src/main.rs"
 
 [dependencies]

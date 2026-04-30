@@ -53,7 +53,7 @@
 
       const res = await dispatchBuild(body);
       if (!res || typeof res !== "object" || !("request_id" in res)) {
-        throw new Error("Malformed response from broker");
+        throw new Error("Malformed response from scheduler");
       }
       lastRequestId = res.request_id;
       trackBuild(res.request_id);
@@ -83,7 +83,7 @@
         <Rocket class="h-4 w-4 text-muted-foreground" /> Dispatch a build
       </Card.Title>
       <Card.Description>
-        Forwards to the coold broker, which selects an agent and runs builder-core.
+        Forwards to the coold scheduler, which selects an agent and runs builder-core.
       </Card.Description>
     </Card.Header>
     <Card.Content>
@@ -95,12 +95,12 @@
             bind:value={hostId}
             class="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
-            <option value="">Auto (broker load-balances)</option>
+            <option value="">Auto (scheduler load-balances)</option>
             {#each hosts as host}
               <option value={host}>{host}</option>
             {/each}
           </select>
-          <p class="text-xs text-muted-foreground">Leave blank to let the broker pick.</p>
+          <p class="text-xs text-muted-foreground">Leave blank to let the scheduler pick.</p>
         </div>
 
         <div class="grid gap-2">

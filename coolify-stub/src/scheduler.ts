@@ -1,5 +1,5 @@
 // Thin client around Bun's `fetch({ unix })` option for talking to the coold
-// broker's HTTP-over-UDS API. Keeps error handling typed so routes can map
+// scheduler's HTTP-over-UDS API. Keeps error handling typed so routes can map
 // transport failures to 5xx without crashing.
 
 import type {
@@ -13,19 +13,19 @@ import type {
 const DISPATCH_TIMEOUT_MS = 5_000;
 const DEFAULT_POLL_TIMEOUT_MS = 30_000;
 
-export interface BrokerHealthOk {
+export interface SchedulerHealthOk {
   ok: true;
 }
 
-export interface BrokerHealthErr {
+export interface SchedulerHealthErr {
   ok: false;
   error: string;
 }
 
-export type BrokerHealth = BrokerHealthOk | BrokerHealthErr;
+export type SchedulerHealth = SchedulerHealthOk | SchedulerHealthErr;
 
-export interface BrokerClient {
-  health(): Promise<BrokerHealth>;
+export interface SchedulerClient {
+  health(): Promise<SchedulerHealth>;
   listContainers(hostId: string, requestId: string): Promise<ResponseEnvelope>;
   dispatchBuild(
     env: BuildDispatchEnvelope,
@@ -37,13 +37,13 @@ export interface BrokerClient {
   cancelBuild(requestId: string): Promise<{ status: number }>;
 }
 
-export class BrokerTransportError extends Error {
+export class SchedulerTransportError extends Error {
   constructor(
     message: string,
     readonly cause?: unknown,
   ) {
     super(message);
-    this.name = "BrokerTransportError";
+    this.name = "SchedulerTransportError";
   }
 }
 
@@ -54,7 +54,7 @@ interface FetchInit {
   timeoutMs?: number;
 }
 
-export function createBrokerClient(socketPath: string): BrokerClient {
+export function createSchedulerClient(socketPath: string): SchedulerClient {
   async function call({ method, path, body, timeoutMs = DISPATCH_TIMEOUT_MS }: FetchInit) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -68,8 +68,8 @@ export function createBrokerClient(socketPath: string): BrokerClient {
       });
       return res;
     } catch (err) {
-      throw new BrokerTransportError(
-        `broker request failed (${method} ${path}): ${(err as Error).message ?? err}`,
+      throw new SchedulerTransportError(
+        `scheduler request failed (${method} ${path}): ${(err as Error).message ?? err}`,
         err,
       );
     } finally {
@@ -83,8 +83,8 @@ export function createBrokerClient(socketPath: string): BrokerClient {
     try {
       return JSON.parse(text) as T;
     } catch (err) {
-      throw new BrokerTransportError(
-        `broker returned invalid JSON (status ${res.status}): ${text.slice(0, 200)}`,
+      throw new SchedulerTransportError(
+        `scheduler returned invalid JSON (status ${res.status}): ${text.slice(0, 200)}`,
         err,
       );
     }
@@ -95,7 +95,7 @@ export function createBrokerClient(socketPath: string): BrokerClient {
       try {
         const res = await call({ method: "GET", path: "/v1/health" });
         if (!res.ok) {
-          return { ok: false, error: `broker /v1/health returned ${res.status}` };
+          return { ok: false, error: `scheduler /v1/health returned ${res.status}` };
         }
         return { ok: true };
       } catch (err) {
@@ -127,7 +127,7 @@ export function createBrokerClient(socketPath: string): BrokerClient {
       const res = await call({
         method: "GET",
         path: `/v1/build/result/${encodeURIComponent(requestId)}?timeout_ms=${timeoutMs}`,
-        // Allow ~2s slack over the broker's long-poll window before aborting.
+        // Allow ~2s slack over the scheduler's long-poll window before aborting.
         timeoutMs: timeoutMs + 2_000,
       });
       const body = await parseJson<BuildResponseEnvelope>(res);

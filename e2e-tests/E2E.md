@@ -22,7 +22,7 @@ cargo test -p e2e-tests --no-run
 ## Suite 1 — `builder.rs` (Hetzner-provisioned)
 
 Provisions 2 VMs (A = central + builder, B = coold-only), runs
-`coolify init apply`, then executes every dispatch / cancel / restart
+`coolify init bootstrap`, then executes every dispatch / cancel / restart
 / artifact-perm scenario on the shared cluster. VMs destroyed on drop.
 Uses the same env vars as the install suite (see below):
 
@@ -36,7 +36,7 @@ provision its own cluster, which is wasteful).
 
 ## Suite 2 — `install.rs` (Hetzner-provisioned)
 
-Provisions VMs via Hetzner Cloud API, runs `coolify init apply`, asserts networking, destroys VMs on drop. Env vars:
+Provisions VMs via Hetzner Cloud API, runs `coolify init bootstrap`, asserts networking, destroys VMs on drop. Env vars:
 
 ```bash
 export HETZNER_TOKEN=<project-scoped-token>
@@ -79,8 +79,8 @@ CONFIRM_SWEEP=1 cargo test -p e2e-tests --test install cleanup_leaked_hetzner --
 
 ## Suite 3 — `stub.rs` (coolify-stub dashboard smoke)
 
-Provisions a single Hetzner VM, runs `coolify init apply`, scp's the
-`coolify-stub` Bun binary next to the broker, and drives a real static build
+Provisions a single Hetzner VM, runs `coolify init bootstrap`, scp's the
+`coolify-stub` Bun binary next to the scheduler, and drives a real static build
 through the stub's `/api/*` surface.
 
 ### Run the suite (default — fetch from nightly release)

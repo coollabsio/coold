@@ -2,8 +2,8 @@
 // `match(req)` function so server.ts can fall through to the embedded SPA
 // without fighting Bun's route-map overloads.
 
-import type { BrokerClient } from "./broker.ts";
-import { BrokerTransportError } from "./broker.ts";
+import type { SchedulerClient } from "./scheduler.ts";
+import { SchedulerTransportError } from "./scheduler.ts";
 import type { BuildDispatchEnvelope } from "./envelope.ts";
 
 interface BuildRequestBody {
@@ -25,9 +25,9 @@ function json(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
-function brokerError(err: unknown): Response {
-  if (err instanceof BrokerTransportError) {
-    return json({ error: "broker_unreachable", message: err.message }, { status: 502 });
+function schedulerError(err: unknown): Response {
+  if (err instanceof SchedulerTransportError) {
+    return json({ error: "scheduler_unreachable", message: err.message }, { status: 502 });
   }
   return json(
     { error: "internal_error", message: (err as Error).message ?? "unknown" },
@@ -47,11 +47,11 @@ async function readJson<T>(req: Request): Promise<T | null> {
 
 const ALLOWED_METHODS = ["GET", "POST", "OPTIONS"] as const;
 
-export function createApiHandler(broker: BrokerClient, hosts: string[]) {
+export function createApiHandler(scheduler: SchedulerClient, hosts: string[]) {
   async function handleContainers(id: string): Promise<Response> {
     const requestId = crypto.randomUUID();
     try {
-      const env = await broker.listContainers(id, requestId);
+      const env = await scheduler.listContainers(id, requestId);
       if (env.status === "ok") {
         return json({ request_id: env.request_id, containers: env.data ?? [] });
       }
@@ -60,7 +60,7 @@ export function createApiHandler(broker: BrokerClient, hosts: string[]) {
         { status: 502 },
       );
     } catch (err) {
-      return brokerError(err);
+      return schedulerError(err);
     }
   }
 
@@ -91,13 +91,13 @@ export function createApiHandler(broker: BrokerClient, hosts: string[]) {
       },
     };
     try {
-      const { status, body: respBody } = await broker.dispatchBuild(env);
+      const { status, body: respBody } = await scheduler.dispatchBuild(env);
       if (status === 202) {
         return json({ request_id: requestId }, { status: 202 });
       }
       return json(respBody, { status });
     } catch (err) {
-      return brokerError(err);
+      return schedulerError(err);
     }
   }
 
@@ -106,27 +106,27 @@ export function createApiHandler(broker: BrokerClient, hosts: string[]) {
     const rawTimeout = url.searchParams.get("timeout_ms");
     const timeoutMs = rawTimeout ? Number(rawTimeout) : undefined;
     try {
-      const { status, body } = await broker.buildResult(id, timeoutMs);
+      const { status, body } = await scheduler.buildResult(id, timeoutMs);
       return json(body, { status });
     } catch (err) {
-      return brokerError(err);
+      return schedulerError(err);
     }
   }
 
   async function handleCancel(id: string): Promise<Response> {
     try {
-      const { status } = await broker.cancelBuild(id);
+      const { status } = await scheduler.cancelBuild(id);
       if (status === 204) return new Response(null, { status: 204 });
       return json({ status }, { status });
     } catch (err) {
-      return brokerError(err);
+      return schedulerError(err);
     }
   }
 
   async function handleHealth(): Promise<Response> {
-    const status = await broker.health();
-    if (status.ok) return json({ ok: true, broker: "ok" });
-    return json({ ok: false, broker: status.error }, { status: 503 });
+    const status = await scheduler.health();
+    if (status.ok) return json({ ok: true, scheduler: "ok" });
+    return json({ ok: false, scheduler: status.error }, { status: 503 });
   }
 
   return async function match(req: Request): Promise<Response | null> {

@@ -1,10 +1,10 @@
-//! Live-server test harness for the coold/broker/builder stack.
+//! Live-server test harness for the coold/scheduler/builder stack.
 //!
 //! Tests are Rust integration tests under `tests/`, marked `#[ignore]` so
 //! default `cargo test` skips them. Every suite provisions its own
 //! ephemeral Hetzner cluster via [`hetzner::EphemeralCluster`], runs
-//! `coolify init apply` from the local `coolify` binary, then exercises
-//! the black-box HTTP/UDS/systemd contract over SSH. No broker/coold
+//! `coolify init bootstrap` from the local `coolify` binary, then exercises
+//! the black-box HTTP/UDS/systemd contract over SSH. No scheduler/coold
 //! code is linked.
 //!
 //! Run with:
@@ -94,7 +94,7 @@ pub struct Env {
 impl Env {
     /// Build from a live [`hetzner::EphemeralCluster`] provisioned with
     /// 2 hosts (A = central + builder, B = coold-only) and the wg0
-    /// addresses resolved on each host after `coolify init apply`.
+    /// addresses resolved on each host after `coolify init bootstrap`.
     pub fn from_cluster(
         cluster: &hetzner::EphemeralCluster,
         builder_mgmt: String,
@@ -129,13 +129,13 @@ impl Env {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// POST a JSON payload to the broker UDS via `ssh + curl` on the
+    /// POST a JSON payload to the scheduler UDS via `ssh + curl` on the
     /// central host. Returns (status_code, body). Payload must be valid
     /// JSON — double-quoted strings, no single quotes.
     pub fn uds_post(&self, path: &str, payload: &str) -> Result<(u16, String), String> {
         let cmd = format!(
             "curl --unix-socket {sock} -sS -X POST -H 'Content-Type: application/json' --data '{payload}' -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
-            sock = BROKER_SOCKET
+            sock = SCHEDULER_SOCKET
         );
         parse_curl_output(self.ssh(&self.central_host, &cmd)?)
     }
@@ -143,13 +143,13 @@ impl Env {
     pub fn uds_get(&self, path: &str) -> Result<(u16, String), String> {
         let cmd = format!(
             "curl --unix-socket {sock} -sS -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
-            sock = BROKER_SOCKET
+            sock = SCHEDULER_SOCKET
         );
         parse_curl_output(self.ssh(&self.central_host, &cmd)?)
     }
 
     /// Submit a build dispatch envelope. Returns `Accepted` on 202 with
-    /// the assigned `request_id`, or `Rejected` when the broker refused
+    /// the assigned `request_id`, or `Rejected` when the scheduler refused
     /// pre-dispatch (unknown host, no builder, capacity cap) — the
     /// response body is the final error for this request_id.
     pub fn dispatch_build(&self, payload: &str) -> DispatchResult {
@@ -297,7 +297,7 @@ pub fn build_envelope(
     obj.to_string()
 }
 
-pub const BROKER_SOCKET: &str = "/run/coolify/broker.sock";
+pub const SCHEDULER_SOCKET: &str = "/run/coolify/scheduler.sock";
 
 #[derive(Debug, Deserialize)]
 pub struct DispatchAck {

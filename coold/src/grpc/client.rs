@@ -18,13 +18,13 @@ use crate::grpc::proto::{
 use crate::podman::PodmanClient;
 
 pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
-    if config.grpc_disabled || config.broker_url.is_none() {
+    if config.grpc_disabled || config.scheduler_url.is_none() {
         info!("grpc transport disabled; skipping");
         std::future::pending::<()>().await;
         return Ok(());
     }
 
-    let url = config.broker_url.clone().unwrap();
+    let url = config.scheduler_url.clone().unwrap();
 
     let jwt = tokio::fs::read_to_string(&config.host_jwt_path)
         .await
@@ -88,10 +88,10 @@ async fn connect_and_serve(
     builder_ctx: Option<Arc<BuilderCtx>>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
-        .context("invalid broker URL")?
+        .context("invalid scheduler URL")?
         .connect()
         .await
-        .context("connect to broker")?;
+        .context("connect to scheduler")?;
 
     let bearer: MetadataValue<_> = format!("Bearer {jwt}")
         .parse()
@@ -140,7 +140,7 @@ async fn connect_and_serve(
         .context("open stream")?
         .into_inner();
 
-    info!(broker_url = url, "grpc stream established");
+    info!(scheduler_url = url, "grpc stream established");
 
     while let Some(msg) = inbound.message().await.context("receive ServerMsg")? {
         let request_id = msg.request_id.clone();

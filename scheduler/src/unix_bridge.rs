@@ -1,7 +1,7 @@
 //! HTTP-over-Unix-domain-socket bridge.
 //!
 //! Access control is the filesystem: the socket is bound as
-//! `owner:group` = `<broker_user>:<BROKER_UNIX_SOCKET_GROUP>` with mode
+//! `owner:group` = `<scheduler_user>:<SCHEDULER_UNIX_SOCKET_GROUP>` with mode
 //! `0660`. No TLS, no auth header — any local process with group
 //! membership on the socket is a trusted central-plane caller.
 
@@ -154,7 +154,7 @@ async fn coold_dispatch(
                 PendingKind::Coold,
                 st.pending_max,
             ) {
-                return coold_err(&request_id, 503, "broker at pending-dispatch capacity");
+                return coold_err(&request_id, 503, "scheduler at pending-dispatch capacity");
             }
 
             let rx = match st.pending.park(&request_id) {

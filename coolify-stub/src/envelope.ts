@@ -1,5 +1,5 @@
-// JSON envelope types exchanged with the coold broker over its UDS HTTP lane.
-// Mirror of broker/src/envelope.rs — keep in sync with the Rust definitions.
+// JSON envelope types exchanged with the coold scheduler over its UDS HTTP lane.
+// Mirror of scheduler/src/envelope.rs — keep in sync with the Rust definitions.
 
 // ─── Coold dispatch ──────────────────────────────────────────────────────────
 

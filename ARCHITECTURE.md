@@ -412,13 +412,13 @@ N_central = ceil(fleet_size / 30_000) + 1  # +1 for headroom / drain
 Assumes commodity 16-core / 32 GB nodes running tonic. Increase divisor
 on larger hardware; decrease if logs-follow subscriptions are common.
 
-## 16. Central topology: broker + Laravel
+## 16. Central topology: scheduler + Laravel
 
-### Why a separate broker service
+### Why a separate scheduler service
 
 Laravel (Coolify central brain) runs on a request/response PHP worker model.
 Workers cycle on deploy and cannot safely hold thousands of long-lived HTTP/2
-streams. The `broker` binary fills this gap: it is the gRPC server that
+streams. The `scheduler` binary fills this gap: it is the gRPC server that
 coold dials, and it exposes a synchronous HTTP lane over a Unix domain
 socket that Laravel calls per-request.
 
@@ -426,42 +426,42 @@ socket that Laravel calls per-request.
 [coold hosts]
      │  grpcs://central.example.com:6443  (JWT bearer, HTTP/2 bidi stream)
      ▼
-[broker]
-     ▲  HTTP over /run/coolify/broker.sock  (0660, group = PHP-FPM)
+[scheduler]
+     ▲  HTTP over /run/coolify/scheduler.sock  (0660, group = PHP-FPM)
      │
-[Laravel]  (brain: scheduler, deploy controller, RBAC, etc.)
+[Laravel]  (brain: deploy controller, RBAC, etc.)
 ```
 
-No Redis, no message queue. The broker owns the connection pool; Laravel
+No Redis, no message queue. The scheduler owns the connection pool; Laravel
 treats it as a local HTTP backend.
 
 ### Self-hosted topology (default)
 
 Single central VM. No load balancer required.
 
-- `broker` binds `0.0.0.0:6443` for coold gRPC (systemd unit, starts
+- `scheduler` binds `0.0.0.0:6443` for coold gRPC (systemd unit, starts
   before Laravel).
-- `broker` also binds the UDS at `/run/coolify/broker.sock`. Mode `0660`
-  when `BROKER_UNIX_SOCKET_GROUP` is set, else `0600`. The PHP-FPM group
-  goes in `BROKER_UNIX_SOCKET_GROUP` so Laravel workers can dial it
+- `scheduler` also binds the UDS at `/run/coolify/scheduler.sock`. Mode `0660`
+  when `SCHEDULER_UNIX_SOCKET_GROUP` is set, else `0600`. The PHP-FPM group
+  goes in `SCHEDULER_UNIX_SOCKET_GROUP` so Laravel workers can dial it
   without a TCP hop or auth handshake.
 - Laravel runs on `:80` / `:443` via nginx. No port conflict.
-- TLS on broker gRPC only: Let's Encrypt cert (if domain available) or
+- TLS on scheduler gRPC only: Let's Encrypt cert (if domain available) or
   self-signed generated at `coolify init`, pinned in
-  `/etc/coolify/broker.pin`.
+  `/etc/coolify/scheduler.pin`.
 - Firewall: open port `6443` inbound for coold connections.
 
-### Cloud / multi-broker
+### Cloud / multi-scheduler
 
-Single broker per central VM / pod for the current release. Multi-broker
-routing (Corrosion `host_routes` fan-out, inter-broker command forward)
+Single scheduler per central VM / pod for the current release. Multi-scheduler
+routing (Corrosion `host_routes` fan-out, inter-scheduler command forward)
 is deferred until horizontal central is actually needed — the UDS lane
 is local-only by design, so scaling requires either sidecar pinning
-(Laravel pod → local broker) or a new inter-broker RPC.
+(Laravel pod → local scheduler) or a new inter-scheduler RPC.
 
-### UDS wire surface (Laravel → broker)
+### UDS wire surface (Laravel → scheduler)
 
-All handlers live in `broker/src/unix_bridge.rs`. Axum routes:
+All handlers live in `scheduler/src/unix_bridge.rs`. Axum routes:
 
 ```
 GET  /v1/health                              -> {"ok": true}
@@ -473,9 +473,9 @@ POST /v1/build/:request_id/cancel            204 No Content
 
 Access control = filesystem perms. No TLS, no bearer, no per-request
 authn — any local caller with group membership on the socket is trusted.
-JWT stays on the coold→broker gRPC stream where it belongs.
+JWT stays on the coold→scheduler gRPC stream where it belongs.
 
-### Envelope schema (`broker/src/envelope.rs`)
+### Envelope schema (`scheduler/src/envelope.rs`)
 
 Coold dispatch — request and response:
 
@@ -502,7 +502,7 @@ Build dispatch:
 
 ```json
 POST /v1/build/dispatch
-{ "host_id": "10.64.0.7",                // optional — absent = broker picks
+{ "host_id": "10.64.0.7",                // optional — absent = scheduler picks
   "request_id": "01HY…",
   "command": { "type": "static_build",
                "repo_url": "https://…",
@@ -528,13 +528,13 @@ GET /v1/build/result/01HY…?timeout_ms=30000
 1. Laravel `POST /v1/coold/dispatch` with `{host_id, request_id, command}`.
 2. `route_coold` checks `Streams::get(host_id)`; miss → 404.
 3. `Pending::insert_waiting` reserves a slot (capped at
-   `BROKER_PENDING_MAX`, default 10 000; overflow → 503).
+   `SCHEDULER_PENDING_MAX`, default 10 000; overflow → 503).
 4. Handler calls `Pending::park(request_id)` → `oneshot::Receiver`, then
    pushes `ServerMsg` into the host's `mpsc::Sender<ServerMsg>` feeding
    the open `Agent.Stream` response half.
 5. coold executes the command against `/run/podman/podman.sock` and
    writes `Response { request_id, body }` back on the same stream.
-6. Broker `grpc_server::deliver_response` looks up the pending entry by
+6. Scheduler `grpc_server::deliver_response` looks up the pending entry by
    `request_id`, translates the proto body to `ResponseBody` via
    `ResponseBody::try_from_proto`, and `Pending::deliver` fires every
    parked oneshot sink, then transitions the entry to `Landed` with a
@@ -565,30 +565,31 @@ Unknown `host_id` → 404. Host stream dropped mid-dispatch → 503.
    the owning host from `Pending`, emits `CancelBuild` on its stream,
    coold runs `systemctl kill --signal=SIGTERM <scope>`.
 
-### Broker config (env vars)
+### Scheduler config (env vars)
 
-All sourced from `broker/src/config.rs`:
+All sourced from `scheduler/src/config.rs`:
 
 | var | default | role |
 |---|---|---|
-| `BROKER_GRPC_BIND` | `0.0.0.0:6443` | coold dials this. Build traffic shares this port — no separate builder listener. |
-| `BROKER_UNIX_SOCKET_PATH` | `/run/coolify/broker.sock` | Laravel UDS. |
-| `BROKER_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
-| `BROKER_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |
-| `BROKER_DISPATCH_TIMEOUT_SECS` | `30` | **currently unused** — handler uses the 10 s `DISPATCH_TIMEOUT_SECS` const in `state.rs`. TODO: wire the flag through. |
-| `BROKER_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | verifies coold stream JWT. |
-| `BROKER_LOG_LEVEL` | `info` | `tracing` EnvFilter. |
+| `SCHEDULER_GRPC_BIND` | `0.0.0.0:6443` | coold dials this. Build traffic shares this port — no separate builder listener. |
+| `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS. |
+| `SCHEDULER_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
+| `SCHEDULER_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |
+| `SCHEDULER_DISPATCH_TIMEOUT_SECS` | `30` | **currently unused** — handler uses the 10 s `DISPATCH_TIMEOUT_SECS` const in `state.rs`. TODO: wire the flag through. |
+| `SCHEDULER_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | verifies coold stream JWT. |
+| `SCHEDULER_LOG_LEVEL` | `info` | `tracing` EnvFilter. |
 
 ### coold config rename
 
-`COOLD_CENTRAL_URL` renamed to `COOLD_BROKER_URL`. Update enrollment and
+`COOLD_CENTRAL_URL` renamed to `COOLD_SCHEDULER_URL`. Update enrollment and
 `coolify init` templates when central enrollment is implemented.
 Semantics identical; only the name changes to reflect the actual target.
+
 
 ### Repository layout
 
 ```
-Cargo.toml          # workspace root (members: coold, broker, builder, builder-core, proto, e2e-tests)
+Cargo.toml          # workspace root (members: coold, scheduler, builder, builder-core, proto, e2e-tests)
 proto/
   agent.proto       # shared Protobuf: Agent.Stream, Hello, ServerMsg, ClientMsg, Response,
                     # BuildRequest, CancelBuild, BuildResponseBody, capabilities, builder_capacity
@@ -596,12 +597,12 @@ proto/
   src/lib.rs
 coold/
   Cargo.toml
-  src/              # dials broker gRPC, podman proxy, firewall writer, DNS, builder subprocess driver
-broker/
+  src/              # dials scheduler gRPC, podman proxy, firewall writer, DNS, builder subprocess driver
+scheduler/
   Cargo.toml
   src/
     main.rs         # tonic AgentServer (grpc_server mod) + pending_sweeper
-    config.rs       # BROKER_* env vars (see table above)
+    config.rs       # SCHEDULER_* env vars (see table above)
     auth.rs         # JWT verify (ES256/RS256, sub = host_id, caps claim)
     state.rs        # Streams: DashMap<host_id, StreamHandle{tx, caps, builder_capacity}>
                     # Pending: DashMap<request_id, PendingEntry{Waiting|Landed}>
@@ -626,7 +627,7 @@ runs builds directly; it spawns the builder per-request.
 - Builder no longer holds its own gRPC stream. Commit `1024747`
   collapsed it onto coold's `Agent.Stream`: one stream per host, not
   two. Coold advertises `"builder"` in its Hello `capabilities` (gated
-  by `COOLD_BUILDER_ENABLED`); the broker capability-routes build
+  by `COOLD_BUILDER_ENABLED`); the scheduler capability-routes build
   envelopes to any host that carries it.
 - Per build: coold spawns the builder binary inside a
   `systemd-run --pipe --scope coolify-build-<request_id>` transient
@@ -639,7 +640,7 @@ runs builds directly; it spawns the builder per-request.
 - Builder emits NDJSON frames on stdout **and** durably to
   `<work_dir>/events.ndjson` (see persistence below).
 - Coold parses the final frame and relays a `Response` over the
-  existing stream; broker delivers it on the build lane.
+  existing stream; scheduler delivers it on the build lane.
 
 ### Supported stacks (v0.1 MVP)
 
@@ -681,31 +682,31 @@ Commit `8ac89a1` makes builds durable across a coold upgrade or crash.
   - **inactive + `error.json`** → emit error `Response` immediately.
   - **inactive + neither** → emit `500 builder exited without result
     file` so Laravel gets a terminal error instead of hanging.
-- Broker-side: no change. `Response` envelopes carry `request_id`; the
-  broker routes by lookup in `Pending` regardless of which coold stream
-  (old or restarted) delivered them. If both broker and coold restart,
+- Scheduler-side: no change. `Response` envelopes carry `request_id`; the
+  scheduler routes by lookup in `Pending` regardless of which coold stream
+  (old or restarted) delivered them. If both scheduler and coold restart,
   delivery still works as long as Laravel's poller is still holding
   `GET /v1/build/result/:id`.
 
 ### Cancellation
 
 `POST /v1/build/:request_id/cancel` →
-`route_build(Cancel)` → broker finds the owning host in `Pending`,
+`route_build(Cancel)` → scheduler finds the owning host in `Pending`,
 pushes `CancelBuild` over the stream → coold runs `systemctl kill
 --signal=SIGTERM <scope>`. The cgroup kill takes the builder, buildah,
 and git down together.
 
 ### Ports
 
-- broker coold + build gRPC: `:6443` (single listener).
+- scheduler coold + build gRPC: `:6443` (single listener).
 - No `:6444`. The separate builder listener was removed in `1024747`.
 
 ### Single-node systemd layout
 
 ```
-coold.service    → dials broker :6443, advertises "builder" cap when enabled,
-                   spawns builder subprocesses in transient units per build
-broker.service   → listens :6443 (coold gRPC) + /run/coolify/broker.sock (Laravel UDS)
+coold.service     → dials scheduler :6443, advertises "builder" cap when enabled,
+                    spawns builder subprocesses in transient units per build
+scheduler.service → listens :6443 (coold gRPC) + /run/coolify/scheduler.sock (Laravel UDS)
 ```
 
 Builder has no long-lived unit; each build runs under

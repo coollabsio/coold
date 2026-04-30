@@ -1,5 +1,5 @@
 //! Install + networking e2e. Provisions Hetzner VMs, runs `coolify init
-//! apply`, asserts wg0 / podman bridge / firewall default-deny / coold API,
+//! bootstrap`, asserts wg0 / podman bridge / firewall default-deny / coold API,
 //! then destroys VMs (RAII via [`EphemeralCluster`]).
 //!
 //! All `#[ignore]` — run with:
@@ -26,9 +26,9 @@ const CONTAINER_POOL: &str = "10.210.0.0/16";
 // Systemd units that must be `active` on every coold host post-install.
 const CORE_UNITS: &[&str] = &["coold", "corrosion", "coolify-mesh-fw", "wg-quick@wg0"];
 
-// Central-only units. Broker runs the UDS command bus — Redis is no
+// Central-only units. Scheduler runs the UDS command bus — Redis is no
 // longer installed by the CLI.
-const CENTRAL_UNITS: &[&str] = &["broker"];
+const CENTRAL_UNITS: &[&str] = &["scheduler"];
 
 fn assert_central_units(ssh_key: &str, host: &str) {
     for unit in CENTRAL_UNITS {
@@ -38,15 +38,15 @@ fn assert_central_units(ssh_key: &str, host: &str) {
         );
         ok(&format!("{host}: systemd unit {unit} active"));
     }
-    assert_broker_socket(ssh_key, host);
+    assert_scheduler_socket(ssh_key, host);
     assert_core_file_perms(ssh_key, host);
 }
 
-/// Verify the broker UDS is present, is a socket, has the expected
+/// Verify the scheduler UDS is present, is a socket, has the expected
 /// filesystem perms (0600 when no group is configured, 0660 when one is),
 /// and is live on `/v1/health`.
-fn assert_broker_socket(ssh_key: &str, host: &str) {
-    const SOCK: &str = "/run/coolify/broker.sock";
+fn assert_scheduler_socket(ssh_key: &str, host: &str) {
+    const SOCK: &str = "/run/coolify/scheduler.sock";
 
     // 1. File type: socket.
     let stat_type = ssh(ssh_key, host, &format!("stat -c %F {SOCK}"))
@@ -96,14 +96,14 @@ fn assert_broker_socket(ssh_key: &str, host: &str) {
     .unwrap_or_default();
     assert!(
         ping.contains("\"ok\":true"),
-        "broker UDS /v1/health did not return ok on {host}: {ping:?}"
+        "scheduler UDS /v1/health did not return ok on {host}: {ping:?}"
     );
-    ok(&format!("{host}: broker UDS /v1/health → ok"));
+    ok(&format!("{host}: scheduler UDS /v1/health → ok"));
 }
 
 /// Verify the runtime dirs + systemd unit files coold relies on exist,
 /// are the right object type, and have the expected mode + owner. Called
-/// on every host that runs broker (central). Covers the broker parent
+/// on every host that runs scheduler (central). Covers the scheduler parent
 /// dir, the builder work tree, and both systemd unit files.
 fn assert_core_file_perms(ssh_key: &str, host: &str) {
     // (path, expected `stat -c %F` kind, allowed mode strings, expected owner)
@@ -128,7 +128,7 @@ fn assert_core_file_perms(ssh_key: &str, host: &str) {
             "root",
         ),
         (
-            "/etc/systemd/system/broker.service",
+            "/etc/systemd/system/scheduler.service",
             "regular file",
             &["644"],
             "root",
@@ -202,12 +202,12 @@ fn install_single_host() {
     let host = cluster.hosts()[0].ipv4.clone();
 
     // 1. Install full stack colocated on the single VM.
-    step("1/8  coolify init apply (install stack)");
+    step("1/8  coolify init bootstrap (install stack)");
     local_coolify(
         &cfg.coolify_bin,
         &[
             "init",
-            "apply",
+            "bootstrap",
             "--servers",
             &host,
             "--central",
@@ -224,8 +224,8 @@ fn install_single_host() {
             "--yes",
         ],
     )
-    .expect("coolify init apply");
-    ok("init apply returned success");
+    .expect("coolify init bootstrap");
+    ok("init bootstrap returned success");
 
     // 2. wg0 up with expected pool prefix.
     step("2/8  verify wg0 address in mgmt pool");
@@ -310,12 +310,12 @@ fn install_two_hosts() {
     let host_b = cluster.hosts()[1].ipv4.clone();
 
     // 1. Install: hostA = central + builder, hostB = coold-only.
-    step("1/9  coolify init apply (install 2-host stack; A=central+builder, B=coold-only)");
+    step("1/9  coolify init bootstrap (install 2-host stack; A=central+builder, B=coold-only)");
     local_coolify(
         &cfg.coolify_bin,
         &[
             "init",
-            "apply",
+            "bootstrap",
             "--servers",
             &format!("{host_a},{host_b}"),
             "--central",
@@ -333,8 +333,8 @@ fn install_two_hosts() {
             "--yes",
         ],
     )
-    .expect("coolify init apply");
-    ok("init apply returned success");
+    .expect("coolify init bootstrap");
+    ok("init bootstrap returned success");
 
     // 2. wg0 addresses on both.
     step("2/9  verify wg0 addresses on both hosts are distinct + in mgmt pool");

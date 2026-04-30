@@ -63,7 +63,7 @@
     </nav>
     <div class="border-t p-4 text-[11px] text-muted-foreground">
       <div class="font-medium text-foreground/80">Stub dashboard</div>
-      <div>Talks to coold broker via /api.</div>
+      <div>Talks to coold scheduler via /api.</div>
     </div>
   </aside>
 

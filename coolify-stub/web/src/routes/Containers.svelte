@@ -109,7 +109,7 @@
       <Card.Header class="flex-row items-center gap-3 space-y-0">
         <XCircle class="h-5 w-5 text-destructive" />
         <div>
-          <Card.Title class="text-sm text-destructive">Broker returned an error</Card.Title>
+          <Card.Title class="text-sm text-destructive">Scheduler returned an error</Card.Title>
           <Card.Description>
             {#if errorBlock.code !== undefined}code {errorBlock.code} —{/if}
             {errorBlock.message}
