@@ -142,6 +142,15 @@ pub enum ParkResult {
     NotFound,
 }
 
+/// Outcome of `insert_waiting` so callers can distinguish a duplicate
+/// from a capacity rejection.
+#[derive(Debug, PartialEq, Eq)]
+pub enum InsertOutcome {
+    Inserted,
+    Duplicate,
+    AtCapacity,
+}
+
 #[derive(Clone)]
 pub struct Pending(Arc<DashMap<String, PendingEntry>>);
 
@@ -150,29 +159,38 @@ impl Pending {
         Self(Arc::new(DashMap::new()))
     }
 
-    /// Insert a fresh `Waiting` entry with no parked sinks. Returns `false`
-    /// if the map is at-or-above `max` — caller should reject the dispatch
-    /// with 503.
+    /// Insert a fresh `Waiting` entry with no parked sinks. Returns
+    /// `InsertOutcome::Duplicate` when `request_id` is already tracked so the
+    /// caller can reject with 409, `AtCapacity` when the map is full (→ 503),
+    /// and `Inserted` on success.
     pub fn insert_waiting(
         &self,
         request_id: String,
         host_id: String,
         kind: PendingKind,
         max: usize,
-    ) -> bool {
+    ) -> InsertOutcome {
+        use dashmap::mapref::entry::Entry;
+        // Capacity is sampled outside `entry()` because `entry()` holds a
+        // write lock on a single shard, and `DashMap::len()` walks every
+        // shard — calling it while holding a shard lock deadlocks.
+        // The cap is therefore best-effort: brief overshoots under
+        // contention are fine for a guardrail against unbounded growth.
         if self.0.len() >= max {
-            return false;
+            return InsertOutcome::AtCapacity;
         }
-        self.0.insert(
-            request_id,
-            PendingEntry {
-                host_id,
-                kind,
-                started_at: Instant::now(),
-                state: PendingState::Waiting { sinks: Vec::new() },
-            },
-        );
-        true
+        match self.0.entry(request_id) {
+            Entry::Occupied(_) => InsertOutcome::Duplicate,
+            Entry::Vacant(slot) => {
+                slot.insert(PendingEntry {
+                    host_id,
+                    kind,
+                    started_at: Instant::now(),
+                    state: PendingState::Waiting { sinks: Vec::new() },
+                });
+                InsertOutcome::Inserted
+            }
+        }
     }
 
     pub fn remove(&self, request_id: &str) -> Option<PendingSnapshot> {
@@ -194,21 +212,33 @@ impl Pending {
     /// oneshot pair is created, the sender pushed into the `Waiting` set,
     /// and the receiver returned for the handler to await.
     pub fn park(&self, request_id: &str) -> ParkResult {
-        // Take the entry out entirely so we can transition its state under
-        // a single lock; re-insert `Waiting` when necessary. DashMap's
-        // `get_mut` would also work but composes awkwardly with moves.
-        let Some((_, mut entry)) = self.0.remove(request_id) else {
-            return ParkResult::NotFound;
+        // Hold the shard lock across the state transition so a concurrent
+        // `deliver` can't observe a missing entry and drop the response.
+        enum Outcome {
+            Parked(oneshot::Receiver<ResponseData>),
+            Landed(ResponseData),
+        }
+
+        let outcome = {
+            let mut entry = match self.0.get_mut(request_id) {
+                Some(e) => e,
+                None => return ParkResult::NotFound,
+            };
+            match &mut entry.state {
+                PendingState::Waiting { sinks } => {
+                    let (tx, rx) = oneshot::channel();
+                    sinks.push(tx);
+                    Outcome::Parked(rx)
+                }
+                PendingState::Landed { body, .. } => Outcome::Landed(body.clone()),
+            }
         };
 
-        match entry.state {
-            PendingState::Landed { body, .. } => ParkResult::AlreadyLanded(body),
-            PendingState::Waiting { mut sinks } => {
-                let (tx, rx) = oneshot::channel();
-                sinks.push(tx);
-                entry.state = PendingState::Waiting { sinks };
-                self.0.insert(request_id.to_owned(), entry);
-                ParkResult::Parked(rx)
+        match outcome {
+            Outcome::Parked(rx) => ParkResult::Parked(rx),
+            Outcome::Landed(body) => {
+                self.0.remove(request_id);
+                ParkResult::AlreadyLanded(body)
             }
         }
     }
@@ -217,23 +247,20 @@ impl Pending {
     /// transitions the entry to `Landed` with `LANDED_TTL_SECS` TTL so a
     /// late poller can still claim the body.
     pub fn deliver(&self, request_id: &str, body: ResponseData) {
-        let Some((_, mut entry)) = self.0.remove(request_id) else {
+        // `oneshot::Sender::send` is non-blocking, so fanning out under the
+        // shard lock is safe and closes the park/deliver TOCTOU window.
+        let Some(mut entry) = self.0.get_mut(request_id) else {
             return;
         };
-
-        if let PendingState::Waiting { sinks } = std::mem::replace(
-            &mut entry.state,
-            PendingState::Landed {
-                body: body.clone(),
-                until: Instant::now() + Duration::from_secs(LANDED_TTL_SECS),
-            },
-        ) {
+        let new_state = PendingState::Landed {
+            body: body.clone(),
+            until: Instant::now() + Duration::from_secs(LANDED_TTL_SECS),
+        };
+        if let PendingState::Waiting { sinks } = std::mem::replace(&mut entry.state, new_state) {
             for sink in sinks {
                 let _ = sink.send(body.clone());
             }
         }
-
-        self.0.insert(request_id.to_owned(), entry);
     }
 
     /// Evict expired entries.
@@ -287,7 +314,10 @@ mod tests {
     #[tokio::test]
     async fn park_returns_parked_on_waiting() {
         let p = Pending::new();
-        assert!(p.insert_waiting("r1".into(), "H".into(), PendingKind::Coold, 16));
+        assert_eq!(
+            p.insert_waiting("r1".into(), "H".into(), PendingKind::Coold, 16),
+            InsertOutcome::Inserted
+        );
 
         let rx = match p.park("r1") {
             ParkResult::Parked(rx) => rx,
@@ -309,7 +339,7 @@ mod tests {
     #[tokio::test]
     async fn park_returns_landed_when_response_arrived_first() {
         let p = Pending::new();
-        p.insert_waiting("r1".into(), "H".into(), PendingKind::Build, 16);
+        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Build, 16);
 
         p.deliver(
             "r1",
@@ -330,11 +360,64 @@ mod tests {
         assert!(matches!(p.park("r1"), ParkResult::NotFound));
     }
 
+    #[tokio::test]
+    async fn deliver_during_park_does_not_drop_response() {
+        use std::sync::Arc;
+        let p = Arc::new(Pending::new());
+        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Build, 16);
+
+        let body = ResponseData::Build(BuildResponseBody::Ok {
+            digest: "sha256:y".into(),
+            registry_ref: "ref".into(),
+            duration_ms: 1,
+        });
+
+        let p1 = p.clone();
+        let park_task = tokio::spawn(async move {
+            match p1.park("r1") {
+                ParkResult::Parked(rx) => rx.await.ok(),
+                ParkResult::AlreadyLanded(b) => Some(b),
+                ParkResult::NotFound => None,
+            }
+        });
+        tokio::task::yield_now().await;
+        p.deliver("r1", body);
+
+        let got = park_task.await.expect("task joined");
+        assert!(matches!(got, Some(ResponseData::Build(_))), "response dropped");
+    }
+
     #[test]
     fn insert_waiting_respects_cap() {
         let p = Pending::new();
-        assert!(p.insert_waiting("a".into(), "H".into(), PendingKind::Coold, 2));
-        assert!(p.insert_waiting("b".into(), "H".into(), PendingKind::Coold, 2));
-        assert!(!p.insert_waiting("c".into(), "H".into(), PendingKind::Coold, 2));
+        assert_eq!(
+            p.insert_waiting("a".into(), "H".into(), PendingKind::Coold, 2),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            p.insert_waiting("b".into(), "H".into(), PendingKind::Coold, 2),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            p.insert_waiting("c".into(), "H".into(), PendingKind::Coold, 2),
+            InsertOutcome::AtCapacity
+        );
+    }
+
+    #[test]
+    fn insert_waiting_rejects_duplicate() {
+        let p = Pending::new();
+        assert_eq!(
+            p.insert_waiting("a".into(), "H".into(), PendingKind::Coold, 16),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            p.insert_waiting("a".into(), "H2".into(), PendingKind::Build, 16),
+            InsertOutcome::Duplicate
+        );
+        // Original entry still intact — host_id/kind unchanged.
+        let snap = p.get("a").expect("entry present");
+        assert_eq!(snap.host_id, "H");
+        assert_eq!(snap.kind, PendingKind::Coold);
     }
 }

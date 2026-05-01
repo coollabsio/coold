@@ -24,19 +24,45 @@ pub async fn run(
         static_cfg.base_image.clone()
     };
 
+    // Containerfile is a templated shell-free format, but the strings still
+    // land in `FROM` and `COPY` lines. Newlines forge new directives; `..`
+    // in `output_dir` reads outside the work tree. Reject before any I/O.
+    if !is_safe_base_image(&base_image) {
+        return Err(err(400, "detect", "invalid base_image"));
+    }
+    if !is_safe_output_dir(&output_dir) {
+        return Err(err(400, "detect", "invalid output_dir"));
+    }
+
+    // git's `--<flag>` parser accepts options anywhere on the command line
+    // unless terminated with `--`. Without it a malicious `repo_url` like
+    // `--upload-pack=...` becomes a flag and runs arbitrary commands. Same
+    // story for `git_ref` on `checkout` / `fetch`.
     emit(sink, "git", format!("cloning {} @ {}", req.repo_url, req.git_ref), 0);
 
-    if !run_ok("git", &["clone", "--depth", "1", "--no-tags", &req.repo_url, "repo"], work_dir).await? {
+    if !run_ok(
+        "git",
+        &["clone", "--depth", "1", "--no-tags", "--", &req.repo_url, "repo"],
+        work_dir,
+    )
+    .await?
+    {
         return Err(err(500, "git", "git clone failed"));
     }
 
     let repo_dir = work_dir.join("repo");
-    let checkout_ok = run_ok("git", &["checkout", &req.git_ref], &repo_dir).await?;
+    let checkout_ok = run_ok("git", &["checkout", "--", &req.git_ref], &repo_dir).await?;
     if !checkout_ok {
-        if !run_ok("git", &["fetch", "--depth", "1", "origin", &req.git_ref], &repo_dir).await? {
+        if !run_ok(
+            "git",
+            &["fetch", "--depth", "1", "origin", "--", &req.git_ref],
+            &repo_dir,
+        )
+        .await?
+        {
             return Err(err(500, "git", format!("git fetch ref {} failed", req.git_ref)));
         }
-        run_ok("git", &["checkout", "FETCH_HEAD"], &repo_dir).await?;
+        run_ok("git", &["checkout", "--", "FETCH_HEAD"], &repo_dir).await?;
     }
 
     emit(sink, "git", "clone complete", 10);
@@ -123,11 +149,15 @@ async fn run_ok(bin: &str, args: &[&str], cwd: &Path) -> Result<bool, BuildError
     use std::process::Stdio;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
+    // kill_on_drop ensures cancellation (e.g. SIGTERM to the builder, or the
+    // surrounding future being dropped) terminates git/buildah instead of
+    // leaving them running detached.
     let mut child = Command::new(bin)
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| err(500, "spawn", format!("{bin} spawn: {e}")))?;
 
@@ -163,5 +193,66 @@ fn err(code: u32, stage: &str, message: impl Into<String>) -> BuildError {
         code,
         message: message.into(),
         stage: stage.into(),
+    }
+}
+
+/// Conservative allowlist for OCI image references. Excludes whitespace and
+/// control characters that would corrupt the templated `FROM` line.
+fn is_safe_base_image(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 256
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '/' | '_' | '-' | '@' | '+')
+        })
+}
+
+/// `output_dir` is interpolated into a `COPY ./<dir>` line and used as a
+/// path join inside the cloned repo. Reject newlines, absolute paths, and
+/// any `..` segment to keep the build inside its work tree.
+fn is_safe_output_dir(s: &str) -> bool {
+    if s.is_empty() || s.len() > 256 {
+        return false;
+    }
+    if s.contains('\n') || s.contains('\r') || s.contains('\0') {
+        return false;
+    }
+    let p = std::path::Path::new(s);
+    if p.is_absolute() {
+        return false;
+    }
+    p.components()
+        .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
+#[cfg(test)]
+mod static_build_validation_tests {
+    use super::{is_safe_base_image, is_safe_output_dir};
+
+    #[test]
+    fn base_image_accepts_typical_refs() {
+        assert!(is_safe_base_image("docker.io/library/nginx:alpine"));
+        assert!(is_safe_base_image("ghcr.io/org/img@sha256:abc"));
+    }
+
+    #[test]
+    fn base_image_rejects_injection() {
+        assert!(!is_safe_base_image("alpine\nRUN curl evil"));
+        assert!(!is_safe_base_image("alpine RUN x"));
+        assert!(!is_safe_base_image(""));
+    }
+
+    #[test]
+    fn output_dir_accepts_typical_dirs() {
+        assert!(is_safe_output_dir("dist"));
+        assert!(is_safe_output_dir("build/static"));
+    }
+
+    #[test]
+    fn output_dir_rejects_traversal_and_newline() {
+        assert!(!is_safe_output_dir(".."));
+        assert!(!is_safe_output_dir("../etc"));
+        assert!(!is_safe_output_dir("/etc"));
+        assert!(!is_safe_output_dir("dist\nRUN x"));
+        assert!(!is_safe_output_dir(""));
     }
 }

@@ -23,6 +23,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tracing::warn;
 
 use super::{
@@ -194,22 +195,13 @@ fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
         .strip_prefix("Bearer ")
         .ok_or_else(|| ApiError::unauthorized("Authorization must use Bearer scheme"))?;
 
-    if !constant_time_eq(token.as_bytes(), expected.as_bytes()) {
+    // `subtle::ConstantTimeEq` short-circuits on mismatched lengths but keeps
+    // the equal-length comparison constant-time. Cheaper and safer than a
+    // hand-rolled loop the optimiser may reshape.
+    if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
         return Err(ApiError::unauthorized("invalid token"));
     }
     Ok(())
-}
-
-/// Constant-time byte compare. Avoids timing oracles on the bearer token.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
 }
 
 // ---------- error envelope ----------
@@ -222,10 +214,13 @@ pub struct ApiError {
 
 impl ApiError {
     fn internal(e: anyhow::Error) -> Self {
+        // Server-side log keeps the full anyhow chain for ops; the response
+        // body is intentionally generic so we don't leak paths, internal
+        // identifiers, or shell args to API consumers.
         warn!(error = format!("{e:#}"), "firewall api: internal error");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: format!("{e:#}"),
+            message: "internal error".into(),
         }
     }
     fn bad_request(e: anyhow::Error) -> Self {
@@ -268,13 +263,6 @@ impl IntoResponse for ApiError {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-
-    #[test]
-    fn constant_time_eq_matches() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"abcd"));
-    }
 
     #[test]
     fn authorize_accepts_valid_bearer() {

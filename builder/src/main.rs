@@ -32,6 +32,7 @@ use std::process::ExitCode;
 
 use serde::Serialize;
 use tokio::signal::unix::{signal, SignalKind};
+use tracing::warn;
 use tracing_subscriber::EnvFilter;
 
 use builder_core::{BuildError, BuildRequest, BuildResult, ProgressEvent, ProgressSink};
@@ -46,13 +47,29 @@ enum Frame<'a> {
 
 /// Emit a frame to both stdout (live) and the durable events file.
 fn emit_frame(frame: Frame<'_>, events: &mut File) {
-    let Ok(line) = serde_json::to_string(&frame) else { return };
-    // Best-effort stdout. coold may be dead; we don't care.
-    let _ = writeln!(std::io::stdout().lock(), "{line}");
+    let line = match serde_json::to_string(&frame) {
+        Ok(l) => l,
+        Err(e) => {
+            warn!(error = %e, "serialize event frame failed");
+            return;
+        }
+    };
+    // Stdout is best-effort: coold may be dead and the pipe closed. Only
+    // BrokenPipe is silently expected; anything else is worth logging.
+    if let Err(e) = writeln!(std::io::stdout().lock(), "{line}") {
+        if e.kind() != std::io::ErrorKind::BrokenPipe {
+            warn!(error = %e, "stdout write failed");
+        }
+    }
     let _ = std::io::stdout().flush();
-    // Durable file. Best-effort too but much less likely to fail.
-    let _ = writeln!(events, "{line}");
-    let _ = events.flush();
+    // Durable events file. Failures here mean coold cannot replay on
+    // restart, so they must surface in tracing.
+    if let Err(e) = writeln!(events, "{line}") {
+        warn!(error = %e, "events file write failed");
+    }
+    if let Err(e) = events.flush() {
+        warn!(error = %e, "events file flush failed");
+    }
 }
 
 struct DualSink<'a> {
@@ -67,15 +84,27 @@ impl<'a> ProgressSink for DualSink<'a> {
 
 fn write_json_atomic(path: &Path, bytes: &[u8]) {
     let tmp = path.with_extension("json.tmp");
-    let ok = OpenOptions::new()
+    if let Err(e) = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
         .mode(0o600)
         .open(&tmp)
-        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()));
-    if ok.is_ok() {
-        let _ = std::fs::rename(tmp, path);
+        .and_then(|mut f| f.write_all(bytes).and_then(|_| f.sync_all()))
+    {
+        warn!(path = %tmp.display(), error = %e, "atomic write: tmp file failed");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // Rename failure leaves a `.json.tmp` next to the target — coold's
+        // resume path only reads the canonical name, so this build's outcome
+        // will be lost without operator intervention.
+        warn!(
+            tmp = %tmp.display(),
+            target = %path.display(),
+            error = %e,
+            "atomic write: rename failed"
+        );
     }
 }
 

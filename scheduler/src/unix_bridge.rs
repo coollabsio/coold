@@ -34,7 +34,9 @@ use crate::envelope::{
     DispatchEnvelope, ResponseBody, ResponseEnvelope,
 };
 use crate::routing::{route_build, route_coold, RouteOutcome};
-use crate::state::{ParkResult, Pending, PendingKind, ResponseData, Streams, DISPATCH_TIMEOUT_SECS};
+use crate::state::{
+    InsertOutcome, ParkResult, Pending, PendingKind, ResponseData, Streams, DISPATCH_TIMEOUT_SECS,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -148,13 +150,19 @@ async fn coold_dispatch(
 
     match route_coold(&st.streams, env) {
         RouteOutcome::SendCoold { host_id: target, msg } => {
-            if !st.pending.insert_waiting(
+            match st.pending.insert_waiting(
                 request_id.clone(),
                 target.clone(),
                 PendingKind::Coold,
                 st.pending_max,
             ) {
-                return coold_err(&request_id, 503, "scheduler at pending-dispatch capacity");
+                InsertOutcome::Inserted => {}
+                InsertOutcome::Duplicate => {
+                    return coold_err(&request_id, 409, "request_id already in flight");
+                }
+                InsertOutcome::AtCapacity => {
+                    return coold_err(&request_id, 503, "scheduler at pending-dispatch capacity");
+                }
             }
 
             let rx = match st.pending.park(&request_id) {
@@ -265,7 +273,11 @@ async fn build_result(
         }
         ParkResult::NotFound => build_err(&request_id, 404, "unknown request_id", "result"),
         ParkResult::Parked(rx) => {
-            let timeout = Duration::from_millis(q.timeout_ms.unwrap_or(30_000));
+            // Cap caller-supplied poll waits so a malicious or buggy client
+            // can't pin a UDS connection forever by passing `u64::MAX`.
+            const MAX_POLL_MS: u64 = 300_000;
+            let raw_ms = q.timeout_ms.unwrap_or(30_000).min(MAX_POLL_MS);
+            let timeout = Duration::from_millis(raw_ms);
             match tokio::time::timeout(timeout, rx).await {
                 Ok(Ok(ResponseData::Build(body))) => {
                     Json(BuildResponseEnvelope { request_id, body }).into_response()

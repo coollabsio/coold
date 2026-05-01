@@ -14,16 +14,22 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use tokio::{
     fs,
     io::AsyncWriteExt,
     process::Command,
     sync::Mutex,
+    time,
 };
 use tracing::{debug, info, warn};
+
+/// Cap blocking iptables-restore / nft -f - invocations so a hung child can
+/// never park `Inner::lock` forever and freeze every other firewall mutation.
+const FIREWALL_PIPE_TIMEOUT: Duration = Duration::from_secs(30);
 
 use super::rule::{parse_chain_line, render_bridge_line, AllowRule};
 
@@ -349,7 +355,10 @@ impl FirewallStore {
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // kill_on_drop pairs with the timeout below: dropping the future
+            // sends SIGKILL so a hung nft never holds the firewall mutex.
+            .kill_on_drop(true);
         let mut child = cmd.spawn().context("spawn nft -f -")?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
@@ -358,7 +367,15 @@ impl FirewallStore {
                 .context("write nft stdin")?;
             stdin.flush().await.ok();
         }
-        let out = child.wait_with_output().await.context("wait nft -f -")?;
+        let out = match time::timeout(FIREWALL_PIPE_TIMEOUT, child.wait_with_output()).await {
+            Ok(res) => res.context("wait nft -f -")?,
+            Err(_) => {
+                return Err(anyhow!(
+                    "nft -f - timed out after {:?}",
+                    FIREWALL_PIPE_TIMEOUT
+                ));
+            }
+        };
 
         if out.status.success() {
             // nft applied cleanly — clear warned flag and persist to disk.
@@ -495,7 +512,10 @@ async fn iptables_restore(bytes: &[u8], noflush: bool) -> Result<()> {
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // kill_on_drop pairs with the timeout below so a hung child never
+        // pins the firewall mutex held by the caller.
+        .kill_on_drop(true);
     let mut child = cmd.spawn().context("spawn iptables-restore")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
@@ -504,7 +524,15 @@ async fn iptables_restore(bytes: &[u8], noflush: bool) -> Result<()> {
             .context("write iptables-restore stdin")?;
         stdin.flush().await.ok();
     }
-    let out = child.wait_with_output().await.context("wait iptables-restore")?;
+    let out = match time::timeout(FIREWALL_PIPE_TIMEOUT, child.wait_with_output()).await {
+        Ok(res) => res.context("wait iptables-restore")?,
+        Err(_) => {
+            return Err(anyhow!(
+                "iptables-restore timed out after {:?}",
+                FIREWALL_PIPE_TIMEOUT
+            ));
+        }
+    };
     if !out.status.success() {
         bail!(
             "iptables-restore failed: {}",

@@ -62,8 +62,17 @@ pub struct BuilderSettings {
 
 impl BuilderCtx {
     pub fn new(settings: BuilderSettings) -> Self {
+        // Capacity 0 silently deadlocks every dispatch on `acquire_owned`.
+        // Coerce to 1 and warn so a misconfigured deploy still functions
+        // (serialised) rather than parking forever.
+        let capacity = if settings.capacity == 0 {
+            warn!("builder capacity is 0; defaulting to 1 to avoid deadlock");
+            1
+        } else {
+            settings.capacity as usize
+        };
         Self {
-            sem: Arc::new(Semaphore::new(settings.capacity as usize)),
+            sem: Arc::new(Semaphore::new(capacity)),
             work_root: settings.work_root,
             builder_bin: settings.builder_bin,
             timeout_secs: settings.timeout_secs,
@@ -188,6 +197,13 @@ impl BuilderCtx {
     pub fn dispatch(self: Arc<Self>, request_id: String, req: BuildRequest, tx: mpsc::Sender<ClientMsg>) {
         let ctx = self;
         tokio::spawn(async move {
+            // request_id is interpolated into a filesystem path (`work_root`
+            // join) and a systemd unit name. Reject anything outside a strict
+            // allowlist before either touches disk.
+            if !is_valid_request_id(&request_id) {
+                send_err(&tx, &request_id, 400, "invalid request_id", "dispatch").await;
+                return;
+            }
             let Ok(permit) = ctx.sem.clone().acquire_owned().await else {
                 send_err(&tx, &request_id, 500, "build semaphore closed", "dispatch").await;
                 return;
@@ -613,6 +629,51 @@ fn parse_request_id(unit_name: &str) -> Option<String> {
         .strip_prefix("coolify-build-")
         .and_then(|rest| rest.strip_suffix(".service"))
         .map(str::to_owned)
+}
+
+/// Strict allowlist for inbound request_ids. The value flows into a path
+/// join (`work_root.join(...)`) and a systemd unit name, both of which are
+/// trivially exploitable with `..`, `/`, NUL, or shell metacharacters.
+fn is_valid_request_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+#[cfg(test)]
+mod request_id_tests {
+    use super::is_valid_request_id;
+
+    #[test]
+    fn accepts_alphanumeric_and_dash_underscore() {
+        assert!(is_valid_request_id("abc123"));
+        assert!(is_valid_request_id("a-b_c-1"));
+        assert!(is_valid_request_id(&"x".repeat(64)));
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_separators() {
+        assert!(!is_valid_request_id(".."));
+        assert!(!is_valid_request_id("../etc"));
+        assert!(!is_valid_request_id("a/b"));
+        assert!(!is_valid_request_id("a\\b"));
+    }
+
+    #[test]
+    fn rejects_shell_and_control_chars() {
+        assert!(!is_valid_request_id("a;b"));
+        assert!(!is_valid_request_id("a b"));
+        assert!(!is_valid_request_id("a\nb"));
+        assert!(!is_valid_request_id("a\0b"));
+        assert!(!is_valid_request_id("$(id)"));
+    }
+
+    #[test]
+    fn rejects_empty_and_oversize() {
+        assert!(!is_valid_request_id(""));
+        assert!(!is_valid_request_id(&"x".repeat(65)));
+    }
 }
 
 /// Shape of `result.json` the builder persists on success. Mirrors

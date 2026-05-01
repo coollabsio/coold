@@ -5,7 +5,7 @@
 use coolify_proto::agent::v1::{server_msg, BuildRequest, CancelBuild, ListContainersReq, ServerMsg, StaticConfig};
 
 use crate::envelope::{BuildCommandPayload, BuildDispatchEnvelope, CommandPayload, DispatchEnvelope};
-use crate::state::{Pending, PendingKind, Streams};
+use crate::state::{InsertOutcome, Pending, PendingKind, Streams};
 
 /// What the caller should do next. `SendCoold` / `SendBuild` / `SendCancel`
 /// all carry a fully-formed `ServerMsg` ready to push down the host's
@@ -85,16 +85,25 @@ pub fn route_build(
                 },
             };
 
-            if !pending.insert_waiting(
+            match pending.insert_waiting(
                 env.request_id.clone(),
                 target_host.clone(),
                 PendingKind::Build,
                 pending_max,
             ) {
-                return RouteOutcome::PushError {
-                    code: 503,
-                    message: "scheduler at pending-dispatch capacity",
-                };
+                InsertOutcome::Inserted => {}
+                InsertOutcome::Duplicate => {
+                    return RouteOutcome::PushError {
+                        code: 409,
+                        message: "request_id already in flight",
+                    };
+                }
+                InsertOutcome::AtCapacity => {
+                    return RouteOutcome::PushError {
+                        code: 503,
+                        message: "scheduler at pending-dispatch capacity",
+                    };
+                }
             }
 
             let build_req = BuildRequest {
@@ -265,7 +274,7 @@ mod tests {
         let pending = Pending::new();
         insert_host(&streams, "A", &["coold", "builder"]);
         insert_host(&streams, "B", &["coold", "builder"]);
-        pending.insert_waiting("r1".into(), "B".into(), PendingKind::Build, CAP);
+        let _ = pending.insert_waiting("r1".into(), "B".into(), PendingKind::Build, CAP);
 
         let out = route_build(&streams, &pending, CAP, cancel_env("r1"));
         match out {
@@ -302,7 +311,7 @@ mod tests {
         // Host reconnected with fewer caps between build start and cancel.
         let streams = Streams::new();
         let pending = Pending::new();
-        pending.insert_waiting("r1".into(), "A".into(), PendingKind::Build, CAP);
+        let _ = pending.insert_waiting("r1".into(), "A".into(), PendingKind::Build, CAP);
         insert_host(&streams, "A", &["coold"]);
 
         let out = route_build(&streams, &pending, CAP, cancel_env("r1"));
