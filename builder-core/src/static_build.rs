@@ -221,7 +221,7 @@ fn is_safe_output_dir(s: &str) -> bool {
         return false;
     }
     p.components()
-        .all(|c| matches!(c, std::path::Component::Normal(_)))
+        .all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
 }
 
 #[cfg(test)]
@@ -245,6 +245,8 @@ mod static_build_validation_tests {
     fn output_dir_accepts_typical_dirs() {
         assert!(is_safe_output_dir("dist"));
         assert!(is_safe_output_dir("build/static"));
+        assert!(is_safe_output_dir("."));
+        assert!(is_safe_output_dir("./dist"));
     }
 
     #[test]
