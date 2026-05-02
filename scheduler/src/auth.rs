@@ -59,6 +59,11 @@ pub fn verify_jwt(token: &str, public_key_pem: &str) -> Result<VerifiedJwt> {
 
     let mut validation = Validation::new(alg);
     validation.set_audience(&["coold"]);
+    // jsonwebtoken 9.x defaults `leeway` to 60s — enough slack for normal NTP
+    // drift between Laravel and the scheduler. Reassert explicitly so a future
+    // major-version bump that changes the default surfaces here, not at the
+    // expiry boundary.
+    validation.leeway = 60;
 
     let data =
         decode::<Claims>(token, &key, &validation).map_err(|e| anyhow!("JWT verification failed: {e}"))?;

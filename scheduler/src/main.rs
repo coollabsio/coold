@@ -128,15 +128,24 @@ mod grpc_server {
             &self,
             request: Request<Streaming<ClientMsg>>,
         ) -> Result<Response<Self::StreamStream>, Status> {
+            // Generic message to client; full reason logged server-side.
+            // Distinct strings per failure mode (expired vs bad-sig vs wrong-aud)
+            // would give a credential-stuffing oracle.
             let jwt = request
                 .metadata()
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "))
-                .ok_or_else(|| Status::unauthenticated("missing Bearer token"))?;
+                .ok_or_else(|| {
+                    warn!("gRPC stream rejected: missing or malformed Authorization");
+                    Status::unauthenticated("invalid credentials")
+                })?;
 
             let verified = auth::verify_jwt(jwt, &self.config.jwt_public_key)
-                .map_err(|e| Status::unauthenticated(format!("invalid JWT: {e}")))?;
+                .map_err(|e| {
+                    warn!(error = format!("{e:#}"), "gRPC stream rejected: JWT verification failed");
+                    Status::unauthenticated("invalid credentials")
+                })?;
 
             let host_id = verified.host_id.clone();
             let jwt_caps = verified.caps;

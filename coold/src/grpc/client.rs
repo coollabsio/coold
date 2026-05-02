@@ -1,3 +1,5 @@
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,6 +19,33 @@ use crate::grpc::proto::{
 };
 use crate::podman::PodmanClient;
 
+/// Read and validate the host JWT from disk. Refuses any file with
+/// group/other permission bits set — the bearer must be 0600 or stricter.
+/// Re-invoked on every reconnect attempt so an external rotator can swap
+/// the file without restarting coold.
+async fn load_host_jwt(path: &Path) -> Result<String> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("stat host JWT {}", path.display()))?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(anyhow!(
+            "host JWT {} has insecure perms {:#o}; want 0600 (no group/other access)",
+            path.display(),
+            mode
+        ));
+    }
+
+    let raw = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("read host JWT from {}", path.display()))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow!("host JWT file {} is empty", path.display()));
+    }
+    Ok(trimmed.to_string())
+}
+
 pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
     if config.grpc_disabled || config.scheduler_url.is_none() {
         info!("grpc transport disabled; skipping");
@@ -26,16 +55,12 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
 
     let url = config.scheduler_url.clone().unwrap();
 
-    let jwt = tokio::fs::read_to_string(&config.host_jwt_path)
+    // Verify the JWT file exists and has correct perms before we set up the
+    // builder context — fail-fast on misconfig rather than discovering it
+    // halfway through reconnect backoff.
+    load_host_jwt(&config.host_jwt_path)
         .await
-        .with_context(|| format!("read host JWT from {}", config.host_jwt_path.display()))?;
-    let jwt = jwt.trim().to_string();
-    if jwt.is_empty() {
-        return Err(anyhow!(
-            "host JWT file {} is empty",
-            config.host_jwt_path.display()
-        ));
-    }
+        .context("initial host JWT load")?;
 
     let builder_ctx = if config.builder_enabled {
         let ctx = Arc::new(BuilderCtx::new(BuilderSettings {
@@ -62,6 +87,22 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
 
     let mut backoff = Duration::from_secs(1);
     loop {
+        // Re-read the JWT file each reconnect so an external rotator can swap
+        // it (e.g. before exp) without coold needing a restart.
+        let jwt = match load_host_jwt(&config.host_jwt_path).await {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(
+                    error = format!("{e:#}"),
+                    backoff_ms = backoff.as_millis(),
+                    "load host JWT failed"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            }
+        };
+
         match connect_and_serve(&url, &jwt, &config, &podman, builder_ctx.clone()).await {
             Ok(()) => {
                 warn!("grpc stream closed cleanly; reconnecting");
@@ -158,4 +199,61 @@ async fn connect_and_serve(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::load_host_jwt;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_jwt(dir: &std::path::Path, name: &str, contents: &str, mode: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn rejects_world_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_jwt(dir.path(), "host-jwt", "abc.def.ghi", 0o644);
+        let err = load_host_jwt(&p).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("insecure perms"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn rejects_group_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_jwt(dir.path(), "host-jwt", "abc.def.ghi", 0o640);
+        let err = load_host_jwt(&p).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("insecure perms"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn accepts_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_jwt(dir.path(), "host-jwt", "  abc.def.ghi\n", 0o600);
+        let jwt = load_host_jwt(&p).await.unwrap();
+        assert_eq!(jwt, "abc.def.ghi");
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_jwt(dir.path(), "host-jwt", "   \n", 0o600);
+        let err = load_host_jwt(&p).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nope");
+        let err = load_host_jwt(&p).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("stat host JWT"), "got: {msg}");
+    }
 }

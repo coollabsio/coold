@@ -6,6 +6,7 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
+use secrecy::SecretString;
 use tokio::{fs, time::sleep};
 use tracing::{info, warn};
 
@@ -57,7 +58,7 @@ pub async fn run(config: Config) -> Result<()> {
 
     let state = ApiState {
         store,
-        token: Arc::new(token),
+        token: Arc::new(SecretString::from(token)),
     };
     let app = router(state);
 

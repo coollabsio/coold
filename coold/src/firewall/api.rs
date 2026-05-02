@@ -22,6 +22,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::warn;
@@ -32,10 +33,16 @@ use super::{
 };
 
 /// Shared state handed to every handler.
+///
+/// `token` is wrapped in `Arc<SecretString>` rather than `Arc<String>` so the
+/// underlying buffer is zeroized on drop (defends post-shutdown core-dump /
+/// swap scrapes). The `Arc` keeps a single allocation across handler clones —
+/// using `SecretString` directly would clone the secret per request and
+/// defeat the zeroize guarantee.
 #[derive(Clone)]
 pub struct ApiState {
     pub store: FirewallStore,
-    pub token: Arc<String>,
+    pub token: Arc<SecretString>,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -185,7 +192,7 @@ async fn reconcile(
 
 // ---------- auth ----------
 
-fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
+fn authorize(headers: &HeaderMap, expected: &SecretString) -> Result<(), ApiError> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -198,7 +205,8 @@ fn authorize(headers: &HeaderMap, expected: &str) -> Result<(), ApiError> {
     // `subtle::ConstantTimeEq` short-circuits on mismatched lengths but keeps
     // the equal-length comparison constant-time. Cheaper and safer than a
     // hand-rolled loop the optimiser may reshape.
-    if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
+    let want = expected.expose_secret();
+    if !bool::from(token.as_bytes().ct_eq(want.as_bytes())) {
         return Err(ApiError::unauthorized("invalid token"));
     }
     Ok(())
@@ -264,6 +272,10 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    fn secret(s: &str) -> SecretString {
+        SecretString::from(s.to_string())
+    }
+
     #[test]
     fn authorize_accepts_valid_bearer() {
         let mut h = HeaderMap::new();
@@ -271,7 +283,7 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer secret"),
         );
-        assert!(authorize(&h, "secret").is_ok());
+        assert!(authorize(&h, &secret("secret")).is_ok());
     }
 
     #[test]
@@ -281,7 +293,7 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Basic xyz"),
         );
-        assert!(authorize(&h, "secret").is_err());
+        assert!(authorize(&h, &secret("secret")).is_err());
     }
 
     #[test]
@@ -291,12 +303,12 @@ mod tests {
             axum::http::header::AUTHORIZATION,
             HeaderValue::from_static("Bearer nope"),
         );
-        assert!(authorize(&h, "secret").is_err());
+        assert!(authorize(&h, &secret("secret")).is_err());
     }
 
     #[test]
     fn authorize_rejects_missing_header() {
         let h = HeaderMap::new();
-        assert!(authorize(&h, "secret").is_err());
+        assert!(authorize(&h, &secret("secret")).is_err());
     }
 }
