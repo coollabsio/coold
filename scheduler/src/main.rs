@@ -44,9 +44,10 @@ fn init_tracing(level: &str) {
 }
 
 mod grpc_server {
+    use std::net::SocketAddr;
     use std::pin::Pin;
 
-    use anyhow::Result;
+    use anyhow::{Context, Result};
     use tokio::sync::mpsc;
     use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
     use tonic::{transport::Server, Request, Response, Status, Streaming};
@@ -64,8 +65,43 @@ mod grpc_server {
         state::{Pending, PendingKind, ResponseData, StreamHandle, Streams},
     };
 
+    /// Reject `0.0.0.0` / `::` binds unless explicitly opted in. The gRPC
+    /// stream carries a JWT bearer in cleartext (no TLS layer here yet), so
+    /// listening on every interface lets anyone on path capture and replay
+    /// the token until `exp`. Production must bind a specific interface IP
+    /// (typically the WireGuard mgmt IP — `host_id` already equals it).
+    pub(super) fn validate_bind(addr: SocketAddr, allow_public: bool) -> Result<()> {
+        if addr.ip().is_unspecified() && !allow_public {
+            anyhow::bail!(
+                "refusing to bind {addr}: SCHEDULER_GRPC_BIND must be a specific \
+                 interface IP (typically the WireGuard mgmt IP). Set \
+                 SCHEDULER_ALLOW_PUBLIC_BIND=1 to override (dev only — JWTs \
+                 cross the wire in cleartext)."
+            );
+        }
+        Ok(())
+    }
+
+    fn allow_public_bind() -> bool {
+        std::env::var("SCHEDULER_ALLOW_PUBLIC_BIND").ok().as_deref() == Some("1")
+    }
+
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
-        let addr = config.grpc_bind.parse()?;
+        let addr: SocketAddr = config
+            .grpc_bind
+            .parse()
+            .with_context(|| format!("parse SCHEDULER_GRPC_BIND={}", config.grpc_bind))?;
+
+        let allow_public = allow_public_bind();
+        validate_bind(addr, allow_public)?;
+        if addr.ip().is_unspecified() {
+            warn!(
+                %addr,
+                "SCHEDULER_ALLOW_PUBLIC_BIND=1 — binding on every interface; \
+                 JWTs cross the wire unencrypted",
+            );
+        }
+
         let svc = SchedulerAgent { config, streams, pending };
 
         info!(%addr, "gRPC server listening");
@@ -221,6 +257,48 @@ mod grpc_server {
         };
 
         pending.deliver(&request_id, data);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::validate_bind;
+        use std::net::SocketAddr;
+
+        fn parse(s: &str) -> SocketAddr {
+            s.parse().unwrap()
+        }
+
+        #[test]
+        fn rejects_ipv4_unspecified_without_override() {
+            let err = validate_bind(parse("0.0.0.0:6443"), false).unwrap_err();
+            assert!(err.to_string().contains("refusing to bind"), "got: {err}");
+        }
+
+        #[test]
+        fn rejects_ipv6_unspecified_without_override() {
+            let err = validate_bind(parse("[::]:6443"), false).unwrap_err();
+            assert!(err.to_string().contains("refusing to bind"), "got: {err}");
+        }
+
+        #[test]
+        fn accepts_ipv4_unspecified_with_override() {
+            validate_bind(parse("0.0.0.0:6443"), true).unwrap();
+        }
+
+        #[test]
+        fn accepts_ipv6_unspecified_with_override() {
+            validate_bind(parse("[::]:6443"), true).unwrap();
+        }
+
+        #[test]
+        fn accepts_specific_ipv4_without_override() {
+            validate_bind(parse("10.42.0.1:6443"), false).unwrap();
+        }
+
+        #[test]
+        fn accepts_loopback_without_override() {
+            validate_bind(parse("127.0.0.1:6443"), false).unwrap();
+        }
     }
 }
 

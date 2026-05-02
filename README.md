@@ -325,7 +325,8 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 
 | Var | Default | Role |
 | --- | --- | --- |
-| `SCHEDULER_GRPC_BIND` | `0.0.0.0:6443` | coold dials this |
+| `SCHEDULER_GRPC_BIND` | _required_ | coold dials this. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `SCHEDULER_ALLOW_PUBLIC_BIND=1` (dev only — JWTs cross the wire in cleartext). |
+| `SCHEDULER_ALLOW_PUBLIC_BIND` | unset | Override to allow `0.0.0.0` / `::` bind. Dev/test only. |
 | `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS |
 | `SCHEDULER_UNIX_SOCKET_GROUP` | unset | PHP-FPM group grants `0660` |
 | `SCHEDULER_PENDING_MAX` | `10000` | In-flight + landed cap |

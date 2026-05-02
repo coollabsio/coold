@@ -439,8 +439,11 @@ treats it as a local HTTP backend.
 
 Single central VM. No load balancer required.
 
-- `scheduler` binds `0.0.0.0:6443` for coold gRPC (systemd unit, starts
-  before Laravel).
+- `scheduler` binds the WireGuard mgmt interface IP on port `6443` for coold
+  gRPC (systemd unit, starts before Laravel). `SCHEDULER_GRPC_BIND` is
+  required and must be a specific interface IP — `0.0.0.0` / `::` are
+  refused at startup unless `SCHEDULER_ALLOW_PUBLIC_BIND=1` is set
+  (dev/test only; JWTs cross the wire in cleartext).
 - `scheduler` also binds the UDS at `/run/coolify/scheduler.sock`. Mode `0660`
   when `SCHEDULER_UNIX_SOCKET_GROUP` is set, else `0600`. The PHP-FPM group
   goes in `SCHEDULER_UNIX_SOCKET_GROUP` so Laravel workers can dial it
@@ -571,7 +574,8 @@ All sourced from `scheduler/src/config.rs`:
 
 | var | default | role |
 |---|---|---|
-| `SCHEDULER_GRPC_BIND` | `0.0.0.0:6443` | coold dials this. Build traffic shares this port — no separate builder listener. |
+| `SCHEDULER_GRPC_BIND` | _required_ | coold dials this. Build traffic shares this port — no separate builder listener. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `SCHEDULER_ALLOW_PUBLIC_BIND=1`. |
+| `SCHEDULER_ALLOW_PUBLIC_BIND` | unset | Set to `1` to allow binding `0.0.0.0` / `::`. Dev/test only — JWTs cross the wire unencrypted. |
 | `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS. |
 | `SCHEDULER_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
 | `SCHEDULER_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |

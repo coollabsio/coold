@@ -13,7 +13,12 @@ pub struct Config {
     /// Address the gRPC server binds on (coold dials this). Build traffic
     /// rides on the same stream; there is no longer a separate builder
     /// listener.
-    #[arg(long, env = "SCHEDULER_GRPC_BIND", default_value = "0.0.0.0:6443")]
+    ///
+    /// Required — must be a specific interface IP, typically the WireGuard
+    /// mgmt IP (e.g. `10.42.0.1:6443`). Refuses to start on `0.0.0.0` / `::`
+    /// unless `SCHEDULER_ALLOW_PUBLIC_BIND=1` is set (dev/test only — JWTs
+    /// cross the wire in cleartext).
+    #[arg(long, env = "SCHEDULER_GRPC_BIND")]
     pub grpc_bind: String,
 
     /// Path to the Unix domain socket the central-plane caller (Laravel)
