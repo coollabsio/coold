@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS firewall_rules;
+DROP TABLE IF EXISTS deployments;
+DROP TABLE IF EXISTS builds;
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS cluster_hosts;
+DROP TABLE IF EXISTS clusters;
+DROP TABLE IF EXISTS servers;

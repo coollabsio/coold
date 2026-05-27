@@ -4,3 +4,8 @@ Cargo.lock.bak
 # e2e-tests may keep a local .env with Hetzner tokens etc.
 .env
 !.env.example
+
+# Coolify v5 web app local state
+coolify-web.db*
+frontend/node_modules/
+frontend/src/routeTree.gen.ts

@@ -1,8 +1,8 @@
 # coold architecture
 
-> CLI-side counterpart: `coolify-cli/CONTROL_PLANE.md`. Both docs describe the
-> same split from different vantage points; keep them in sync when the wire
-> surface changes.
+> CLI-side counterpart: `cooldctl` in this workspace. Historical v5 notes lived
+> in `coolify-cli/CONTROL_PLANE.md`; new v5 cluster CLI changes belong here and
+> in `cooldctl/`, not in the v4 Coolify CLI.
 
 ## 1. Role of coold
 
@@ -99,8 +99,8 @@ GET    /api/v1/host/stats            (podman stats snapshot)
 ```
 
 This list must stay byte-identical to the wire-surface block in
-`coolify-cli/CONTROL_PLANE.md §2`. If you add or change a verb here, update
-there too.
+`cooldctl` docs and command handlers. If you add or change a verb here, update
+the v5 CLI code in `cooldctl/` too.
 
 ## 4. Transports
 
@@ -113,7 +113,7 @@ coold speaks two transports, **same endpoint set on both**:
   logs/exec. WSS over :443 remains the documented fallback if gRPC-through-
   proxy issues surface. Same code path for self-hosted and cloud SaaS.
 - **Local REST on wg0 mgmt IP (`100.64.0.X:8443`)**: intra-mesh callers only
-  (the `coolify firewall` CLI via SSH-bounce, peer coolds, optional
+  (`cooldctl firewall` via SSH-bounce, peer coolds, optional
   per-customer gateway). Bearer-token authn on every request.
 - **No inbound from central**: central never dials coold. All mutations from
   central arrive over the coold-initiated stream; no `COOLIFY-ALLOW` rule for
@@ -182,7 +182,7 @@ For completeness on the other side of the split:
 ## 8. Deploy flow (T0–T10)
 
 Walkthrough of a single deploy, showing every primitive op. Mirrors
-`coolify-cli/CONTROL_PLANE.md §7`.
+`cooldctl` init/apply docs.
 
 ```
 T0  Central builder clones source, invokes BuildKit / buildpack / nixpacks.
@@ -719,7 +719,34 @@ exit or by coold's `resume_or_reap` on next start).
 
 ## 18. Cross-references
 
-- Bootstrap + CLI: `coolify-cli/CLAUDE.md`, `coolify-cli/CONTROL_PLANE.md`.
-- `coolify firewall` CLI (alpha, SSH-bounced REST client of local coold):
-  `coolify-cli/CLAUDE.md` § "`coolify firewall`".
-- Wire surface + transport: mirror of §3, §4 here ↔ `CONTROL_PLANE.md §2`.
+- Bootstrap + CLI: `cooldctl/` in this workspace.
+- `cooldctl firewall`: SSH-bounced REST client of local coold.
+- Wire surface + transport: §3 and §4 here are the source of truth for `cooldctl` command behavior.
+
+
+## Coolify v5 Rust API + React UI
+
+The central Coolify v5 application lives in `coolify-web`, not in `coold`.
+`coolify-web` is an Axum binary with an embedded React/Vite SPA. It uses
+`coolify-core` for pure domain types and `coolify-storage` for SQLite-backed
+repositories and migrations. The split keeps host-agent code (`coold`), stream
+routing (`scheduler`), cluster bootstrap (`cooldctl`), and the user-facing web
+application independently testable while still shipping from one Rust workspace.
+
+Initial operator-visible API routes are `/healthz`, `/api/v1/status`,
+`/api/v1/servers`, `/api/v1/servers/:id/live-status`, `/api/v1/servers/:id/containers`, `/api/v1/clusters`, `/api/v1/events`, and `/api/v1/builds`.
+The React UI reads those routes through TanStack Query and gives a basic
+dashboard for seeing cluster/server/event state while the deeper control-plane
+flows are built.
+
+
+### coolify-web to coold request path
+
+`coolify-web` does not open inbound connections to host agents. For live host
+operations it calls scheduler's local Unix socket (`COOLIFY_SCHEDULER_SOCKET`,
+default `/run/coolify/scheduler.sock`). Scheduler routes the request down the
+existing coold-initiated gRPC stream keyed by `servers.host_id`. The first live
+endpoint is `GET /api/v1/servers/:id/containers`, which dispatches
+`list_containers` through scheduler and maps host-offline responses to HTTP 404,
+timeouts to 504, missing `host_id` to 409, and malformed scheduler responses to
+502.

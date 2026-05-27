@@ -47,9 +47,81 @@ coold/          Per-host agent.
 scheduler/      gRPC server coold dials + UDS lane for Laravel.
 builder/        One-shot OCI build CLI, spawned by coold per build.
 builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
+cooldctl/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
+                Does not include v4 Coolify API/context/project commands.
+coolify-core/  Pure Coolify v5 domain model: servers, clusters, builds, events.
+coolify-storage/ SQLite storage traits/repositories + embedded migrations.
+coolify-web/   Axum API + embedded React frontend binary for the Coolify v5 UI.
+frontend/      React 19 + Vite + TanStack Router/Query + Tailwind/shadcn baseline.
 e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
                 default workspace build.
 ```
+
+---
+
+## coolify-web — basic Coolify v5 API + React UI
+
+`coolify-web` is the initial Rust web/API shell for Coolify v5. It follows the
+Rust + React single-binary architecture: Axum owns `/api/...`, serves an
+embedded Vite React SPA for browser routes, and persists local state in SQLite
+through `coolify-storage`.
+
+Current API surface:
+
+```http
+GET /healthz
+GET /api/v1/status
+GET /api/v1/servers
+GET /api/v1/servers/:id/live-status
+GET /api/v1/servers/:id/containers
+GET /api/v1/clusters
+GET /api/v1/events
+GET /api/v1/builds
+```
+
+Run locally:
+
+```bash
+SKIP_FRONTEND=1 rtk cargo run -p coolify-web -- serve
+```
+
+Frontend development:
+
+```bash
+bun run dev
+```
+
+The web app is intentionally separate from `coold`: `coold` remains the
+per-host agent, `scheduler` remains the stream router, and `coolify-web` becomes
+the central Coolify v5 API/UI binary. Live host reads use the flow
+React → coolify-web → scheduler UDS → coold outbound gRPC stream → Podman.
+
+---
+
+## cooldctl — v5 cluster CLI
+
+`cooldctl` is the Rust CLI for Coolify v5 cluster operations that belong next
+to coold. It intentionally excludes v4 Coolify API commands (contexts, projects,
+resources, deployments, private keys, etc.) so it cannot interfere with the
+existing v4 `coolify` CLI.
+
+Current command surface:
+
+```bash
+cooldctl init plan --servers IP1,IP2 --ssh-key KEY
+cooldctl init bootstrap --servers IP1,IP2 --ssh-key KEY --yes
+cooldctl init extend --servers IP1,IP2,IP3 --new-hosts IP3 --ssh-key KEY
+cooldctl init upgrade --servers IP1,IP2 --ssh-key KEY --coold-version vX.Y.Z --coolify-version latest
+
+cooldctl firewall containers --servers IP1,IP2 --ssh-key KEY
+cooldctl firewall list --servers IP1,IP2 --ssh-key KEY
+cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --servers IP1 --ssh-key KEY
+cooldctl firewall revoke --id <rule-id> --servers IP1 --ssh-key KEY
+```
+
+The CLI shares the v5 mesh model: bootstrap over SSH, central Coolify UI/API
+installation on `--central`, and day-to-day firewall mutation through coold's
+wg0-local REST API via SSH bounce.
 
 ---
 
@@ -72,7 +144,7 @@ HTTPS on wg0 mgmt IP (e.g. `100.64.0.5:8443`), bearer-token auth. Every mutation
 | Cross-host | iptables `COOLIFY-ALLOW` (filter) | wg0 ↔ bridge |
 | Intra-host same-bridge | nft `coolify_bridge::coolify_allow` (bridge family) | Same-bridge traffic bypassing FORWARD |
 
-Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule ID = `sha256("namespace|src|dst|proto|port")[:12]` — byte-compat with Go `coolify firewall` CLI. Tuples only; audit / RBAC / owners live in Laravel.
+Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule ID = `sha256("namespace|src|dst|proto|port")[:12]` — byte-compatible with `cooldctl firewall` and the retired Go v5 cluster CLI surface. Tuples only; audit / RBAC / owners live in Laravel.
 
 ---
 
@@ -80,7 +152,7 @@ Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on bo
 
 **Outbound gRPC stream.** coold dials `grpcs://scheduler:6443/v1/agent` at startup with per-host JWT. Scheduler routes command frames down the open stream. Works through NAT and corporate firewalls — scheduler never opens inbound to a host.
 
-**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `coolify firewall` CLI (SSH-bounced), peer coolds, optional per-customer gateways.
+**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `cooldctl firewall` (SSH-bounced), peer coolds, optional per-customer gateways.
 
 ---
 

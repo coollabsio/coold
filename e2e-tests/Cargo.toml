@@ -25,3 +25,7 @@ path = "tests/stub.rs"
 
 [lib]
 path = "src/lib.rs"
+
+[[test]]
+name = "cooldctl"
+path = "tests/cooldctl.rs"

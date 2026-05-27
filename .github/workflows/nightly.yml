@@ -87,6 +87,13 @@ jobs:
           rm dist/builder
           (cd dist && sha256sum builder-linux-${{ matrix.arch }}.tar.gz > builder-linux-${{ matrix.arch }}.tar.gz.sha256)
 
+      - name: Package coolify
+        run: |
+          cp target/${{ matrix.target }}/release/coolify-web dist/coolify
+          tar -czf dist/coolify-linux-${{ matrix.arch }}.tar.gz -C dist coolify
+          rm dist/coolify
+          (cd dist && sha256sum coolify-linux-${{ matrix.arch }}.tar.gz > coolify-linux-${{ matrix.arch }}.tar.gz.sha256)
+
       - name: Build coolify-stub
         working-directory: coolify-stub
         run: |
@@ -137,6 +144,7 @@ jobs:
             echo "- \`coold\` — per-host agent (holds the single gRPC stream to scheduler; spawns builder subprocess per BuildRequest when COOLD_BUILDER_ENABLED=1)"
             echo "- \`scheduler\` — central-side gRPC stream scheduler (single listener on :6443; capability-aware routing)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
+            echo "- \`coolify\` — central Coolify UI/API binary built from \`coolify-web\`"
             echo "- \`coolify-stub\` — single-binary stub dashboard (Bun + Svelte) that drives coold via the scheduler UDS; used by the e2e stub suite"
             echo
             if [ -n "$PREV" ]; then
@@ -168,6 +176,10 @@ jobs:
             dist/builder-linux-amd64.tar.gz.sha256
             dist/builder-linux-arm64.tar.gz
             dist/builder-linux-arm64.tar.gz.sha256
+            dist/coolify-linux-amd64.tar.gz
+            dist/coolify-linux-amd64.tar.gz.sha256
+            dist/coolify-linux-arm64.tar.gz
+            dist/coolify-linux-arm64.tar.gz.sha256
             dist/coolify-stub-linux-amd64.tar.gz
             dist/coolify-stub-linux-amd64.tar.gz.sha256
             dist/coolify-stub-linux-arm64.tar.gz
@@ -195,6 +207,10 @@ jobs:
             dist/builder-linux-amd64.tar.gz.sha256 \
             dist/builder-linux-arm64.tar.gz \
             dist/builder-linux-arm64.tar.gz.sha256 \
+            dist/coolify-linux-amd64.tar.gz \
+            dist/coolify-linux-amd64.tar.gz.sha256 \
+            dist/coolify-linux-arm64.tar.gz \
+            dist/coolify-linux-arm64.tar.gz.sha256 \
             dist/coolify-stub-linux-amd64.tar.gz \
             dist/coolify-stub-linux-amd64.tar.gz.sha256 \
             dist/coolify-stub-linux-arm64.tar.gz \

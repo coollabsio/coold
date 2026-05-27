@@ -1,0 +1,8 @@
+{
+  "name": "coolify-v5-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bash scripts/dev.sh"
+  }
+}
