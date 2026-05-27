@@ -1,13 +1,13 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     cli::OutputFormat,
-    meshnet::{validate_namespace, MeshNetSingleFlags},
+    meshnet::{MeshNetSingleFlags, validate_namespace},
     output, services,
-    ssh::{for_each_server, Runner, SshMeshFlags},
+    ssh::{Runner, SshMeshFlags, for_each_server},
 };
 
 #[derive(Debug, Subcommand)]
@@ -212,7 +212,7 @@ async fn curl<R: Runner>(
 async fn containers(c: ContainersCommand, format: OutputFormat) -> Result<()> {
     validate(&c.flags)?;
     let client = c.flags.ssh.client();
-    let results = for_each_server(&c.flags.ssh.servers, c.flags.ssh.concurrency, |host| {
+    let results = for_each_server(&c.flags.ssh.nodes, c.flags.ssh.concurrency, |host| {
         let flags = c.flags.clone();
         let client = client.clone();
         async move { discover_containers(&client, &host, &flags, c.all_namespaces).await }
@@ -293,7 +293,7 @@ async fn discover_containers<R: Runner>(
 async fn list(c: ListCommand, format: OutputFormat) -> Result<()> {
     validate(&c.flags)?;
     let client = c.flags.ssh.client();
-    let results = for_each_server(&c.flags.ssh.servers, c.flags.ssh.concurrency, |host| {
+    let results = for_each_server(&c.flags.ssh.nodes, c.flags.ssh.concurrency, |host| {
         let flags = c.flags.clone();
         let client = client.clone();
         async move {
@@ -411,7 +411,7 @@ async fn mutate(
     format: OutputFormat,
 ) -> Result<()> {
     let client = flags.ssh.client();
-    let results = for_each_server(&flags.ssh.servers, flags.ssh.concurrency, |host| {
+    let results = for_each_server(&flags.ssh.nodes, flags.ssh.concurrency, |host| {
         let flags = flags.clone();
         let body = body.clone();
         let client = client.clone();
@@ -495,7 +495,7 @@ mod tests {
     fn flags() -> FirewallFlags {
         FirewallFlags {
             ssh: SshMeshFlags {
-                servers: vec!["h1".into()],
+                nodes: vec!["h1".into()],
                 ssh_key: "test-key".into(),
                 ssh_user: "root".into(),
                 ssh_port: 22,
@@ -621,8 +621,10 @@ mod tests {
         .unwrap();
         assert_eq!(body, "[]");
         let calls = runner.calls.lock().unwrap();
-        assert!(calls
-            .iter()
-            .any(|c| c.contains(":9443/api/v1/firewall/allow?namespace=alpha")));
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.contains(":9443/api/v1/firewall/allow?namespace=alpha"))
+        );
     }
 }

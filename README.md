@@ -108,20 +108,22 @@ existing v4 `coolify` CLI.
 Current command surface:
 
 ```bash
-cooldctl init plan --servers IP1,IP2 --ssh-key KEY
-cooldctl init bootstrap --servers IP1,IP2 --ssh-key KEY --yes
-cooldctl init extend --servers IP1,IP2,IP3 --new-hosts IP3 --ssh-key KEY
-cooldctl init upgrade --servers IP1,IP2 --ssh-key KEY --coold-version vX.Y.Z --coolify-version latest
+cooldctl init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
+cooldctl init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
+cooldctl init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
+cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --coolify-version latest
 
-cooldctl firewall containers --servers IP1,IP2 --ssh-key KEY
-cooldctl firewall list --servers IP1,IP2 --ssh-key KEY
-cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --servers IP1 --ssh-key KEY
-cooldctl firewall revoke --id <rule-id> --servers IP1 --ssh-key KEY
+cooldctl firewall containers --nodes IP1,IP2 --ssh-key KEY
+cooldctl firewall list --nodes IP1,IP2 --ssh-key KEY
+cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ssh-key KEY
+cooldctl firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
 ```
 
 The CLI shares the v5 mesh model: bootstrap over SSH, central Coolify UI/API
-installation on `--central`, and day-to-day firewall mutation through coold's
-wg0-local REST API via SSH bounce.
+installation on `--central`, deployment nodes via `--nodes`, and day-to-day
+firewall mutation through coold's wg0-local REST API via SSH bounce. The central
+host joins WireGuard for private scheduler/coold streams but only runs
+Podman/coold/Corrosion when also listed in `--nodes`.
 
 ---
 

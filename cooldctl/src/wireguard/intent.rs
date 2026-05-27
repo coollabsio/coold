@@ -63,24 +63,28 @@ pub fn validate_intent(d: &DesiredMesh) -> Result<()> {
     match d.intent {
         Intent::Bootstrap => Ok(()),
         Intent::Extend => {
-            if d.new_hosts.is_empty() {
-                bail!("extend mode requires at least one host in NewHosts");
+            if d.new_nodes.is_empty() {
+                bail!("extend mode requires at least one node in --new-nodes");
             }
-            for h in &d.new_hosts {
-                if !d.hosts.contains(h) {
-                    bail!("extend mode: new host {h:?} not in --servers list");
+            for h in &d.new_nodes {
+                if !d.nodes.contains(h) {
+                    bail!("extend mode: new node {h:?} not in --nodes list");
                 }
             }
             Ok(())
         }
         Intent::Upgrade => {
             if !d.allow_nightly {
-                for (flag, v) in [
-                    ("--coold-version", &d.coold_version),
-                    ("--corrosion-version", &d.corrosion_version),
-                    ("--coolify-version", &d.coolify_version),
-                    ("--scheduler-version", &d.scheduler_version),
-                ] {
+                let mut versions = Vec::new();
+                if !d.nodes.is_empty() {
+                    versions.push(("--coold-version", &d.coold_version));
+                    versions.push(("--corrosion-version", &d.corrosion_version));
+                }
+                if !d.central_host.is_empty() {
+                    versions.push(("--coolify-version", &d.coolify_version));
+                    versions.push(("--scheduler-version", &d.scheduler_version));
+                }
+                for (flag, v) in versions {
                     if v == "nightly" {
                         bail!(
                             "upgrade mode rejects {flag}=nightly (moving target forces re-install every run); pin a version or pass --allow-nightly"
@@ -97,10 +101,10 @@ pub fn filter_by_intent(plan: &mut super::plan::Plan, d: &DesiredMesh) {
     if d.intent == Intent::Bootstrap {
         return;
     }
-    let new_hosts: BTreeSet<_> = d.new_hosts.iter().cloned().collect();
+    let new_nodes: BTreeSet<_> = d.new_nodes.iter().cloned().collect();
     let mut kept = Vec::new();
     for a in std::mem::take(&mut plan.actions) {
-        if let Some(reason) = decide(&a, d, &new_hosts) {
+        if let Some(reason) = decide(&a, d, &new_nodes) {
             plan.skipped
                 .push(super::plan::SkippedAction { action: a, reason });
         } else {
@@ -110,8 +114,8 @@ pub fn filter_by_intent(plan: &mut super::plan::Plan, d: &DesiredMesh) {
     plan.actions = kept;
 }
 
-fn decide(a: &PlannedAction, d: &DesiredMesh, new_hosts: &BTreeSet<String>) -> Option<String> {
-    let is_new = new_hosts.contains(&a.host);
+fn decide(a: &PlannedAction, d: &DesiredMesh, new_nodes: &BTreeSet<String>) -> Option<String> {
+    let is_new = new_nodes.contains(&a.host);
     match d.intent {
         Intent::Bootstrap => None,
         Intent::Extend if is_new => None,
@@ -141,6 +145,7 @@ mod tests {
     fn desired(intent: Intent) -> DesiredMesh {
         DesiredMesh {
             hosts: vec!["A".into(), "B".into()],
+            nodes: vec!["A".into(), "B".into()],
             interface: "wg0".into(),
             mgmt_pool: "100.64.0.0/16".parse::<Ipv4Net>().unwrap(),
             container_pool: "10.210.0.0/16".parse::<Ipv4Net>().unwrap(),
@@ -164,7 +169,7 @@ mod tests {
             builder_memory_max: "2G".into(),
             builder_timeout_secs: 1800,
             intent,
-            new_hosts: vec![],
+            new_nodes: vec![],
             allow_replace: false,
             allow_nightly: false,
         }
@@ -190,17 +195,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_intent_extend_requires_new_hosts_in_servers() {
+    fn validate_intent_extend_requires_new_nodes_in_nodes() {
         let mut d = desired(Intent::Extend);
         let err = validate_intent(&d).unwrap_err();
-        assert!(err.to_string().contains("NewHosts"));
+        assert!(err.to_string().contains("--new-nodes"));
 
-        d.new_hosts = vec!["C".into()];
+        d.new_nodes = vec!["C".into()];
         let err = validate_intent(&d).unwrap_err();
         assert!(err.to_string().contains("\"C\""));
-        assert!(err.to_string().contains("--servers"));
+        assert!(err.to_string().contains("--nodes"));
 
         d.hosts.push("C".into());
+        d.nodes.push("C".into());
         assert!(validate_intent(&d).is_ok());
     }
 
@@ -219,7 +225,14 @@ mod tests {
             }),
             ("scheduler", {
                 let mut d = desired(Intent::Upgrade);
+                d.central_host = "A".into();
                 d.scheduler_version = "nightly".into();
+                d
+            }),
+            ("coolify", {
+                let mut d = desired(Intent::Upgrade);
+                d.central_host = "A".into();
+                d.coolify_version = "nightly".into();
                 d
             }),
         ] {
@@ -254,7 +267,7 @@ mod tests {
         ]);
         let mut d = desired(Intent::Extend);
         d.hosts = vec!["A-old".into(), "A-new".into()];
-        d.new_hosts = vec!["A-new".into()];
+        d.new_nodes = vec!["A-new".into()];
         filter_by_intent(&mut p, &d);
 
         let kept = p
@@ -273,7 +286,7 @@ mod tests {
     fn filter_extend_blocks_destructive_existing_unless_allowed() {
         let mut p = plan(vec![action("A-old", ActionType::RecreatePodmanNetwork)]);
         let mut d = desired(Intent::Extend);
-        d.new_hosts = vec!["A-new".into()];
+        d.new_nodes = vec!["A-new".into()];
         filter_by_intent(&mut p, &d);
         assert!(p.actions.is_empty());
         assert!(p.skipped[0].reason.contains("destructive-replace"));

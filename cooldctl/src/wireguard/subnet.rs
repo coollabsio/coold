@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::{
@@ -35,7 +35,7 @@ pub fn allocate(
     let mut seen_hosts = BTreeSet::new();
     for h in hosts {
         if !seen_hosts.insert(h) {
-            bail!("duplicate host in --servers: {h}");
+            bail!("duplicate host in --nodes: {h}");
         }
     }
     let base = ip_to_u32(pool.network());
@@ -95,7 +95,7 @@ pub fn allocate_mgmt_ips(
     let mut seen_hosts = BTreeSet::new();
     for h in hosts {
         if !seen_hosts.insert(h) {
-            bail!("duplicate host in --servers: {h}");
+            bail!("duplicate host in --nodes: {h}");
         }
     }
     let base = ip_to_u32(pool.network());

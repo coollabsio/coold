@@ -16,7 +16,7 @@ Included:
 
 - `init plan` — inspect host state and print the actions needed to converge.
 - `init bootstrap` — first-time v5 mesh install.
-- `init extend` — add new hosts while only peer-refreshing existing hosts.
+- `init extend` — add new nodes while only peer-refreshing existing mesh hosts.
 - `init upgrade` — bump coold/corrosion/scheduler/builder binaries without
   changing mesh topology.
 - `firewall containers` — discover Podman containers attached to v5 mesh
@@ -48,16 +48,21 @@ rtk cargo test -p e2e-tests --test cooldctl --no-run
 
 ## Shared flags
 
-Most commands need SSH access to every target host:
+Most commands need SSH access to every target node. `init` also accepts a
+separate `--central` control-plane host:
 
 ```bash
---servers IP1,IP2         Comma-separated host list.
+--central IP             Coolify UI/API + scheduler host.
+--nodes IP1,IP2          Comma-separated deployment node list.
 --ssh-key ~/.ssh/key      SSH private key.
 --ssh-user root           Defaults to root.
 --ssh-port 22             Defaults to 22.
 --concurrency 10          Parallel SSH fanout limit.
 --ssh-timeout 30s         Supports ms, s, m, or plain seconds.
 ```
+
+`--servers` remains a backwards-compatible alias for `--nodes` during the
+rename. `--new-hosts` remains an alias for `--new-nodes`.
 
 Mesh defaults:
 
@@ -81,23 +86,32 @@ Output formats:
 
 ## Bootstrap a v5 mesh
 
-Single central host:
+Central-only control plane:
 
 ```bash
 cooldctl init bootstrap \
-  --servers 203.0.113.10 \
   --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5 \
   --yes
 ```
 
-Two hosts, first host as scheduler/central:
+All-in-one: central is also a deployment node:
 
 ```bash
 cooldctl init bootstrap \
-  --servers 203.0.113.10,203.0.113.11 \
   --central 203.0.113.10 \
-  --builder-hosts 203.0.113.10 \
+  --nodes 203.0.113.10 \
+  --ssh-key ~/.ssh/coolify-v5 \
+  --yes
+```
+
+Separate central plus two deployment nodes:
+
+```bash
+cooldctl init bootstrap \
+  --central 203.0.113.10 \
+  --nodes 203.0.113.11,203.0.113.12 \
+  --builder-hosts 203.0.113.11 \
   --ssh-key ~/.ssh/coolify-v5 \
   --yes
 ```
@@ -122,11 +136,15 @@ central host from the `coolify-linux-$ARCH.tar.gz` GitHub release asset, writes
 `--coolify-version latest` to consume the latest stable release asset, or pin a
 specific tag such as `v0.2.0`.
 
+The central host always joins the WireGuard management mesh so scheduler ↔ coold
+traffic stays private. It only runs Podman/coold/Corrosion/firewall when it is
+also listed in `--nodes`.
+
 ## Plan before changing hosts
 
 ```bash
 cooldctl init plan \
-  --servers 203.0.113.10,203.0.113.11 \
+  --nodes 203.0.113.10,203.0.113.11 \
   --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -136,22 +154,22 @@ Preview another intent:
 ```bash
 cooldctl init plan \
   --intent extend \
-  --servers 203.0.113.10,203.0.113.11,203.0.113.12 \
-  --new-hosts 203.0.113.12 \
+  --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
+  --new-nodes 203.0.113.12 \
   --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 
 ## Extend a mesh
 
-`--servers` must contain the full desired host list. `--new-hosts` is the subset
-that should receive first-time installation. Existing hosts get only safe
+`--nodes` must contain the full desired deployment node list. `--new-nodes` is
+the subset that should receive first-time node installation. Existing hosts get only safe
 peer-refresh actions unless `--allow-replace` is explicitly passed.
 
 ```bash
 cooldctl init extend \
-  --servers 203.0.113.10,203.0.113.11,203.0.113.12 \
-  --new-hosts 203.0.113.12 \
+  --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
+  --new-nodes 203.0.113.12 \
   --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -160,7 +178,7 @@ cooldctl init extend \
 
 ```bash
 cooldctl init upgrade \
-  --servers 203.0.113.10,203.0.113.11 \
+  --nodes 203.0.113.10,203.0.113.11 \
   --central 203.0.113.10 \
   --coold-version v0.2.0 \
   --corrosion-version v0.2.0 \
@@ -169,7 +187,7 @@ cooldctl init upgrade \
 ```
 
 Upgrade mode keeps version bumps and service-unit rewrites, but skips topology
-changes. Use `init extend` for peer or host-list changes.
+changes. Use `init extend` for peer or node-list changes.
 
 ## Firewall commands
 
@@ -189,7 +207,7 @@ List mesh containers:
 
 ```bash
 cooldctl firewall containers \
-  --servers 203.0.113.10,203.0.113.11 \
+  --nodes 203.0.113.10,203.0.113.11 \
   --namespace default \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -198,7 +216,7 @@ List allow rules:
 
 ```bash
 cooldctl firewall list \
-  --servers 203.0.113.10,203.0.113.11 \
+  --nodes 203.0.113.10,203.0.113.11 \
   --namespace default \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -207,7 +225,7 @@ Allow traffic from one container IP to another:
 
 ```bash
 cooldctl firewall allow \
-  --servers 203.0.113.11 \
+  --nodes 203.0.113.11 \
   --namespace default \
   --from 10.210.0.10 \
   --to 10.210.1.20 \
@@ -220,7 +238,7 @@ Allow all protocols between two container IPs by omitting `--port`:
 
 ```bash
 cooldctl firewall allow \
-  --servers 203.0.113.11 \
+  --nodes 203.0.113.11 \
   --from 10.210.0.10 \
   --to 10.210.1.20 \
   --ssh-key ~/.ssh/coolify-v5
@@ -230,7 +248,7 @@ Revoke by ID:
 
 ```bash
 cooldctl firewall revoke \
-  --servers 203.0.113.11 \
+  --nodes 203.0.113.11 \
   --id abc123def456 \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -239,7 +257,7 @@ Or revoke by the same tuple used for allow:
 
 ```bash
 cooldctl firewall revoke \
-  --servers 203.0.113.11 \
+  --nodes 203.0.113.11 \
   --from 10.210.0.10 \
   --to 10.210.1.20 \
   --proto tcp \

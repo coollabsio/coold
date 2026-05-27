@@ -1,15 +1,15 @@
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
 use clap::Args;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use tokio::{process::Command, time::timeout};
 
 #[derive(Debug, Clone, Args)]
 pub struct SshMeshFlags {
-    #[arg(long, value_delimiter = ',')]
-    pub servers: Vec<String>,
+    #[arg(long = "nodes", alias = "servers", value_delimiter = ',')]
+    pub nodes: Vec<String>,
 
     #[arg(long)]
     pub ssh_key: PathBuf,
@@ -32,9 +32,13 @@ pub struct SshMeshFlags {
 
 impl SshMeshFlags {
     pub fn validate(&self) -> Result<()> {
-        if self.servers.is_empty() {
-            bail!("--servers is required");
+        if self.nodes.is_empty() {
+            bail!("--nodes is required");
         }
+        self.validate_ssh_key()
+    }
+
+    pub fn validate_ssh_key(&self) -> Result<()> {
         if self.ssh_key.as_os_str().is_empty() {
             bail!("--ssh-key is required");
         }
@@ -47,7 +51,9 @@ impl SshMeshFlags {
 
     pub fn client(&self) -> SshClient {
         if self.ssh_passphrase_prompt {
-            eprintln!("warning: --ssh-passphrase-prompt is delegated to ssh/ssh-agent in cooldctl; ensure your key is unlocked");
+            eprintln!(
+                "warning: --ssh-passphrase-prompt is delegated to ssh/ssh-agent in cooldctl; ensure your key is unlocked"
+            );
         }
         SshClient {
             key: self.ssh_key.clone(),
@@ -168,7 +174,9 @@ pub struct ServerResult<T> {
 }
 
 pub fn heredoc(path: &str, body: &str, mode: &str) -> String {
-    format!("cat > {path}.tmp <<'COOLDCTL_EOF'\n{body}COOLDCTL_EOF\nchmod {mode} {path}.tmp && mv {path}.tmp {path}")
+    format!(
+        "cat > {path}.tmp <<'COOLDCTL_EOF'\n{body}COOLDCTL_EOF\nchmod {mode} {path}.tmp && mv {path}.tmp {path}"
+    )
 }
 
 pub fn first_line(s: &str) -> Option<String> {

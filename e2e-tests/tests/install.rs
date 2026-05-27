@@ -208,7 +208,7 @@ fn install_single_host() {
         &[
             "init",
             "bootstrap",
-            "--servers",
+            "--nodes",
             &host,
             "--central",
             &host,
@@ -316,7 +316,7 @@ fn install_two_hosts() {
         &[
             "init",
             "bootstrap",
-            "--servers",
+            "--nodes",
             &format!("{host_a},{host_b}"),
             "--central",
             &host_a,

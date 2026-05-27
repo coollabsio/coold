@@ -174,7 +174,7 @@ fn stub_smoke() {
         &[
             "init",
             "bootstrap",
-            "--servers",
+            "--nodes",
             &host,
             "--central",
             &host,

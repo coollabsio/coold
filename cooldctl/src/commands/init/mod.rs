@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use clap::{Args, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use serde::Serialize;
+use std::collections::BTreeSet;
 
 use crate::{
     cli::OutputFormat,
@@ -77,8 +78,8 @@ pub struct PlanCommand {
     pub base: BaseInitFlags,
     #[arg(long, value_enum, default_value_t=PlanIntent::Bootstrap)]
     pub intent: PlanIntent,
-    #[arg(long, value_delimiter = ',')]
-    pub new_hosts: Vec<String>,
+    #[arg(long = "new-nodes", alias = "new-hosts", value_delimiter = ',')]
+    pub new_nodes: Vec<String>,
     #[arg(long)]
     pub allow_replace: bool,
     #[arg(long)]
@@ -93,8 +94,8 @@ pub struct ApplyCommand {
 pub struct ExtendCommand {
     #[command(flatten)]
     pub base: BaseInitFlags,
-    #[arg(long, value_delimiter = ',')]
-    pub new_hosts: Vec<String>,
+    #[arg(long = "new-nodes", alias = "new-hosts", value_delimiter = ',')]
+    pub new_nodes: Vec<String>,
     #[arg(long)]
     pub allow_replace: bool,
 }
@@ -138,13 +139,13 @@ pub async fn run(cmd: InitCommand, format: OutputFormat) -> Result<()> {
             .await
         }
         InitCommand::Extend(c) => {
-            if c.new_hosts.is_empty() {
-                bail!("--new-hosts is required: list the subset of --servers that is brand-new");
+            if c.new_nodes.is_empty() {
+                bail!("--new-nodes is required: list the subset of --nodes that is brand-new");
             }
             run_apply(
                 c.base,
                 Intent::Extend,
-                c.new_hosts,
+                c.new_nodes,
                 c.allow_replace,
                 false,
                 true,
@@ -174,12 +175,12 @@ async fn run_plan(c: PlanCommand, format: OutputFormat) -> Result<()> {
     let desired = build_desired(
         &c.base,
         c.intent.into(),
-        c.new_hosts,
+        c.new_nodes,
         c.allow_replace,
         c.allow_nightly,
     )?;
     let client = c.base.ssh.client();
-    eprintln!("Probing {} server(s)...", desired.hosts.len());
+    eprintln!("Probing {} mesh host(s)...", desired.hosts.len());
     let current = reconstruct(
         &client,
         &desired.hosts,
@@ -198,7 +199,7 @@ async fn run_plan(c: PlanCommand, format: OutputFormat) -> Result<()> {
 async fn run_apply(
     base: BaseInitFlags,
     intent: Intent,
-    new_hosts: Vec<String>,
+    new_nodes: Vec<String>,
     allow_replace: bool,
     allow_nightly: bool,
     skip_gate: bool,
@@ -211,13 +212,13 @@ async fn run_apply(
         && std::env::var("COOLIFY_NON_INTERACTIVE").unwrap_or_default() != "1"
     {
         eprintln!(
-            "This command will modify network configuration on the listed servers. Use --yes to skip this prompt in automation."
+            "This command will modify network configuration on the listed nodes/central host. Use --yes to skip this prompt in automation."
         );
     }
-    let desired = build_desired(&base, intent, new_hosts, allow_replace, allow_nightly)?;
+    let desired = build_desired(&base, intent, new_nodes, allow_replace, allow_nightly)?;
     let client = base.ssh.client();
     eprintln!("{header}");
-    eprintln!("Probing {} server(s)...", desired.hosts.len());
+    eprintln!("Probing {} mesh host(s)...", desired.hosts.len());
     let current = reconstruct(
         &client,
         &desired.hosts,
@@ -274,7 +275,7 @@ async fn run_apply(
             })
             .collect::<Vec<_>>();
         if !rows.is_empty() {
-            output::table(&["SERVER", "ACTION", "STATUS", "DETAIL"], &rows)?;
+            output::table(&["HOST", "ACTION", "STATUS", "DETAIL"], &rows)?;
         }
         let vrows = verified
             .iter()
@@ -287,29 +288,33 @@ async fn run_apply(
                 ]
             })
             .collect::<Vec<_>>();
-        output::table(&["SERVER", "WIREGUARD IP", "PEERS", "STATUS"], &vrows)
+        output::table(&["HOST", "WIREGUARD IP", "PEERS", "STATUS"], &vrows)
     }
 }
 
 fn build_desired(
     base: &BaseInitFlags,
     intent: Intent,
-    new_hosts: Vec<String>,
+    new_nodes: Vec<String>,
     allow_replace: bool,
     allow_nightly: bool,
 ) -> Result<DesiredMesh> {
-    base.ssh.validate()?;
+    base.ssh.validate_ssh_key()?;
     validate_namespaces(&base.mesh.namespaces)?;
-    if !base.central.is_empty() && !base.ssh.servers.contains(&base.central) {
-        bail!("--central must be one of --servers");
+    let nodes = clean_hosts(&base.ssh.nodes);
+    let new_nodes = clean_hosts(&new_nodes);
+    if base.central.is_empty() && nodes.is_empty() {
+        bail!("at least one of --central or --nodes is required");
     }
     for h in &base.builder_hosts {
-        if !base.ssh.servers.contains(h) {
-            bail!("--builder-hosts entry {h:?} is not in --servers");
+        if !nodes.contains(h) {
+            bail!("--builder-hosts entry {h:?} is not in --nodes");
         }
     }
+    let hosts = mesh_hosts(&base.central, &nodes)?;
     Ok(DesiredMesh {
-        hosts: base.ssh.servers.clone(),
+        hosts,
+        nodes,
         interface: base.wg_interface.clone(),
         mgmt_pool: base.wg_mgmt_pool.parse::<Ipv4Net>()?,
         container_pool: base.mesh.container_pool.parse::<Ipv4Net>()?,
@@ -333,16 +338,49 @@ fn build_desired(
         builder_memory_max: base.builder_memory_max.clone(),
         builder_timeout_secs: base.builder_timeout_secs,
         intent,
-        new_hosts,
+        new_nodes,
         allow_replace,
         allow_nightly,
     })
 }
 
+fn mesh_hosts(central: &str, nodes: &[String]) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut seen_nodes = BTreeSet::new();
+    if !central.is_empty() {
+        out.push(central.to_string());
+        seen.insert(central.to_string());
+    }
+    for node in nodes {
+        if node.is_empty() {
+            continue;
+        }
+        if !seen_nodes.insert(node.clone()) {
+            bail!("duplicate node in --nodes: {node}");
+        }
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        out.push(node.clone());
+    }
+    Ok(out)
+}
+
+fn clean_hosts(hosts: &[String]) -> Vec<String> {
+    hosts
+        .iter()
+        .map(|h| h.trim())
+        .filter(|h| !h.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
 fn render_plan(format: OutputFormat, desired: &DesiredMesh, plan: &Plan) -> Result<()> {
     #[derive(Serialize)]
     struct PlanOutput<'a> {
-        servers: &'a [String],
+        nodes: &'a [String],
+        mesh_hosts: &'a [String],
         actions: &'a [crate::wireguard::plan::PlannedAction],
         skipped: &'a [crate::wireguard::plan::SkippedAction],
         warnings: &'a [crate::wireguard::subnet::Warning],
@@ -351,7 +389,8 @@ fn render_plan(format: OutputFormat, desired: &DesiredMesh, plan: &Plan) -> Resu
         return output::print(
             format,
             &PlanOutput {
-                servers: &desired.hosts,
+                nodes: &desired.nodes,
+                mesh_hosts: &desired.hosts,
                 actions: &plan.actions,
                 skipped: &plan.skipped,
                 warnings: &plan.warnings,
@@ -368,7 +407,7 @@ fn render_plan(format: OutputFormat, desired: &DesiredMesh, plan: &Plan) -> Resu
         .map(|a| vec![a.host.clone(), a.action_type.to_string(), a.detail.clone()])
         .collect::<Vec<_>>();
     if !rows.is_empty() {
-        output::table(&["SERVER", "ACTION", "DETAIL"], &rows)?;
+        output::table(&["HOST", "ACTION", "DETAIL"], &rows)?;
     }
     if !plan.skipped.is_empty() {
         eprintln!("Skipped by intent filter:");
@@ -380,6 +419,23 @@ fn render_plan(format: OutputFormat, desired: &DesiredMesh, plan: &Plan) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_hosts_allows_all_in_one_central_node() {
+        let got = mesh_hosts("1.2.3.4", &["1.2.3.4".into()]).unwrap();
+        assert_eq!(got, vec!["1.2.3.4"]);
+    }
+
+    #[test]
+    fn mesh_hosts_keeps_central_before_nodes() {
+        let got = mesh_hosts("1.2.3.4", &["5.6.7.8".into(), "9.9.9.9".into()]).unwrap();
+        assert_eq!(got, vec!["1.2.3.4", "5.6.7.8", "9.9.9.9"]);
+    }
 }
 
 #[derive(Serialize)]

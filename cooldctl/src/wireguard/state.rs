@@ -85,7 +85,11 @@ impl MeshState {
 
 #[derive(Debug, Clone)]
 pub struct DesiredMesh {
+    /// All WireGuard participants. Includes the central control-plane host
+    /// when configured, plus all deployment nodes.
     pub hosts: Vec<String>,
+    /// Deployment nodes: hosts that run Podman/coold/Corrosion/firewall.
+    pub nodes: Vec<String>,
     pub interface: String,
     pub mgmt_pool: Ipv4Net,
     pub container_pool: Ipv4Net,
@@ -109,12 +113,16 @@ pub struct DesiredMesh {
     pub builder_memory_max: String,
     pub builder_timeout_secs: u32,
     pub intent: crate::wireguard::intent::Intent,
-    pub new_hosts: Vec<String>,
+    pub new_nodes: Vec<String>,
     pub allow_replace: bool,
     pub allow_nightly: bool,
 }
 
 impl DesiredMesh {
+    pub fn is_node(&self, host: &str) -> bool {
+        self.nodes.iter().any(|h| h == host)
+    }
+
     pub fn sorted_namespaces(&self) -> Vec<String> {
         let mut v = self.namespaces.clone();
         v.sort();
@@ -124,11 +132,11 @@ impl DesiredMesh {
         if !self.builder_hosts.is_empty() {
             self.builder_hosts
                 .iter()
-                .filter(|h| self.hosts.contains(*h))
+                .filter(|h| self.nodes.contains(*h))
                 .cloned()
                 .collect()
         } else if self.enable_builder {
-            self.hosts.iter().cloned().collect()
+            self.nodes.iter().cloned().collect()
         } else {
             Default::default()
         }

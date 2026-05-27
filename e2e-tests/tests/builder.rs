@@ -46,7 +46,7 @@ fn builder_lifecycle() {
         &[
             "init",
             "bootstrap",
-            "--servers",
+            "--nodes",
             &format!("{host_a},{host_b}"),
             "--central",
             &host_a,

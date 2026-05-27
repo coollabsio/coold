@@ -65,7 +65,7 @@ pub async fn apply_mesh<R: Runner>(
         }
     }
     if failed {
-        bail!("phase 1 (install/keygen) failed on one or more servers; aborting");
+        bail!("phase 1 (install/keygen) failed on one or more mesh hosts; aborting");
     }
     let fresh = reconstruct(
         runner,
@@ -87,7 +87,7 @@ pub async fn apply_mesh<R: Runner>(
         desired.container_prefix,
         &fresh.assigned_container_subnets(),
         &desired.namespaces,
-        &desired.hosts,
+        &desired.nodes,
     )?;
     let p2 = for_each_server(&desired.hosts, concurrency, |host| {
         let mgmt = mgmt.clone();
@@ -116,7 +116,7 @@ pub async fn apply_mesh<R: Runner>(
         }
     }
     if desired.install_coold && err.is_none() {
-        let p3 = for_each_server(&desired.hosts, concurrency, |host| {
+        let p3 = for_each_server(&desired.nodes, concurrency, |host| {
             let mgmt = mgmt.clone();
             let subnets = subnets.clone();
             let planned = planned.clone();
@@ -168,7 +168,7 @@ pub async fn apply_mesh<R: Runner>(
             mgmt[&desired.central_host],
             services::scheduler::SCHEDULER_GRPC_PORT
         );
-        let p5 = for_each_server(&desired.hosts, concurrency, |host| {
+        let p5 = for_each_server(&desired.nodes, concurrency, |host| {
             let mgmt = mgmt.clone();
             let subnets = subnets.clone();
             let pem = priv_pem.clone();
@@ -283,7 +283,7 @@ async fn phase1<R: Runner>(
     if !st.keys_exist && should_run(planned, host, ActionType::GenKeyPair, "") {
         step(runner, host, user, port, &mut out, ActionType::GenKeyPair, "", "mkdir -p /etc/wireguard && wg genkey | tee /etc/wireguard/privatekey | wg pubkey | tee /etc/wireguard/publickey && chmod 600 /etc/wireguard/privatekey".into()).await?;
     }
-    if desired.install_podman {
+    if desired.is_node(host) && desired.install_podman {
         if !st.podman_installed && should_run(planned, host, ActionType::InstallPodman, "") {
             step(
                 runner,
@@ -354,11 +354,15 @@ async fn phase2<R: Runner>(
                     endpoint: p.clone(),
                     public_key: s.public_key.clone(),
                     mgmt_ip: mgmt[p],
-                    container_subnets: desired
-                        .sorted_namespaces()
-                        .iter()
-                        .map(|ns| subnets[ns][p])
-                        .collect(),
+                    container_subnets: if desired.is_node(p) {
+                        desired
+                            .sorted_namespaces()
+                            .iter()
+                            .map(|ns| subnets[ns][p])
+                            .collect()
+                    } else {
+                        vec![]
+                    },
                 })
         })
         .collect::<Vec<_>>();
@@ -395,7 +399,7 @@ async fn phase2<R: Runner>(
         step(runner, host, user, port, &mut out, svc_action, "", cmd).await?;
     }
 
-    if desired.install_podman {
+    if desired.is_node(host) && desired.install_podman {
         for ns in desired.sorted_namespaces() {
             let create = should_run(planned, host, ActionType::CreatePodmanNetwork, &ns);
             let recreate = should_run(planned, host, ActionType::RecreatePodmanNetwork, &ns);
@@ -497,7 +501,7 @@ async fn phase3<R: Runner>(
         .await?;
     }
     let peers = desired
-        .hosts
+        .nodes
         .iter()
         .filter(|h| *h != host)
         .map(|h| mgmt[h])
@@ -651,6 +655,7 @@ async fn phase4<R: Runner>(
         let unit = services::scheduler::service_unit(
             &format!("{central_ip}:{}", services::scheduler::SCHEDULER_GRPC_PORT),
             services::scheduler::SCHEDULER_JWT_PUB_PATH,
+            &desired.interface,
         );
         step(
             runner,

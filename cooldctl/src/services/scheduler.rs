@@ -4,9 +4,9 @@ pub const SCHEDULER_JWT_PRIV_PATH: &str = "/etc/coolify/jwt.priv";
 pub const HOST_JWT_PATH: &str = "/etc/coolify/host-jwt";
 pub const SCHEDULER_UNIX_SOCKET_PATH: &str = "/run/coolify/scheduler.sock";
 
-pub fn service_unit(grpc_bind: &str, jwt_pub_path: &str) -> String {
+pub fn service_unit(grpc_bind: &str, jwt_pub_path: &str, iface: &str) -> String {
     format!(
-        "[Unit]\nDescription=Coolify scheduler\nAfter=network-online.target wg-quick@wg0.service\n\n[Service]\nRuntimeDirectory=coolify\nRuntimeDirectoryMode=0750\nEnvironment=SCHEDULER_GRPC_BIND={grpc_bind}\nEnvironment=SCHEDULER_UNIX_SOCKET_PATH={SCHEDULER_UNIX_SOCKET_PATH}\nEnvironment=SCHEDULER_JWT_PUBLIC_KEY_PATH={jwt_pub_path}\nExecStart=/usr/local/bin/scheduler\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Coolify scheduler\nAfter=network-online.target wg-quick@{iface}.service\nRequires=wg-quick@{iface}.service\n\n[Service]\nRuntimeDirectory=coolify\nRuntimeDirectoryMode=0750\nEnvironment=SCHEDULER_GRPC_BIND={grpc_bind}\nEnvironment=SCHEDULER_UNIX_SOCKET_PATH={SCHEDULER_UNIX_SOCKET_PATH}\nEnvironment=SCHEDULER_JWT_PUBLIC_KEY_PATH={jwt_pub_path}\nExecStart=/usr/local/bin/scheduler\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -57,8 +57,9 @@ mod tests {
 
     #[test]
     fn service_unit_embeds_bind_socket_and_jwt_path() {
-        let got = service_unit("100.64.0.1:6443", "/etc/coolify/jwt.pub");
+        let got = service_unit("100.64.0.1:6443", "/etc/coolify/jwt.pub", "wg9");
         for want in [
+            "Requires=wg-quick@wg9.service",
             "Environment=SCHEDULER_GRPC_BIND=100.64.0.1:6443",
             "Environment=SCHEDULER_UNIX_SOCKET_PATH=/run/coolify/scheduler.sock",
             "Environment=SCHEDULER_JWT_PUBLIC_KEY_PATH=/etc/coolify/jwt.pub",

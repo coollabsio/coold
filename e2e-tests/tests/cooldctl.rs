@@ -37,7 +37,7 @@ fn bootstrap_args<'a>(servers: &'a str, central: &'a str, ssh_key: &'a str) -> V
     vec![
         "init",
         "bootstrap",
-        "--servers",
+        "--nodes",
         servers,
         "--central",
         central,
@@ -123,7 +123,7 @@ fn cooldctl_bootstrap_single_host() {
         &[
             "init",
             "plan",
-            "--servers",
+            "--nodes",
             &host,
             "--central",
             &host,
@@ -221,9 +221,9 @@ fn cooldctl_extend_adds_third_host() {
         &[
             "init",
             "extend",
-            "--servers",
+            "--nodes",
             &full,
-            "--new-hosts",
+            "--new-nodes",
             &host_c,
             "--central",
             &host_a,
@@ -277,7 +277,7 @@ fn cooldctl_firewall_allow_list_revoke() {
 
     step("3/5 allow both directions through cooldctl firewall");
     let common = [
-        "--servers",
+        "--nodes",
         &host,
         "--ssh-user",
         "root",
