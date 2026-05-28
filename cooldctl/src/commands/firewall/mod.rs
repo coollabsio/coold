@@ -1,13 +1,13 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use clap::{Args, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     cli::OutputFormat,
-    meshnet::{MeshNetSingleFlags, validate_namespace},
+    meshnet::{validate_namespace, MeshNetSingleFlags},
     output, services,
-    ssh::{Runner, SshMeshFlags, for_each_server},
+    ssh::{for_each_server, Runner, SshMeshFlags},
 };
 
 #[derive(Debug, Subcommand)]
@@ -621,10 +621,8 @@ mod tests {
         .unwrap();
         assert_eq!(body, "[]");
         let calls = runner.calls.lock().unwrap();
-        assert!(
-            calls
-                .iter()
-                .any(|c| c.contains(":9443/api/v1/firewall/allow?namespace=alpha"))
-        );
+        assert!(calls
+            .iter()
+            .any(|c| c.contains(":9443/api/v1/firewall/allow?namespace=alpha")));
     }
 }

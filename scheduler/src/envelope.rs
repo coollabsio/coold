@@ -6,7 +6,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use coolify_proto::agent::v1::{BuildResponseBody as ProtoBuildResponseBody, Response as ProtoResponse};
+use coolify_proto::agent::v1::{
+    BuildResponseBody as ProtoBuildResponseBody, Response as ProtoResponse,
+};
+
+// ─── Stream inventory ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct StreamInventoryItem {
+    pub host_id: String,
+    pub caps: Vec<String>,
+    pub builder_capacity: u32,
+}
 
 // ─── Coold dispatch ──────────────────────────────────────────────────────────
 

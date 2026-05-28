@@ -1,9 +1,9 @@
 use std::{path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use clap::Args;
-use futures::{StreamExt, stream};
+use futures::{stream, StreamExt};
 use tokio::{process::Command, time::timeout};
 
 #[derive(Debug, Clone, Args)]

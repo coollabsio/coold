@@ -54,13 +54,17 @@ pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<(
 
     let app = Router::new()
         .route("/v1/health", get(health))
+        .route("/v1/streams", get(stream_inventory))
         .route("/v1/coold/dispatch", post(coold_dispatch))
         .route("/v1/build/dispatch", post(build_dispatch))
         .route("/v1/build/result/:request_id", get(build_result))
         .route("/v1/build/:request_id/cancel", post(build_cancel))
         .with_state(state);
 
-    let listener = bind(&config.unix_socket_path, config.unix_socket_group.as_deref())?;
+    let listener = bind(
+        &config.unix_socket_path,
+        config.unix_socket_group.as_deref(),
+    )?;
     info!(path = %config.unix_socket_path.display(), "UDS bridge listening");
 
     loop {
@@ -114,10 +118,8 @@ fn bind(path: &Path, group: Option<&str>) -> Result<UnixListener> {
     std::fs::set_permissions(path, perms).with_context(|| format!("chmod {}", path.display()))?;
 
     if let Some(g) = group {
-        let gid = resolve_gid(g)
-            .with_context(|| format!("resolve group {g}"))?;
-        chown(path, None, Some(gid))
-            .with_context(|| format!("chown :{g} {}", path.display()))?;
+        let gid = resolve_gid(g).with_context(|| format!("resolve group {g}"))?;
+        chown(path, None, Some(gid)).with_context(|| format!("chown :{g} {}", path.display()))?;
     }
 
     Ok(listener)
@@ -141,15 +143,19 @@ async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true }))
 }
 
-async fn coold_dispatch(
-    State(st): State<AppState>,
-    Json(env): Json<DispatchEnvelope>,
-) -> Response {
+async fn stream_inventory(State(st): State<AppState>) -> impl IntoResponse {
+    Json(st.streams.snapshot())
+}
+
+async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnvelope>) -> Response {
     let request_id = env.request_id.clone();
     let host_id = env.host_id.clone();
 
     match route_coold(&st.streams, env) {
-        RouteOutcome::SendCoold { host_id: target, msg } => {
+        RouteOutcome::SendCoold {
+            host_id: target,
+            msg,
+        } => {
             match st.pending.insert_waiting(
                 request_id.clone(),
                 target.clone(),
@@ -199,7 +205,9 @@ async fn await_coold(request_id: &str, rx: oneshot::Receiver<ResponseData>) -> R
             body,
         })
         .into_response(),
-        Ok(Ok(ResponseData::Build(_))) => coold_err(request_id, 500, "build response on coold lane"),
+        Ok(Ok(ResponseData::Build(_))) => {
+            coold_err(request_id, 500, "build response on coold lane")
+        }
         // Sink dropped without a value (sweeper evicted on timeout, or the
         // entry was removed by a send-failure path above).
         Ok(Err(_)) => coold_err(request_id, 504, "dispatch timeout"),
@@ -210,7 +218,10 @@ async fn await_coold(request_id: &str, rx: oneshot::Receiver<ResponseData>) -> R
 fn coold_err(request_id: &str, code: u32, message: &str) -> Response {
     let env = ResponseEnvelope {
         request_id: request_id.to_owned(),
-        body: ResponseBody::Error { code, message: message.to_owned() },
+        body: ResponseBody::Error {
+            code,
+            message: message.to_owned(),
+        },
     };
     let status = code_to_status(code);
     (status, Json(env)).into_response()
@@ -230,7 +241,12 @@ async fn build_dispatch(
     // Cancel is not valid on the dispatch endpoint; route it through the
     // dedicated cancel path for clarity.
     if matches!(env.command, BuildCommandPayload::Cancel {}) {
-        return build_err(&env.request_id, 400, "use /v1/build/{id}/cancel for cancels", "dispatch");
+        return build_err(
+            &env.request_id,
+            400,
+            "use /v1/build/{id}/cancel for cancels",
+            "dispatch",
+        );
     }
 
     let request_id = env.request_id.clone();
@@ -245,11 +261,7 @@ async fn build_dispatch(
                 warn!(%request_id, error = %e, "send build to host stream failed");
                 return build_err(&request_id, 503, "host stream send failed", "dispatch");
             }
-            (
-                StatusCode::ACCEPTED,
-                Json(BuildDispatchAck { request_id }),
-            )
-                .into_response()
+            (StatusCode::ACCEPTED, Json(BuildDispatchAck { request_id })).into_response()
         }
         RouteOutcome::PushError { code, message } => {
             warn!(%request_id, %code, %message, "build dispatch rejected");

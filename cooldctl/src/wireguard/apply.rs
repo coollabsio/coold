@@ -1,12 +1,12 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::net::Ipv4Addr;
 
 use super::{
-    config::{PeerConfig, write_config_command},
+    config::{write_config_command, PeerConfig},
     firewall::install_firewall_command,
-    plan::{ActionType, Plan, PlannedAction, build_plan},
+    plan::{build_plan, ActionType, Plan, PlannedAction},
     reconstruct::reconstruct,
     state::{DesiredMesh, MeshState},
     subnet::{allocate_mgmt_ips, allocate_namespaced, machine_ip},
@@ -14,7 +14,7 @@ use super::{
 use crate::{
     meshnet::podman_network_for,
     services,
-    ssh::{Runner, first_line, for_each_server, heredoc},
+    ssh::{first_line, for_each_server, heredoc, Runner},
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,7 +204,11 @@ pub async fn apply_mesh<R: Runner>(
             }
         }
     }
-    if let Some(e) = err { Err(e) } else { Ok(all) }
+    if let Some(e) = err {
+        Err(e)
+    } else {
+        Ok(all)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

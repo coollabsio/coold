@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::{

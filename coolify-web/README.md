@@ -40,9 +40,11 @@ React → coolify-web → scheduler UDS → coold gRPC stream → Podman
 ```http
 GET /healthz
 GET /api/v1/status
+GET /api/v1/scheduler/streams
 GET /api/v1/servers
 GET /api/v1/servers/:id/live-status
 GET /api/v1/servers/:id/containers
+POST /api/v1/servers/sync-streams
 GET /api/v1/clusters
 GET /api/v1/events
 GET /api/v1/builds
@@ -64,3 +66,16 @@ Backend-only iteration:
 ```bash
 SKIP_FRONTEND=1 rtk cargo run -p coolify-web -- serve
 ```
+
+
+### Scheduler stream sync
+
+Connected agents become visible through this flow:
+
+```txt
+coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → React Servers page → live container endpoint
+```
+
+The sync endpoint creates or updates servers by scheduler `host_id`, stores
+capabilities, sets `last_seen_at`, marks the server online, and records an
+event.

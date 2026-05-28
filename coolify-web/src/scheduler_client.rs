@@ -1,6 +1,6 @@
 use std::{path::PathBuf, time::Duration};
 
-use coolify_core::ContainerSummary;
+use coolify_core::{ContainerSummary, SchedulerStream};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -73,6 +73,20 @@ impl SchedulerClient {
         !self.socket_path.as_os_str().is_empty()
     }
 
+    pub async fn list_streams(&self) -> Result<Vec<SchedulerStream>, SchedulerError> {
+        if !self.configured() {
+            return Err(SchedulerError::NotConfigured);
+        }
+        let (status, response_body) = self.request("GET", "/v1/streams", &[]).await?;
+        if !(200..300).contains(&status) {
+            return Err(SchedulerError::Scheduler {
+                status,
+                message: String::from_utf8_lossy(&response_body).into_owned(),
+            });
+        }
+        Ok(serde_json::from_slice(&response_body)?)
+    }
+
     pub async fn list_containers(
         &self,
         host_id: &str,
@@ -87,7 +101,7 @@ impl SchedulerClient {
             command: CommandPayload::ListContainers,
         };
         let body = serde_json::to_vec(&env)?;
-        let (status, response_body) = self.post_json("/v1/coold/dispatch", &body).await?;
+        let (status, response_body) = self.request("POST", "/v1/coold/dispatch", &body).await?;
         let text = String::from_utf8(response_body)
             .map_err(|e| SchedulerError::Malformed(e.to_string()))?;
         let response: ResponseEnvelope<Vec<ContainerSummary>> = serde_json::from_str(&text)?;
@@ -109,11 +123,16 @@ impl SchedulerClient {
         }
     }
 
-    async fn post_json(&self, path: &str, body: &[u8]) -> Result<(u16, Vec<u8>), SchedulerError> {
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), SchedulerError> {
         let fut = async {
             let mut stream = UnixStream::connect(&self.socket_path).await?;
             let req = format!(
-                "POST {path} HTTP/1.1\r\nHost: scheduler\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "{method} {path} HTTP/1.1\r\nHost: scheduler\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             stream.write_all(req.as_bytes()).await?;

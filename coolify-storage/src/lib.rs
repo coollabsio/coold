@@ -88,6 +88,7 @@ pub trait ServerRepository {
     async fn upsert_server(&self, server: &Server) -> Result<()>;
     async fn list_servers(&self) -> Result<Vec<Server>>;
     async fn get_server(&self, id: &ServerId) -> Result<Server>;
+    async fn get_server_by_host_id(&self, host_id: &str) -> Result<Option<Server>>;
 }
 #[async_trait]
 pub trait ClusterRepository {
@@ -126,6 +127,14 @@ impl ServerRepository for Store {
         row.map(row_server)
             .transpose()?
             .ok_or(StorageError::NotFound)
+    }
+
+    async fn get_server_by_host_id(&self, host_id: &str) -> Result<Option<Server>> {
+        let row = sqlx::query("SELECT * FROM servers WHERE host_id=?")
+            .bind(host_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(row_server).transpose()
     }
 }
 
@@ -319,6 +328,20 @@ mod tests {
         assert_eq!(stored.host_id.as_deref(), Some("host-a"));
         assert_eq!(stored.capabilities, vec!["coold", "builder"]);
         assert!(stored.last_seen_at.is_some());
+        assert_eq!(
+            store
+                .get_server_by_host_id("host-a")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            server.id
+        );
+        assert!(store
+            .get_server_by_host_id("missing")
+            .await
+            .unwrap()
+            .is_none());
         let cluster = Cluster::new("prod", "main cluster").unwrap();
         store.upsert_cluster(&cluster).await.unwrap();
         assert_eq!(store.list_clusters().await.unwrap().len(), 1);

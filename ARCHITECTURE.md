@@ -750,3 +750,14 @@ endpoint is `GET /api/v1/servers/:id/containers`, which dispatches
 `list_containers` through scheduler and maps host-offline responses to HTTP 404,
 timeouts to 504, missing `host_id` to 409, and malformed scheduler responses to
 502.
+
+
+### Scheduler stream sync
+
+Scheduler exposes a local UDS inventory endpoint at `GET /v1/streams`, returning
+connected host streams (`host_id`, capabilities, builder capacity). `coolify-web`
+proxies this as `GET /api/v1/scheduler/streams` and materializes it with
+`POST /api/v1/servers/sync-streams`. Sync creates or updates `servers` rows by
+`host_id`, persists capabilities and `last_seen_at`, marks them online, and
+appends an event. This is the first lightweight registration path; later it can
+become a background reconciler.

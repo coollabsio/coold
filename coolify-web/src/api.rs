@@ -2,10 +2,13 @@ use axum::{
     extract::{Path, State},
     http::{HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
-use coolify_core::{ContainerSummary, ServerId, ServerLiveStatus};
+use coolify_core::{
+    now, ContainerSummary, SchedulerStream, Server, ServerId, ServerLiveStatus, ServerStatus,
+    ServerSyncResult,
+};
 use coolify_storage::{
     BuildRepository, ClusterRepository, EventRepository, ServerRepository, StorageError,
 };
@@ -41,7 +44,9 @@ pub fn router(state: AppState) -> Router {
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/v1/status", get(status))
+        .route("/api/v1/scheduler/streams", get(scheduler_streams))
         .route("/api/v1/servers", get(servers))
+        .route("/api/v1/servers/sync-streams", post(sync_streams))
         .route("/api/v1/servers/:id/live-status", get(server_live_status))
         .route("/api/v1/servers/:id/containers", get(server_containers))
         .route("/api/v1/clusters", get(clusters))
@@ -87,6 +92,51 @@ async fn servers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<coolify_core::Server>>, ApiError> {
     Ok(Json(state.store.list_servers().await?))
+}
+
+async fn scheduler_streams(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<SchedulerStream>>, ApiError> {
+    Ok(Json(state.scheduler.list_streams().await?))
+}
+
+async fn sync_streams(State(state): State<AppState>) -> Result<Json<ServerSyncResult>, ApiError> {
+    let streams = state.scheduler.list_streams().await?;
+    let mut created = 0;
+    let mut updated = 0;
+    let mut server_ids = Vec::new();
+    for stream in streams {
+        let mut server = match state.store.get_server_by_host_id(&stream.host_id).await? {
+            Some(existing) => {
+                updated += 1;
+                existing
+            }
+            None => {
+                created += 1;
+                let mut s = Server::new(&stream.host_id, &stream.host_id)
+                    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                s.host_id = Some(stream.host_id.clone());
+                s
+            }
+        };
+        server.capabilities = stream.caps;
+        server.status = ServerStatus::Online;
+        server.last_seen_at = Some(now());
+        server.updated_at = now();
+        state.store.upsert_server(&server).await?;
+        server_ids.push(server.id);
+    }
+    let event = coolify_core::Event::info(
+        "scheduler.sync",
+        format!("synced scheduler streams: created={created} updated={updated}"),
+    )
+    .map_err(|e| ApiError::BadRequest(e.to_string()))?;
+    state.store.append_event(&event).await?;
+    Ok(Json(ServerSyncResult {
+        created,
+        updated,
+        server_ids,
+    }))
 }
 async fn clusters(
     State(state): State<AppState>,
@@ -294,6 +344,63 @@ mod tests {
             .await
             .unwrap();
         assert!(body_text(res).await.contains("node-a"));
+    }
+
+    #[tokio::test]
+    async fn scheduler_streams_proxy_returns_inventory() {
+        let path = mock_scheduler(
+            r#"[{"host_id":"host-a","caps":["builder","coold"],"builder_capacity":2}]"#,
+            200,
+        )
+        .await;
+        let (app, _) = app_with(path, 500, true).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/scheduler/streams")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        assert!(body_text(res).await.contains("host-a"));
+    }
+
+    #[tokio::test]
+    async fn sync_streams_creates_and_updates_servers() {
+        let path = mock_scheduler(
+            r#"[{"host_id":"host-new","caps":["coold","builder"],"builder_capacity":2}]"#,
+            200,
+        )
+        .await;
+        let (app, _) = app_with(path, 500, true).await;
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/servers/sync-streams")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), 200);
+        let text = body_text(res).await;
+        assert!(text.contains("created"));
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/servers")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let text = body_text(res).await;
+        assert!(text.contains("host-new"));
+        assert!(text.contains("online"));
     }
 
     #[tokio::test]

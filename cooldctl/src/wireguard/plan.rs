@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -8,7 +8,7 @@ use super::{
     firewall,
     intent::{filter_by_intent, validate_intent},
     state::{DesiredMesh, MeshState},
-    subnet::{Warning, allocate_mgmt_ips, allocate_namespaced, machine_ip},
+    subnet::{allocate_mgmt_ips, allocate_namespaced, machine_ip, Warning},
 };
 use crate::{meshnet::podman_network_for, services};
 
@@ -651,23 +651,18 @@ mod tests {
             .position(|a| *a == ActionType::InstallScheduler)
             .expect("central host should install scheduler");
         assert!(coolify_idx < scheduler_idx);
-        assert!(
-            !plan
-                .actions
-                .iter()
-                .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoolify)
-        );
-        assert!(
-            !plan
-                .actions
-                .iter()
-                .any(|a| a.host == "central" && a.action_type == ActionType::InstallCoold)
-        );
-        assert!(
-            plan.actions
-                .iter()
-                .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoold)
-        );
+        assert!(!plan
+            .actions
+            .iter()
+            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoolify));
+        assert!(!plan
+            .actions
+            .iter()
+            .any(|a| a.host == "central" && a.action_type == ActionType::InstallCoold));
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoold));
     }
 
     #[test]
@@ -827,11 +822,10 @@ mod tests {
             },
         );
         let plan = build_plan(&d, &current).unwrap();
-        assert!(
-            plan.actions.iter().any(|a| {
-                a.host == "central" && matches!(a.action_type, ActionType::WriteConfig)
-            })
-        );
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| { a.host == "central" && matches!(a.action_type, ActionType::WriteConfig) }));
         assert!(plan.actions.iter().any(|a| {
             a.host == "central" && matches!(a.action_type, ActionType::ReloadService)
         }));

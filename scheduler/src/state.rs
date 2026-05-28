@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use coolify_proto::agent::v1::ServerMsg;
 
-use crate::envelope::{BuildResponseBody, ResponseBody};
+use crate::envelope::{BuildResponseBody, ResponseBody, StreamInventoryItem};
 
 /// Connected coold host along with its advertised capability set and
 /// builder capacity. One entry per open gRPC stream; keyed by `host_id`
@@ -71,6 +71,25 @@ impl Streams {
             .find(|e| e.value().has_cap(cap))
             .map(|e| e.key().clone())
     }
+
+    pub fn snapshot(&self) -> Vec<StreamInventoryItem> {
+        let mut items = self
+            .0
+            .iter()
+            .map(|e| {
+                let mut caps = e.value().caps.clone();
+                caps.sort();
+                caps.dedup();
+                StreamInventoryItem {
+                    host_id: e.key().clone(),
+                    caps,
+                    builder_capacity: e.value().builder_capacity,
+                }
+            })
+            .collect::<Vec<_>>();
+        items.sort_by(|a, b| a.host_id.cmp(&b.host_id));
+        items
+    }
 }
 
 // ─── Pending dispatches ──────────────────────────────────────────────────────
@@ -110,10 +129,7 @@ enum PendingState {
     },
     /// Response arrived but no parker consumed it (yet). Evicted by the
     /// sweeper after `LANDED_TTL_SECS`.
-    Landed {
-        body: ResponseData,
-        until: Instant,
-    },
+    Landed { body: ResponseData, until: Instant },
 }
 
 pub struct PendingEntry {
@@ -324,7 +340,9 @@ mod tests {
             _ => panic!("expected Parked"),
         };
 
-        let body = ResponseBody::Ok { data: serde_json::json!({"k": "v"}) };
+        let body = ResponseBody::Ok {
+            data: serde_json::json!({"k": "v"}),
+        };
         p.deliver("r1", ResponseData::Coold(body));
 
         let got = rx.await.expect("sink delivered");
@@ -351,7 +369,10 @@ mod tests {
         );
 
         match p.park("r1") {
-            ParkResult::AlreadyLanded(ResponseData::Build(BuildResponseBody::Ok { digest, .. })) => {
+            ParkResult::AlreadyLanded(ResponseData::Build(BuildResponseBody::Ok {
+                digest,
+                ..
+            })) => {
                 assert_eq!(digest, "sha256:x");
             }
             _ => panic!("expected AlreadyLanded"),
@@ -384,7 +405,10 @@ mod tests {
         p.deliver("r1", body);
 
         let got = park_task.await.expect("task joined");
-        assert!(matches!(got, Some(ResponseData::Build(_))), "response dropped");
+        assert!(
+            matches!(got, Some(ResponseData::Build(_))),
+            "response dropped"
+        );
     }
 
     #[test]
@@ -419,5 +443,38 @@ mod tests {
         let snap = p.get("a").expect("entry present");
         assert_eq!(snap.host_id, "H");
         assert_eq!(snap.kind, PendingKind::Coold);
+    }
+}
+
+#[cfg(test)]
+mod stream_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_is_sorted_and_caps_are_stable() {
+        let streams = Streams::new();
+        let (tx, _rx) = mpsc::channel(1);
+        streams.insert(
+            "b".into(),
+            StreamHandle {
+                tx: tx.clone(),
+                caps: vec!["builder".into(), "coold".into(), "builder".into()],
+                builder_capacity: 2,
+            },
+        );
+        streams.insert(
+            "a".into(),
+            StreamHandle {
+                tx,
+                caps: vec!["coold".into()],
+                builder_capacity: 0,
+            },
+        );
+        let got = streams.snapshot();
+        assert_eq!(
+            got.iter().map(|s| s.host_id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(got[1].caps, vec!["builder", "coold"]);
     }
 }

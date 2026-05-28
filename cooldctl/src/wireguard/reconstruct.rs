@@ -3,7 +3,7 @@ use ipnet::Ipv4Net;
 use sha2::{Digest, Sha256};
 
 use super::state::{MeshState, NamespaceServerState, Peer, ServerState};
-use crate::ssh::{Runner, for_each_server};
+use crate::ssh::{for_each_server, Runner};
 
 pub async fn reconstruct<R: Runner>(
     runner: &R,

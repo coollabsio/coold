@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use serde::Serialize;
@@ -6,13 +6,13 @@ use std::collections::BTreeSet;
 
 use crate::{
     cli::OutputFormat,
-    meshnet::{MeshNetMultiFlags, validate_namespaces},
+    meshnet::{validate_namespaces, MeshNetMultiFlags},
     output,
     ssh::SshMeshFlags,
     wireguard::{
         apply,
         intent::Intent,
-        plan::{Plan, build_plan},
+        plan::{build_plan, Plan},
         reconstruct::reconstruct,
         state::DesiredMesh,
     },

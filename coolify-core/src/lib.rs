@@ -102,6 +102,20 @@ pub struct Server {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerStream {
+    pub host_id: String,
+    pub caps: Vec<String>,
+    pub builder_capacity: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerSyncResult {
+    pub created: u32,
+    pub updated: u32,
+    pub server_ids: Vec<ServerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerSummary {
     pub id: String,
     pub name: String,
