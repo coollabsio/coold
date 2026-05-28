@@ -60,7 +60,7 @@ async fn serve(config: Config) -> Result<()> {
     let state = AppState::new(store, config.clone());
     let app = api::router(state);
     let listener = TcpListener::bind(config.bind).await?;
-    tracing::info!(addr=%listener.local_addr()?, "coolify-web listening");
+    tracing::info!(addr=%listener.local_addr()?, "Coolify API listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

@@ -724,25 +724,25 @@ exit or by coold's `resume_or_reap` on next start).
 - Wire surface + transport: §3 and §4 here are the source of truth for `cooldctl` command behavior.
 
 
-## Coolify v5 Rust API + React UI
+## Coolify API + Coolify UI
 
-The central Coolify v5 application lives in `coolify-web`, not in `coold`.
-`coolify-web` is an Axum binary with an embedded React/Vite SPA. It uses
-`coolify-core` for pure domain types and `coolify-storage` for SQLite-backed
+The central Coolify v5 application lives in `api`, not in `coold`.
+`api` is an Axum binary with an embedded Coolify UI SPA. It uses
+`core` for pure domain types and `storage` for SQLite-backed
 repositories and migrations. The split keeps host-agent code (`coold`), stream
 routing (`scheduler`), cluster bootstrap (`cooldctl`), and the user-facing web
 application independently testable while still shipping from one Rust workspace.
 
 Initial operator-visible API routes are `/healthz`, `/api/v1/status`,
 `/api/v1/servers`, `/api/v1/servers/:id/live-status`, `/api/v1/servers/:id/containers`, `/api/v1/clusters`, `/api/v1/events`, and `/api/v1/builds`.
-The React UI reads those routes through TanStack Query and gives a basic
+The Coolify UI reads those routes through TanStack Query and gives a basic
 dashboard for seeing cluster/server/event state while the deeper control-plane
 flows are built.
 
 
-### coolify-web to coold request path
+### api to coold request path
 
-`coolify-web` does not open inbound connections to host agents. For live host
+`api` does not open inbound connections to host agents. For live host
 operations it calls scheduler's local Unix socket (`COOLIFY_SCHEDULER_SOCKET`,
 default `/run/coolify/scheduler.sock`). Scheduler routes the request down the
 existing coold-initiated gRPC stream keyed by `servers.host_id`. The first live
@@ -755,7 +755,7 @@ timeouts to 504, missing `host_id` to 409, and malformed scheduler responses to
 ### Scheduler stream sync
 
 Scheduler exposes a local UDS inventory endpoint at `GET /v1/streams`, returning
-connected host streams (`host_id`, capabilities, builder capacity). `coolify-web`
+connected host streams (`host_id`, capabilities, builder capacity). `api`
 proxies this as `GET /api/v1/scheduler/streams` and materializes it with
 `POST /api/v1/servers/sync-streams`. Sync creates or updates `servers` rows by
 `host_id`, persists capabilities and `last_seen_at`, marks them online, and

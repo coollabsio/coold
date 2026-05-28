@@ -12,17 +12,17 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let bind = std::env::var("COOLIFY_WEB_BIND")
+        let bind = std::env::var("COOLIFY_API_BIND")
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or_else(|| "127.0.0.1:3000".parse().unwrap());
-        let db_path = std::env::var("COOLIFY_WEB_DB")
+        let db_path = std::env::var("COOLIFY_API_DB")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("coolify-web.db"));
-        let auto_migrate = std::env::var("COOLIFY_WEB_AUTO_MIGRATE")
+            .unwrap_or_else(|_| PathBuf::from("api.db"));
+        let auto_migrate = std::env::var("COOLIFY_API_AUTO_MIGRATE")
             .map(|v| v != "0")
             .unwrap_or(true);
-        let public_https = std::env::var("COOLIFY_WEB_PUBLIC_HTTPS")
+        let public_https = std::env::var("COOLIFY_API_PUBLIC_HTTPS")
             .map(|v| v == "1" || v == "true")
             .unwrap_or(false);
         let scheduler_socket_path = std::env::var("COOLIFY_SCHEDULER_SOCKET")

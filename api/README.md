@@ -1,30 +1,32 @@
-# coolify-web
+# Coolify API
 
-`coolify-web` is the first Rust API + React UI shell for Coolify v5.
+Crate/package: `api`.
+
+`api` is the first Coolify API + Coolify UI shell for Coolify v5.
 
 It is intentionally separate from `coold`:
 
 - `coold` runs on every host and executes local primitives.
 - `scheduler` holds outbound streams from coold.
 - `cooldctl` bootstraps and extends clusters over SSH.
-- `coolify-web` is the central API/UI binary for operators and the future
+- `api` is the central API/UI binary for operators and the future
   Coolify v5 product surface.
 
 ## Commands
 
 ```bash
-coolify-web serve
-coolify-web healthcheck --url http://127.0.0.1:3000/healthz
-coolify-web db migrate
-coolify-web db info
+api serve
+api healthcheck --url http://127.0.0.1:3000/healthz
+api db migrate
+api db info
 ```
 
 Environment:
 
 ```bash
-COOLIFY_WEB_BIND=127.0.0.1:3000
-COOLIFY_WEB_DB=coolify-web.db
-COOLIFY_WEB_AUTO_MIGRATE=1
+COOLIFY_API_BIND=127.0.0.1:3000
+COOLIFY_API_DB=api.db
+COOLIFY_API_AUTO_MIGRATE=1
 COOLIFY_SCHEDULER_SOCKET=/run/coolify/scheduler.sock
 COOLIFY_SCHEDULER_TIMEOUT_MS=12000
 ```
@@ -32,7 +34,7 @@ COOLIFY_SCHEDULER_TIMEOUT_MS=12000
 Live host reads flow through scheduler, not directly to coold:
 
 ```txt
-React → coolify-web → scheduler UDS → coold gRPC stream → Podman
+Coolify UI → Coolify API → scheduler UDS → coold gRPC stream → Podman
 ```
 
 ## API
@@ -50,10 +52,10 @@ GET /api/v1/events
 GET /api/v1/builds
 ```
 
-## Frontend
+## Coolify UI
 
-The React frontend lives in `../frontend` and is embedded into the binary from
-`frontend/dist` using `rust-embed`.
+The Coolify UI lives in `../coolify-ui` and is embedded into the binary from
+`coolify-ui/dist` using `rust-embed`.
 
 Development:
 
@@ -64,7 +66,7 @@ bun run dev
 Backend-only iteration:
 
 ```bash
-SKIP_FRONTEND=1 rtk cargo run -p coolify-web -- serve
+SKIP_UI=1 rtk cargo run -p api -- serve
 ```
 
 
@@ -73,9 +75,25 @@ SKIP_FRONTEND=1 rtk cargo run -p coolify-web -- serve
 Connected agents become visible through this flow:
 
 ```txt
-coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → React Servers page → live container endpoint
+coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → Coolify UI Servers page → live container endpoint
 ```
 
 The sync endpoint creates or updates servers by scheduler `host_id`, stores
 capabilities, sets `last_seen_at`, marks the server online, and records an
 event.
+
+
+## One-command full-stack dev
+
+From the workspace root:
+
+```bash
+bun run dev
+```
+
+This starts scheduler, a fake coold agent, api, and the Coolify UI.
+Use env overrides when a port is busy:
+
+```bash
+COOLIFY_UI_PORT=5174 COOLIFY_API_BIND=127.0.0.1:3001 SCHEDULER_GRPC_BIND=127.0.0.1:6444 bun run dev
+```

@@ -87,7 +87,7 @@ jobs:
 
       - name: Package coolify
         run: |
-          cp target/${{ matrix.target }}/release/coolify-web dist/coolify
+          cp target/${{ matrix.target }}/release/api dist/coolify
           tar -czf dist/coolify-linux-${{ matrix.arch }}.tar.gz -C dist coolify
           rm dist/coolify
           (cd dist && sha256sum coolify-linux-${{ matrix.arch }}.tar.gz > coolify-linux-${{ matrix.arch }}.tar.gz.sha256)
@@ -128,7 +128,7 @@ jobs:
             echo "- \`coold\` — per-host agent (holds the single gRPC stream to scheduler; spawns builder subprocess per BuildRequest when COOLD_BUILDER_ENABLED=1)"
             echo "- \`scheduler\` — central-side gRPC stream scheduler (single listener on :6443; capability-aware routing)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
-            echo "- \`coolify\` — central Coolify UI/API binary built from \`coolify-web\`"
+            echo "- \`coolify\` — central Coolify UI/API binary built from \`api\`"
             echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"

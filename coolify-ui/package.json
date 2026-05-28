@@ -1,9 +1,9 @@
 {
-  "name": "coolify-v5-frontend",
+  "name": "coolify-ui",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort --clearScreen false --logLevel error",
+    "dev": "vite --host 127.0.0.1 --port ${COOLIFY_UI_PORT:-5173} --strictPort --clearScreen false --logLevel error",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit"
   },

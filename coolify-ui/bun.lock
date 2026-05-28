@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "coolify-v5-frontend",
+      "name": "coolify-ui",
       "dependencies": {
         "@tailwindcss/vite": "latest",
         "@tanstack/react-query": "latest",

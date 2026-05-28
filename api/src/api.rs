@@ -80,7 +80,7 @@ async fn healthz() -> &'static str {
 async fn status(State(state): State<AppState>) -> Json<StatusPayload> {
     Json(StatusPayload {
         ok: true,
-        app: "coolify-web",
+        app: "api",
         version: env!("CARGO_PKG_VERSION"),
         scheduler: SchedulerStatus {
             configured: state.scheduler.configured(),

@@ -11,7 +11,7 @@ name = "scheduler"
 path = "src/main.rs"
 
 [dependencies]
-coolify-proto = { path = "../proto" }
+proto = { path = "../proto" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

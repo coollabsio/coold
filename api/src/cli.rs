@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Parser)]
-#[command(author, version, about = "Coolify v5 Rust API + React web app")]
+#[command(author, version, about = "Coolify API for Coolify v5")]
 pub struct Cli {
     #[arg(long, global = true)]
     pub debug: bool,

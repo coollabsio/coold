@@ -1,7 +1,7 @@
 pub const COOLIFY_BINARY_PATH: &str = "/usr/local/bin/coolify";
 pub const COOLIFY_VERSION_PATH: &str = "/usr/local/bin/coolify.version";
 pub const COOLIFY_DB_PATH: &str = "/var/lib/coolify/coolify.db";
-pub const COOLIFY_WEB_BIND: &str = "0.0.0.0:3000";
+pub const COOLIFY_API_BIND: &str = "0.0.0.0:3000";
 
 pub fn release_url(version: &str) -> String {
     if version == "latest" {
@@ -38,7 +38,7 @@ echo '{version}' > {COOLIFY_VERSION_PATH}"#
 
 pub fn service_unit() -> String {
     format!(
-        "[Unit]\nDescription=Coolify UI/API\nAfter=network-online.target scheduler.service\nWants=network-online.target scheduler.service\n\n[Service]\nStateDirectory=coolify\nWorkingDirectory=/var/lib/coolify\nEnvironment=COOLIFY_WEB_BIND={COOLIFY_WEB_BIND}\nEnvironment=COOLIFY_WEB_DB={COOLIFY_DB_PATH}\nEnvironment=COOLIFY_SCHEDULER_SOCKET={}\nExecStart={COOLIFY_BINARY_PATH} serve\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Coolify UI/API\nAfter=network-online.target scheduler.service\nWants=network-online.target scheduler.service\n\n[Service]\nStateDirectory=coolify\nWorkingDirectory=/var/lib/coolify\nEnvironment=COOLIFY_API_BIND={COOLIFY_API_BIND}\nEnvironment=COOLIFY_API_DB={COOLIFY_DB_PATH}\nEnvironment=COOLIFY_SCHEDULER_SOCKET={}\nExecStart={COOLIFY_BINARY_PATH} serve\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n",
         crate::services::scheduler::SCHEDULER_UNIX_SOCKET_PATH
     )
 }

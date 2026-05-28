@@ -1,5 +1,5 @@
 [package]
-name = "coolify-web"
+name = "api"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,8 @@ build = "build.rs"
 anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
-coolify-core = { path = "../coolify-core" }
-coolify-storage = { path = "../coolify-storage" }
+core = { path = "../core" }
+storage = { path = "../storage" }
 mime_guess.workspace = true
 rust-embed.workspace = true
 serde.workspace = true

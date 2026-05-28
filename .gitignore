@@ -5,7 +5,10 @@ Cargo.lock.bak
 .env
 !.env.example
 
-# Coolify v5 web app local state
-coolify-web.db*
-frontend/node_modules/
-frontend/src/routeTree.gen.ts
+# Coolify v5 API/UI app local state
+coolify-api.db*
+coolify-ui/node_modules/
+coolify-ui/src/routeTree.gen.ts
+
+# Local one-command dev stack state
+.dev/

@@ -49,22 +49,22 @@ builder/        One-shot OCI build CLI, spawned by coold per build.
 builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
 cooldctl/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
                 Does not include v4 Coolify API/context/project commands.
-coolify-core/  Pure Coolify v5 domain model: servers, clusters, builds, events.
-coolify-storage/ SQLite storage traits/repositories + embedded migrations.
-coolify-web/   Axum API + embedded React frontend binary for the Coolify v5 UI.
-frontend/      React 19 + Vite + TanStack Router/Query + Tailwind/shadcn baseline.
+core/  Pure Coolify v5 domain model: servers, clusters, builds, events.
+storage/ SQLite storage traits/repositories + embedded migrations.
+api/   Coolify API Axum server + embedded Coolify UI binary for the Coolify v5 UI.
+coolify-ui/      React 19 + Vite + TanStack Router/Query + Tailwind/shadcn baseline.
 e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
                 default workspace build.
 ```
 
 ---
 
-## coolify-web — basic Coolify v5 API + React UI
+## Coolify API + Coolify UI
 
-`coolify-web` is the initial Rust web/API shell for Coolify v5. It follows the
+`api` is the initial Rust API/UI shell for Coolify v5. It follows the
 Rust + React single-binary architecture: Axum owns `/api/...`, serves an
 embedded Vite React SPA for browser routes, and persists local state in SQLite
-through `coolify-storage`.
+through `storage`.
 
 Current API surface:
 
@@ -84,19 +84,30 @@ GET /api/v1/builds
 Run locally:
 
 ```bash
-SKIP_FRONTEND=1 rtk cargo run -p coolify-web -- serve
+SKIP_UI=1 rtk cargo run -p api -- serve
 ```
 
-Frontend development:
+Coolify UI development (one command starts scheduler, fake coold, api, and Vite):
 
 ```bash
 bun run dev
 ```
 
-The web app is intentionally separate from `coold`: `coold` remains the
-per-host agent, `scheduler` remains the stream router, and `coolify-web` becomes
+Useful overrides:
+
+```bash
+COOLIFY_UI_PORT=5174 \
+COOLIFY_API_BIND=127.0.0.1:3001 \
+SCHEDULER_GRPC_BIND=127.0.0.1:6444 \
+bun run dev
+```
+
+Then open Servers → Sync scheduler streams → open `host-local`.
+
+The Coolify API/UI stack is intentionally separate from `coold`: `coold` remains the
+per-host agent, `scheduler` remains the stream router, and `api` becomes
 the central Coolify v5 API/UI binary. Live host reads use the flow
-React → coolify-web → scheduler UDS → coold outbound gRPC stream → Podman.
+Coolify UI → Coolify API → scheduler UDS → coold outbound gRPC stream → Podman.
 
 ---
 
@@ -437,7 +448,7 @@ Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_BIN`, optional loca
 Connected agents become visible through this flow:
 
 ```txt
-coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → React Servers page → live container endpoint
+coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → Coolify UI Servers page → live container endpoint
 ```
 
 The sync endpoint creates or updates servers by scheduler `host_id`, stores

@@ -7,7 +7,7 @@ description = "Per-host Coolify v5 agent: syncs Podman container state to Corros
 license.workspace = true
 
 [dependencies]
-coolify-proto = { path = "../proto" }
+proto = { path = "../proto" }
 tokio = { workspace = true }
 hyper = { version = "1.4", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }

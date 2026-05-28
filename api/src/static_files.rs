@@ -6,7 +6,7 @@ use axum::{
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
-#[folder = "../frontend/dist"]
+#[folder = "../coolify-ui/dist"]
 struct Assets;
 
 pub async fn serve(Path(path): Path<String>) -> Response<Body> {
