@@ -44,7 +44,7 @@ pub struct BaseInitFlags {
     pub skip_default_deny: bool,
     #[arg(long, default_value = "nightly")]
     pub coold_version: String,
-    #[arg(long, default_value = "nightly")]
+    #[arg(long, default_value = "v1.0.0")]
     pub corrosion_version: String,
     #[arg(long, default_value_t = 8787)]
     pub corrosion_gossip_port: u16,

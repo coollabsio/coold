@@ -27,7 +27,7 @@ case "$ARCH_RAW" in
   aarch64) ARCH=aarch64-unknown-linux-gnu ;;
   *) echo "unsupported arch: $ARCH_RAW" >&2; exit 1 ;;
 esac
-URL="https://github.com/coollabsio/corrosion/releases/download/{version}/corrosion-${{ARCH}}.tar.gz"
+URL="https://github.com/superfly/corrosion/releases/download/{version}/corrosion-${{ARCH}}.tar.gz"
 DLDIR=$(mktemp -d)
 trap 'rm -rf "$DLDIR"' EXIT
 curl -fsSL --retry 3 --max-time 120 -o "$DLDIR/corrosion.tar.gz" "$URL"
@@ -52,13 +52,13 @@ mod tests {
 
     #[test]
     fn install_command_substitutes_version_and_arch() {
-        for version in ["nightly", "v1.2.3"] {
+        for version in ["v1.0.0", "v1.2.3"] {
             let cmd = install_command(version);
             assert!(cmd.contains(version));
-            assert!(cmd.contains(&format!("coollabsio/corrosion/releases/download/{version}")));
+            assert!(cmd.contains(&format!("superfly/corrosion/releases/download/{version}")));
             assert!(cmd.contains("/usr/local/bin/corrosion.version"));
         }
-        let cmd = install_command("nightly");
+        let cmd = install_command("v1.0.0");
         for want in [
             "x86_64)  ARCH=x86_64-unknown-linux-gnu",
             "aarch64) ARCH=aarch64-unknown-linux-gnu",
