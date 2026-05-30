@@ -96,8 +96,11 @@ pub struct Server {
     pub coold_version: Option<String>,
     pub host_id: Option<String>,
     pub capabilities: Vec<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
     pub last_seen_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -138,7 +141,9 @@ pub struct Cluster {
     pub id: ClusterId,
     pub name: String,
     pub description: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -148,7 +153,9 @@ pub struct App {
     pub name: String,
     pub cluster_id: ClusterId,
     pub git_url: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -160,7 +167,9 @@ pub struct Build {
     pub status: BuildStatus,
     pub image_ref: Option<String>,
     pub message: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -170,7 +179,9 @@ pub struct Deployment {
     pub app_id: AppId,
     pub build_id: Option<BuildId>,
     pub status: DeploymentStatus,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -190,6 +201,7 @@ pub struct Event {
     pub severity: EventSeverity,
     pub subject: String,
     pub message: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 
@@ -283,5 +295,29 @@ mod tests {
     fn ids_are_uuid_v7_strings() {
         let id = ServerId::new().to_string();
         assert_eq!(id.len(), 36);
+    }
+    #[test]
+    fn serializes_server_timestamps_as_rfc3339_strings() {
+        let mut server = Server::new("node-a", "203.0.113.10").unwrap();
+        server.last_seen_at = Some(now());
+
+        let json = serde_json::to_value(&server).unwrap();
+
+        assert!(
+            json["created_at"].as_str().is_some(),
+            "created_at must be a JSON string"
+        );
+        assert!(
+            json["updated_at"].as_str().is_some(),
+            "updated_at must be a JSON string"
+        );
+        assert!(
+            json["last_seen_at"].as_str().is_some(),
+            "last_seen_at must be a JSON string when present"
+        );
+
+        server.last_seen_at = None;
+        let json = serde_json::to_value(&server).unwrap();
+        assert!(json["last_seen_at"].is_null());
     }
 }
