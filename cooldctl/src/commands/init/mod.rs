@@ -55,8 +55,6 @@ pub struct BaseInitFlags {
     #[arg(long, default_value = "")]
     pub central: String,
     #[arg(long, default_value = "nightly")]
-    pub coolify_version: String,
-    #[arg(long, default_value = "nightly")]
     pub scheduler_version: String,
     #[arg(long, default_value_t = true)]
     pub enable_builder: bool,
@@ -329,7 +327,6 @@ fn build_desired(
         corrosion_gossip_port: base.corrosion_gossip_port,
         corrosion_api_port: base.corrosion_api_port,
         central_host: base.central.clone(),
-        coolify_version: base.coolify_version.clone(),
         scheduler_version: base.scheduler_version.clone(),
         enable_builder: base.enable_builder,
         builder_hosts: base.builder_hosts.clone(),

@@ -49,65 +49,72 @@ builder/        One-shot OCI build CLI, spawned by coold per build.
 builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
 cooldctl/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
                 Does not include v4 Coolify API/context/project commands.
-core/  Pure Coolify v5 domain model: servers, clusters, builds, events.
-storage/ SQLite storage traits/repositories + embedded migrations.
-api/   Coolify API Axum server + embedded Coolify UI binary for the Coolify v5 UI.
-coolify-ui/      React 19 + Vite + TanStack Router/Query + Tailwind/shadcn baseline.
 e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
                 default workspace build.
 ```
 
+The central control plane (the "brain") is a separate Laravel app, not in
+this workspace. It owns app-aware logic and persistent state, and talks to
+`scheduler` directly over the scheduler's Unix-socket HTTP/JSON lane.
+
 ---
 
-## Coolify API + Coolify UI
+## Control plane (Laravel)
 
-`api` is the initial Rust API/UI shell for Coolify v5. It follows the
-Rust + React single-binary architecture: Axum owns `/api/...`, serves an
-embedded Vite React SPA for browser routes, and persists local state in SQLite
-through `storage`.
+The Coolify v5 brain is a separate Laravel app. It talks to `scheduler` over
+the scheduler's Unix-socket HTTP/JSON lane (default `/run/coolify/scheduler.sock`)
+— no Rust API binary sits between them. Grant the Laravel/php-fpm group access
+to the socket via `SCHEDULER_UNIX_SOCKET_GROUP`.
 
-Current API surface:
+Scheduler UDS surface (consumed by Laravel):
 
 ```http
-GET /healthz
-GET /api/v1/status
-GET /api/v1/scheduler/streams
-GET /api/v1/servers
-GET /api/v1/servers/:id/live-status
-GET /api/v1/servers/:id/containers
-POST /api/v1/servers/sync-streams
-GET /api/v1/clusters
-GET /api/v1/events
-GET /api/v1/builds
+GET  /v1/health
+GET  /v1/streams                  connected coold agents
+POST /v1/coold/dispatch           e.g. list_containers
+POST /v1/build/dispatch
+GET  /v1/build/result/:request_id
+POST /v1/build/:request_id/cancel
 ```
 
-Run locally:
+Live host reads flow: Laravel → scheduler UDS → coold outbound gRPC stream → Podman.
 
-```bash
-SKIP_UI=1 rtk cargo run -p api -- serve
-```
+### Local development
 
-Coolify UI development (one command starts scheduler, fake coold, api, and Vite):
+One command starts scheduler + a fake coold; point your Laravel app at the
+printed scheduler socket:
 
 ```bash
 bun run dev
 ```
 
-Useful overrides:
+Full-fidelity Lima VM development (Podman, Corrosion, scheduler, real coold all run inside an isolated Linux VM):
 
 ```bash
-COOLIFY_UI_PORT=5174 \
-COOLIFY_API_BIND=127.0.0.1:3001 \
+bun run dev:vm:up   # create/start the VM
+bun run dev:vm      # run the real-coold dev stack in the VM
+```
+
+The Lima VM keeps runtime state inside Linux (`/run/podman`, `/var/lib/corrosion`, `/etc/coolify`, iptables/nft, DNS binds). The repo is mounted read/write at `/workspace/coold`, so source edits still affect your checkout. Useful VM commands:
+
+```bash
+bun run dev:vm:shell
+bun run dev:vm:stop
+bun run dev:vm:delete
+```
+
+To run the real stack from inside the VM shell directly:
+
+```bash
+REAL_COOLD=1 bun run dev
+```
+
+Useful override:
+
+```bash
 SCHEDULER_GRPC_BIND=127.0.0.1:6444 \
 bun run dev
 ```
-
-Then open Servers → Sync scheduler streams → open `host-local`.
-
-The Coolify API/UI stack is intentionally separate from `coold`: `coold` remains the
-per-host agent, `scheduler` remains the stream router, and `api` becomes
-the central Coolify v5 API/UI binary. Live host reads use the flow
-Coolify UI → Coolify API → scheduler UDS → coold outbound gRPC stream → Podman.
 
 ---
 
@@ -124,7 +131,7 @@ Current command surface:
 cooldctl init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
 cooldctl init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
 cooldctl init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
-cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --coolify-version latest
+cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --scheduler-version latest
 
 cooldctl firewall containers --nodes IP1,IP2 --ssh-key KEY
 cooldctl firewall list --nodes IP1,IP2 --ssh-key KEY
@@ -132,7 +139,7 @@ cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ss
 cooldctl firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
 ```
 
-The CLI shares the v5 mesh model: bootstrap over SSH, central Coolify UI/API
+The CLI shares the v5 mesh model: bootstrap over SSH, central `scheduler`
 installation on `--central`, deployment nodes via `--nodes`, and day-to-day
 firewall mutation through coold's wg0-local REST API via SSH bounce. The central
 host joins WireGuard for private scheduler/coold streams but only runs
@@ -448,7 +455,7 @@ Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_BIN`, optional loca
 Connected agents become visible through this flow:
 
 ```txt
-coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → Coolify UI Servers page → live container endpoint
+coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → live container endpoint
 ```
 
 The sync endpoint creates or updates servers by scheduler `host_id`, stores

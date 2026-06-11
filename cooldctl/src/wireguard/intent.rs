@@ -46,12 +46,11 @@ fn categorize(a: &PlannedAction) -> Category {
         | WriteCorrosionConfig
         | InstallCorrosionService
         | InstallCooldService
-        | InstallCoolifyService
         | InstallSchedulerService
         | WriteHostJwt
         | UpdateCooldSchedulerEnv => Category::PeerRefresh,
         RecreatePodmanNetwork => Category::DestructiveReplace,
-        InstallCorrosion | InstallCoold | InstallCoolify | InstallScheduler | InstallBuilder => {
+        InstallCorrosion | InstallCoold | InstallScheduler | InstallBuilder => {
             Category::VersionBump
         }
         WriteCorrosionSchema if a.detail.contains("DB will be reset") => Category::WipeDb,
@@ -81,7 +80,6 @@ pub fn validate_intent(d: &DesiredMesh) -> Result<()> {
                     versions.push(("--corrosion-version", &d.corrosion_version));
                 }
                 if !d.central_host.is_empty() {
-                    versions.push(("--coolify-version", &d.coolify_version));
                     versions.push(("--scheduler-version", &d.scheduler_version));
                 }
                 for (flag, v) in versions {
@@ -128,7 +126,7 @@ fn decide(a: &PlannedAction, d: &DesiredMesh, new_nodes: &BTreeSet<String>) -> O
         },
         Intent::Upgrade => match categorize(a) {
             Category::VersionBump => None,
-            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService|ActionType::InstallCoolifyService|ActionType::InstallSchedulerService) => None,
+            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService|ActionType::InstallSchedulerService) => None,
             Category::PeerRefresh => Some("upgrade: peer-refresh skipped; use `cooldctl init extend` for mesh topology changes".into()),
             _ => Some("upgrade: non-version-bump action skipped".into()),
         }
@@ -160,7 +158,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: String::new(),
-            coolify_version: "v1".into(),
             scheduler_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
@@ -227,12 +224,6 @@ mod tests {
                 let mut d = desired(Intent::Upgrade);
                 d.central_host = "A".into();
                 d.scheduler_version = "nightly".into();
-                d
-            }),
-            ("coolify", {
-                let mut d = desired(Intent::Upgrade);
-                d.central_host = "A".into();
-                d.coolify_version = "nightly".into();
                 d
             }),
         ] {

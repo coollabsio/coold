@@ -40,8 +40,6 @@ pub enum ActionType {
     InstallScheduler,
     GenerateJwtKeypair,
     InstallSchedulerService,
-    InstallCoolify,
-    InstallCoolifyService,
     WriteHostJwt,
     UpdateCooldSchedulerEnv,
     InstallBuilder,
@@ -404,29 +402,6 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
         }
     }
     if !desired.central_host.is_empty() {
-        let central_state = current
-            .servers
-            .get(&desired.central_host)
-            .cloned()
-            .unwrap_or_default();
-        let coolify_drift = binary_version_drift(
-            &desired.coolify_version,
-            central_state.coolify_installed,
-            &central_state.coolify_version,
-        );
-        if coolify_drift {
-            push(
-                &mut plan,
-                &desired.central_host,
-                "",
-                ActionType::InstallCoolify,
-                &format!(
-                    "coolify {} → {}",
-                    desired.coolify_version,
-                    services::coolify::COOLIFY_BINARY_PATH
-                ),
-            );
-        }
         push(
             &mut plan,
             &desired.central_host,
@@ -454,18 +429,6 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                 services::scheduler::SCHEDULER_GRPC_PORT
             ),
         );
-        let coolify_unit = services::coolify::service_unit();
-        let coolify_unit_drift =
-            central_state.coolify_unit_sha256 != sha256_hex(coolify_unit.as_bytes());
-        if !central_state.coolify_active || coolify_drift || coolify_unit_drift {
-            push(
-                &mut plan,
-                &desired.central_host,
-                "",
-                ActionType::InstallCoolifyService,
-                "systemctl enable --now coolify",
-            );
-        }
         for host in &desired.nodes {
             push(
                 &mut plan,
@@ -545,7 +508,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "".into(),
-            coolify_version: "nightly".into(),
             scheduler_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
@@ -587,7 +549,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            coolify_version: "v1".into(),
             scheduler_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
@@ -604,7 +565,7 @@ mod tests {
     }
 
     #[test]
-    fn central_host_installs_coolify_ui_api_before_scheduler() {
+    fn central_host_installs_scheduler_not_coold() {
         let d = DesiredMesh {
             hosts: vec!["central".into(), "worker".into()],
             nodes: vec!["worker".into()],
@@ -622,7 +583,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            coolify_version: "nightly".into(),
             scheduler_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],
@@ -636,25 +596,14 @@ mod tests {
             allow_nightly: false,
         };
         let plan = build_plan(&d, &MeshState::default()).unwrap();
-        let central_actions = plan
+        assert!(plan
             .actions
             .iter()
-            .filter(|a| a.host == "central")
-            .map(|a| a.action_type)
-            .collect::<Vec<_>>();
-        let coolify_idx = central_actions
-            .iter()
-            .position(|a| *a == ActionType::InstallCoolify)
-            .expect("central host should install coolify");
-        let scheduler_idx = central_actions
-            .iter()
-            .position(|a| *a == ActionType::InstallScheduler)
-            .expect("central host should install scheduler");
-        assert!(coolify_idx < scheduler_idx);
+            .any(|a| a.host == "central" && a.action_type == ActionType::InstallScheduler));
         assert!(!plan
             .actions
             .iter()
-            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoolify));
+            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallScheduler));
         assert!(!plan
             .actions
             .iter()
@@ -684,7 +633,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "one".into(),
-            coolify_version: "nightly".into(),
             scheduler_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],
@@ -699,7 +647,6 @@ mod tests {
         };
         let plan = build_plan(&d, &MeshState::default()).unwrap();
         for action in [
-            ActionType::InstallCoolify,
             ActionType::InstallScheduler,
             ActionType::InstallCoold,
             ActionType::InstallPodman,
@@ -732,7 +679,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            coolify_version: "nightly".into(),
             scheduler_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
@@ -748,7 +694,6 @@ mod tests {
         let plan = build_plan(&d, &MeshState::default()).unwrap();
         for action in [
             ActionType::InstallWg,
-            ActionType::InstallCoolify,
             ActionType::InstallScheduler,
         ] {
             assert!(
@@ -795,7 +740,6 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            coolify_version: "v1".into(),
             scheduler_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],

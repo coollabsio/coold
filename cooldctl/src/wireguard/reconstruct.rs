@@ -63,13 +63,9 @@ printf 'CORROSION_SCHEMA_EXISTS='; test -s /etc/corrosion/schemas/coolify.sql &&
 printf 'CORROSION_SCHEMA_HASH='; sha256sum /etc/corrosion/schemas/coolify.sql 2>/dev/null | awk '{{print $1}}'; echo
 printf 'COOLD_INSTALLED='; test -x /usr/local/bin/coold && echo 1 || echo 0
 printf 'COOLD_ACTIVE='; systemctl is-active --quiet coold && echo 1 || echo 0
-printf 'COOLIFY_INSTALLED='; test -x /usr/local/bin/coolify && echo 1 || echo 0
-printf 'COOLIFY_ACTIVE='; systemctl is-active --quiet coolify && echo 1 || echo 0
 printf 'CORROSION_VERSION='; cat /usr/local/bin/corrosion.version 2>/dev/null || true; echo
 printf 'COOLD_VERSION='; cat /usr/local/bin/coold.version 2>/dev/null || true; echo
-printf 'COOLIFY_VERSION='; cat /usr/local/bin/coolify.version 2>/dev/null || true; echo
 printf 'COOLD_UNIT_HASH='; sha256sum /etc/systemd/system/coold.service 2>/dev/null | awk '{{print $1}}'; echo
-printf 'COOLIFY_UNIT_HASH='; sha256sum /etc/systemd/system/coolify.service 2>/dev/null | awk '{{print $1}}'; echo
 for ns in {nslist}; do net="coolify-${{ns}}-mesh"; printf 'NS=%s|' "$ns"; podman network inspect "$net" --format '{{{{.Name}}}}|{{{{range .Subnets}}}}{{{{.Subnet}}}}{{{{end}}}}|{{{{.DNSEnabled}}}}|{{{{index .Labels "io.coolify.namespace"}}}}' 2>/dev/null || echo 'missing|||'; done
 "#,
         nslist = namespaces.join(" ")
@@ -111,13 +107,9 @@ fn parse_probe(host: &str, iface: &str, namespaces: &[String], text: &str) -> Se
             "CORROSION_SCHEMA_HASH" => s.corrosion_schema_sha256 = v.trim().into(),
             "COOLD_INSTALLED" => s.coold_installed = v.trim() == "1",
             "COOLD_ACTIVE" => s.coold_active = v.trim() == "1",
-            "COOLIFY_INSTALLED" => s.coolify_installed = v.trim() == "1",
-            "COOLIFY_ACTIVE" => s.coolify_active = v.trim() == "1",
             "CORROSION_VERSION" => s.corrosion_version = v.trim().into(),
             "COOLD_VERSION" => s.coold_version = v.trim().into(),
-            "COOLIFY_VERSION" => s.coolify_version = v.trim().into(),
             "COOLD_UNIT_HASH" => s.coold_unit_sha256 = v.trim().into(),
-            "COOLIFY_UNIT_HASH" => s.coolify_unit_sha256 = v.trim().into(),
             _ => {}
         }
     }

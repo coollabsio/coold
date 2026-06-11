@@ -2,8 +2,7 @@
 
 `cooldctl` is the Rust CLI for **Coolify v5 cluster operations** that live with
 `coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion/scheduler
-installation, central Coolify UI/API installation, builder capability setup, and
-SSH-bounced firewall control.
+installation, builder capability setup, and SSH-bounced firewall control.
 
 It intentionally does **not** migrate Coolify v4 CLI features such as contexts,
 projects, resources, deployments, private keys, or v4 API helpers. The binary is
@@ -52,7 +51,7 @@ Most commands need SSH access to every target node. `init` also accepts a
 separate `--central` control-plane host:
 
 ```bash
---central IP             Coolify UI/API + scheduler host.
+--central IP             Scheduler (control-plane) host.
 --nodes IP1,IP2          Comma-separated deployment node list.
 --ssh-key ~/.ssh/key      SSH private key.
 --ssh-user root           Defaults to root.
@@ -121,19 +120,17 @@ Useful version pins:
 ```bash
 --coold-version vX.Y.Z
 --corrosion-version vX.Y.Z
---coolify-version nightly|latest|vX.Y.Z
---scheduler-version vX.Y.Z
+--scheduler-version nightly|latest|vX.Y.Z
 ```
 
-`nightly` is the default for bootstrap, including the central Coolify UI/API
-package. `init upgrade` rejects `nightly`
+`nightly` is the default for bootstrap. `init upgrade` rejects `nightly`
 unless `--allow-nightly` is passed because a moving target would reinstall on
 every run.
 
-When `--central` is set, `cooldctl` installs the Coolify UI/API binary on that
-central host from the `coolify-linux-$ARCH.tar.gz` GitHub release asset, writes
-`/etc/systemd/system/coolify.service`, and enables `coolify.service`. Use
-`--coolify-version latest` to consume the latest stable release asset, or pin a
+When `--central` is set, `cooldctl` installs `scheduler` on that central host,
+writes `/etc/systemd/system/scheduler.service`, and enables it. The Laravel
+control plane runs separately and talks to scheduler over its Unix socket. Use
+`--scheduler-version latest` to consume the latest stable release asset, or pin a
 specific tag such as `v0.2.0`.
 
 The central host always joins the WireGuard management mesh so scheduler ↔ coold

@@ -4,7 +4,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-command -v bun >/dev/null 2>&1 || { echo "bun is required for Coolify UI dev." >&2; exit 1; }
+if [[ "${REAL_COOLD:-0}" == "1" ]]; then
+  exec bash scripts/dev-real.sh
+fi
+
 command -v cargo >/dev/null 2>&1 || { echo "cargo is required for Rust dev." >&2; exit 1; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl is required for local scheduler JWT generation." >&2; exit 1; }
 command -v perl >/dev/null 2>&1 || { echo "perl is required for process-group management." >&2; exit 1; }
@@ -13,9 +16,6 @@ cargo watch --version >/dev/null 2>&1 || { echo "cargo-watch is required. Instal
 DEV_DIR="$ROOT/.dev"
 SCHEDULER_GRPC_BIND="${SCHEDULER_GRPC_BIND:-127.0.0.1:6443}"
 SCHEDULER_UNIX_SOCKET_PATH="${SCHEDULER_UNIX_SOCKET_PATH:-/tmp/coolify-scheduler.sock}"
-COOLIFY_API_BIND="${COOLIFY_API_BIND:-127.0.0.1:3000}"
-COOLIFY_UI_PORT="${COOLIFY_UI_PORT:-5173}"
-COOLIFY_API_DB="${COOLIFY_API_DB:-/tmp/api-dev.db}"
 FAKE_COOLD_HOST_ID="${FAKE_COOLD_HOST_ID:-host-local}"
 FAKE_COOLD_CAPS="${FAKE_COOLD_CAPS:-coold,builder}"
 JWT_PRIV="$DEV_DIR/dev-jwt.priv.pem"
@@ -79,13 +79,6 @@ preflight_port_free() {
   fi
 }
 
-preflight_ui_port_free() {
-  if is_tcp_open "127.0.0.1" "$COOLIFY_UI_PORT"; then
-    log_line dev ERROR "Coolify UI port is already in use at 127.0.0.1:$COOLIFY_UI_PORT." >&2
-    log_line dev ERROR "Stop the existing process or override it, e.g.: COOLIFY_UI_PORT=5174 bash scripts/dev.sh" >&2
-    exit 1
-  fi
-}
 
 is_pid_alive() {
   kill -0 "$1" 2>/dev/null
@@ -188,8 +181,6 @@ mkdir -p "$DEV_DIR"
 rm -f "$SCHEDULER_UNIX_SOCKET_PATH"
 
 preflight_port_free "$SCHEDULER_GRPC_BIND" "scheduler gRPC" "SCHEDULER_GRPC_BIND=127.0.0.1:6444"
-preflight_port_free "$COOLIFY_API_BIND" "Coolify API" "COOLIFY_API_BIND=127.0.0.1:3001"
-preflight_ui_port_free
 
 log_line dev INFO "Generating local dev JWT for fake coold…"
 JWT_TMP="$DEV_DIR/dev-jwt.$$"
@@ -206,26 +197,20 @@ mv "$JWT_TMP_PRIV.pkcs8" "$JWT_PRIV.pkcs8"
 mv "$JWT_TMP_PUB" "$JWT_PUB"
 
 log_line dev INFO "Coolify v5 dev stack"
-log_line dev INFO "Coolify UI: http://127.0.0.1:$COOLIFY_UI_PORT"
-log_line dev INFO "Coolify API: http://$COOLIFY_API_BIND"
 log_line dev INFO "scheduler: grpc://$SCHEDULER_GRPC_BIND + unix://$SCHEDULER_UNIX_SOCKET_PATH"
 log_line dev INFO "fake coold: host_id=$FAKE_COOLD_HOST_ID caps=$FAKE_COOLD_CAPS"
 
-export ROOT JWT JWT_PUB SCHEDULER_GRPC_BIND SCHEDULER_UNIX_SOCKET_PATH COOLIFY_API_BIND COOLIFY_API_DB COOLIFY_UI_PORT
+export ROOT JWT JWT_PUB SCHEDULER_GRPC_BIND SCHEDULER_UNIX_SOCKET_PATH
 
 start_service "scheduler" 'exec env SCHEDULER_GRPC_BIND="$SCHEDULER_GRPC_BIND" SCHEDULER_UNIX_SOCKET_PATH="$SCHEDULER_UNIX_SOCKET_PATH" SCHEDULER_JWT_PUBLIC_KEY_PATH="$JWT_PUB" SCHEDULER_ALLOW_PUBLIC_BIND=1 rtk cargo watch -w scheduler -w proto -w Cargo.toml -w Cargo.lock -i target -x "run -p scheduler"'
 wait_for_tcp "$(host_part "$SCHEDULER_GRPC_BIND")" "$(port_part "$SCHEDULER_GRPC_BIND")" "scheduler gRPC"
 wait_for_socket "$SCHEDULER_UNIX_SOCKET_PATH" "scheduler UDS"
 
 start_service "fake coold" 'while true; do env SCHEDULER_URL="http://$SCHEDULER_GRPC_BIND" JWT="$JWT" rtk cargo run -p scheduler --example fake_coold || true; sleep 1; done'
-start_service "api" 'exec env SKIP_UI=1 COOLIFY_API_BIND="$COOLIFY_API_BIND" COOLIFY_API_DB="$COOLIFY_API_DB" COOLIFY_SCHEDULER_SOCKET="$SCHEDULER_UNIX_SOCKET_PATH" rtk cargo watch -w core -w storage -w api -w migrations -w Cargo.toml -w Cargo.lock -i target -x "run -p api -- serve"'
-start_service "ui" 'cd "$ROOT/coolify-ui" && exec env COOLIFY_UI_PORT="$COOLIFY_UI_PORT" bun run dev'
 
-wait_for_tcp "$(host_part "$COOLIFY_API_BIND")" "$(port_part "$COOLIFY_API_BIND")" "api"
 check_children
 
-log_line dev INFO "Dev stack is up. Open http://127.0.0.1:$COOLIFY_UI_PORT"
-log_line dev INFO "Tip: Servers → Sync scheduler streams → open host-local."
+log_line dev INFO "scheduler UDS ready at $SCHEDULER_UNIX_SOCKET_PATH — point your Laravel control plane here."
 
 while true; do
   check_children

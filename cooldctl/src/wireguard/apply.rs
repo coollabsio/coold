@@ -616,19 +616,6 @@ async fn phase4<R: Runner>(
     planned: &Plan,
 ) -> Result<Vec<ActionResult>> {
     let mut out = vec![];
-    if should_run(planned, host, ActionType::InstallCoolify, "") {
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallCoolify,
-            "",
-            services::coolify::install_command(&desired.coolify_version),
-        )
-        .await?;
-    }
     if should_run(planned, host, ActionType::InstallScheduler, "") {
         step(
             runner,
@@ -672,26 +659,6 @@ async fn phase4<R: Runner>(
             format!(
                 "{} && systemctl daemon-reload && systemctl enable --now scheduler",
                 heredoc("/etc/systemd/system/scheduler.service", &unit, "0644")
-            ),
-        )
-        .await?;
-    }
-    if should_run(planned, host, ActionType::InstallCoolifyService, "") {
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallCoolifyService,
-            "",
-            format!(
-                "{} && systemctl daemon-reload && systemctl enable --now coolify",
-                heredoc(
-                    "/etc/systemd/system/coolify.service",
-                    &services::coolify::service_unit(),
-                    "0644"
-                )
             ),
         )
         .await?;

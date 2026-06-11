@@ -1,0 +1,86 @@
+# Lima VM for full-fidelity Coolify v5/coold development.
+# Start with: scripts/dev-vm.sh up
+# Run stack:  scripts/dev-vm.sh dev
+
+vmType: "vz"
+arch: "default"
+cpus: 4
+memory: "8GiB"
+disk: "100GiB"
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-arm64.img"
+    arch: "aarch64"
+
+
+mountType: "virtiofs"
+mounts:
+  - location: "{{.Dir}}/../.."
+    mountPoint: "/workspace/coold"
+    writable: true
+
+portForwards:
+  - guestPort: 5173
+    hostPort: 5173
+    hostIP: "127.0.0.1"
+  - guestPort: 3000
+    hostPort: 3000
+    hostIP: "127.0.0.1"
+  - guestPort: 6443
+    hostPort: 6443
+    hostIP: "127.0.0.1"
+
+provision:
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        bash \
+        ca-certificates \
+        clang \
+        curl \
+        git \
+        iproute2 \
+        iptables \
+        jq \
+        libssl-dev \
+        mold \
+        nftables \
+        openssl \
+        perl \
+        pkg-config \
+        podman \
+        protobuf-compiler \
+        sqlite3 \
+        sudo
+      systemctl enable --now podman.socket
+      cat >/usr/local/bin/rtk <<'SH'
+      #!/usr/bin/env bash
+      exec "$@"
+      SH
+      chmod +x /usr/local/bin/rtk
+      mkdir -p /etc/coolify /var/lib/corrosion /run/corrosion
+      chmod 755 /etc/coolify
+      chmod 777 /var/lib/corrosion /run/corrosion
+  - mode: user
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export PATH="$HOME/.cargo/bin:$HOME/.bun/bin:$PATH"
+      if ! command -v cargo >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+      fi
+      if ! command -v bun >/dev/null 2>&1; then
+        curl -fsSL https://bun.sh/install | bash
+      fi
+      if ! command -v cargo-watch >/dev/null 2>&1; then
+        cargo install cargo-watch
+      fi
+      if ! command -v corrosion >/dev/null 2>&1; then
+        cargo install --locked --git https://github.com/superfly/corrosion.git corrosion
+      fi

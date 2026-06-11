@@ -1,9 +1,9 @@
 [workspace]
-members = ["coold", "scheduler", "builder", "builder-core", "cooldctl", "e2e-tests", "proto", "core", "storage", "api"]
+members = ["coold", "scheduler", "builder", "builder-core", "cooldctl", "e2e-tests", "proto"]
 # e2e-tests is a live-server test harness; exclude it from default builds
 # so nightly + local `cargo build --workspace` stay fast. Run explicitly
 # with `cargo test -p e2e-tests -- --ignored --test-threads=1`.
-default-members = ["coold", "scheduler", "builder", "builder-core", "cooldctl", "core", "storage", "api", "proto"]
+default-members = ["coold", "scheduler", "builder", "builder-core", "cooldctl", "proto"]
 resolver = "2"
 
 [workspace.package]
@@ -25,8 +25,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 axum = "0.7"
 tower-http = { version = "0.6", features = ["trace", "set-header", "limit", "cors"] }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate", "uuid", "time"] }
-rust-embed = "8"
-mime_guess = "2"
 uuid = { version = "1", features = ["v4", "v7", "serde"] }
 time = { version = "0.3", features = ["serde", "serde-well-known", "formatting", "parsing", "macros"] }
 clap = { version = "4", features = ["derive", "env"] }

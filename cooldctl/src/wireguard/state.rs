@@ -47,13 +47,9 @@ pub struct ServerState {
     pub corrosion_schema_sha256: String,
     pub coold_installed: bool,
     pub coold_active: bool,
-    pub coolify_installed: bool,
-    pub coolify_active: bool,
     pub corrosion_version: String,
     pub coold_version: String,
-    pub coolify_version: String,
     pub coold_unit_sha256: String,
-    pub coolify_unit_sha256: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -104,7 +100,6 @@ pub struct DesiredMesh {
     pub corrosion_gossip_port: u16,
     pub corrosion_api_port: u16,
     pub central_host: String,
-    pub coolify_version: String,
     pub scheduler_version: String,
     pub enable_builder: bool,
     pub builder_hosts: Vec<String>,

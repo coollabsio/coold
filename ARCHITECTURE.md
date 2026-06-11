@@ -724,40 +724,31 @@ exit or by coold's `resume_or_reap` on next start).
 - Wire surface + transport: §3 and §4 here are the source of truth for `cooldctl` command behavior.
 
 
-## Coolify API + Coolify UI
+## Central control plane
 
-The central Coolify v5 application lives in `api`, not in `coold`.
-`api` is an Axum binary with an embedded Coolify UI SPA. It uses
-`core` for pure domain types and `storage` for SQLite-backed
-repositories and migrations. The split keeps host-agent code (`coold`), stream
-routing (`scheduler`), cluster bootstrap (`cooldctl`), and the user-facing web
-application independently testable while still shipping from one Rust workspace.
-
-Initial operator-visible API routes are `/healthz`, `/api/v1/status`,
-`/api/v1/servers`, `/api/v1/servers/:id/live-status`, `/api/v1/servers/:id/containers`, `/api/v1/clusters`, `/api/v1/events`, and `/api/v1/builds`.
-The Coolify UI reads those routes through TanStack Query and gives a basic
-dashboard for seeing cluster/server/event state while the deeper control-plane
-flows are built.
+The central Coolify v5 brain is a separate **Laravel app**, not part of this
+Rust workspace. It owns all app-aware logic (compose, Dockerfiles, buildpacks,
+scheduling, rollback, ingress templating, RBAC, audit) and its own persistent
+state. This workspace ships only the data-plane pieces: host agent (`coold`),
+stream router (`scheduler`), build agent (`builder`), and cluster bootstrap
+(`cooldctl`) — each independently testable.
 
 
-### api to coold request path
+### Laravel to coold request path
 
-`api` does not open inbound connections to host agents. For live host
-operations it calls scheduler's local Unix socket (`COOLIFY_SCHEDULER_SOCKET`,
-default `/run/coolify/scheduler.sock`). Scheduler routes the request down the
-existing coold-initiated gRPC stream keyed by `servers.host_id`. The first live
-endpoint is `GET /api/v1/servers/:id/containers`, which dispatches
-`list_containers` through scheduler and maps host-offline responses to HTTP 404,
-timeouts to 504, missing `host_id` to 409, and malformed scheduler responses to
-502.
+Laravel does not open inbound connections to host agents. For live host
+operations it calls scheduler's local Unix socket (`SCHEDULER_UNIX_SOCKET_PATH`,
+default `/run/coolify/scheduler.sock`; grant the php-fpm group access via
+`SCHEDULER_UNIX_SOCKET_GROUP`). Scheduler routes the request down the existing
+coold-initiated gRPC stream keyed by `host_id`. Example: `POST /v1/coold/dispatch`
+with a `list_containers` command maps host-offline responses to error code,
+timeouts, missing `host_id`, and malformed scheduler responses per `envelope.rs`.
 
 
-### Scheduler stream sync
+### Scheduler stream inventory
 
 Scheduler exposes a local UDS inventory endpoint at `GET /v1/streams`, returning
-connected host streams (`host_id`, capabilities, builder capacity). `api`
-proxies this as `GET /api/v1/scheduler/streams` and materializes it with
-`POST /api/v1/servers/sync-streams`. Sync creates or updates `servers` rows by
-`host_id`, persists capabilities and `last_seen_at`, marks them online, and
-appends an event. This is the first lightweight registration path; later it can
-become a background reconciler.
+connected host streams (`host_id`, capabilities, builder capacity). Laravel polls
+this to discover online agents and materialize them into its own server registry
+(persisting capabilities and last-seen, marking them online). Builds use
+`POST /v1/build/dispatch` + `GET /v1/build/result/:request_id`.
