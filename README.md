@@ -436,6 +436,15 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 | `SCHEDULER_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | Verifies coold stream JWT |
 | `SCHEDULER_LOG_LEVEL` | `info` | tracing EnvFilter |
 
+### Scheduler container image
+
+Nightly builds publish `ghcr.io/coollabsio/coold/scheduler:nightly` and the
+per-commit nightly tag. The image keeps the binary/systemd defaults: mount
+`/etc/coolify/jwt.pub` read-only, share `/run/coolify` when Laravel must access
+the UDS, and set `SCHEDULER_GRPC_BIND` to the private WireGuard address. For
+bridge-mode development only, set `SCHEDULER_GRPC_BIND=0.0.0.0:6443` together
+with `SCHEDULER_ALLOW_PUBLIC_BIND=1` and `-p 6443:6443`.
+
 ---
 
 ## E2E tests

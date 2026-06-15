@@ -116,10 +116,6 @@ impl RegistryClient {
         })
     }
 
-    pub fn scheduler_id(&self) -> &str {
-        &self.scheduler_id
-    }
-
     pub fn heartbeat_payload(&self, connected_agents_count: usize) -> HeartbeatPayload {
         HeartbeatPayload::new(
             &self.scheduler_id,
