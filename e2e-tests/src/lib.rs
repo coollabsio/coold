@@ -1,10 +1,10 @@
-//! Live-server test harness for the coold/scheduler/builder stack.
+//! Live-server test harness for the coold/flux/builder stack.
 //!
 //! Tests are Rust integration tests under `tests/`, marked `#[ignore]` so
 //! default `cargo test` skips them. Every suite provisions its own
 //! ephemeral Hetzner cluster via [`hetzner::EphemeralCluster`], runs
 //! `coolify init bootstrap` from the local `coolify` binary, then exercises
-//! the black-box HTTP/UDS/systemd contract over SSH. No scheduler/coold
+//! the black-box HTTP/UDS/systemd contract over SSH. No flux/coold
 //! code is linked.
 //!
 //! Run with:
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! `--test-threads=1` is mandatory: the tests dispatch real builds and
-//! running them in parallel overwhelms the `COOLD_BUILDER_CAPACITY`
+//! running them in parallel overwhelms the `COOLIFY_COOLD_BUILDER_CAPACITY`
 //! semaphore and races on `buildah images` state shared across hosts.
 //! VMs are deleted via [`hetzner::EphemeralCluster`]'s RAII `Drop`, so
 //! panics during assertions still clean up paid resources.
@@ -129,13 +129,13 @@ impl Env {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// POST a JSON payload to the scheduler UDS via `ssh + curl` on the
+    /// POST a JSON payload to the flux UDS via `ssh + curl` on the
     /// central host. Returns (status_code, body). Payload must be valid
     /// JSON — double-quoted strings, no single quotes.
     pub fn uds_post(&self, path: &str, payload: &str) -> Result<(u16, String), String> {
         let cmd = format!(
             "curl --unix-socket {sock} -sS -X POST -H 'Content-Type: application/json' --data '{payload}' -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
-            sock = SCHEDULER_SOCKET
+            sock = COOLIFY_FLUX_SOCKET
         );
         parse_curl_output(self.ssh(&self.central_host, &cmd)?)
     }
@@ -143,13 +143,13 @@ impl Env {
     pub fn uds_get(&self, path: &str) -> Result<(u16, String), String> {
         let cmd = format!(
             "curl --unix-socket {sock} -sS -w '\\n__CODE__%{{http_code}}__' http://localhost{path}",
-            sock = SCHEDULER_SOCKET
+            sock = COOLIFY_FLUX_SOCKET
         );
         parse_curl_output(self.ssh(&self.central_host, &cmd)?)
     }
 
     /// Submit a build dispatch envelope. Returns `Accepted` on 202 with
-    /// the assigned `request_id`, or `Rejected` when the scheduler refused
+    /// the assigned `request_id`, or `Rejected` when the flux refused
     /// pre-dispatch (unknown host, no builder, capacity cap) — the
     /// response body is the final error for this request_id.
     pub fn dispatch_build(&self, payload: &str) -> DispatchResult {
@@ -221,7 +221,9 @@ impl Env {
 
     pub fn has_image(&self, host: &str, tag: &str) -> bool {
         let cmd = format!("buildah images 2>/dev/null | grep -q '{tag}' && echo Y || echo N");
-        self.ssh(host, &cmd).map(|s| s.contains('Y')).unwrap_or(false)
+        self.ssh(host, &cmd)
+            .map(|s| s.contains('Y'))
+            .unwrap_or(false)
     }
 
     pub fn unit_active(&self, host: &str, request_id: &str) -> bool {
@@ -243,10 +245,10 @@ impl Env {
     }
 
     pub fn work_dir_exists(&self, host: &str, request_id: &str) -> bool {
-        let cmd = format!(
-            "test -d /var/lib/coolify-builder/work/{request_id} && echo Y || echo N"
-        );
-        self.ssh(host, &cmd).map(|s| s.contains('Y')).unwrap_or(false)
+        let cmd = format!("test -d /var/lib/coolify-builder/work/{request_id} && echo Y || echo N");
+        self.ssh(host, &cmd)
+            .map(|s| s.contains('Y'))
+            .unwrap_or(false)
     }
 
     /// `stat -c '%F|%a|%U' <path>` → `(kind, mode, owner)`. Returns `Err`
@@ -297,7 +299,7 @@ pub fn build_envelope(
     obj.to_string()
 }
 
-pub const SCHEDULER_SOCKET: &str = "/run/coolify/scheduler.sock";
+pub const COOLIFY_FLUX_SOCKET: &str = "/run/coolify/flux.sock";
 
 #[derive(Debug, Deserialize)]
 pub struct DispatchAck {

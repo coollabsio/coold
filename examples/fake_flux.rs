@@ -1,13 +1,13 @@
-/// Minimal fake-central gRPC server for local development/testing.
+/// Minimal fake-flux gRPC server for local development/testing.
 ///
 /// Starts an Agent service on 127.0.0.1:50051, waits for coold to connect,
 /// reads its Hello frame, sends one ListContainersReq, prints the response,
 /// then exits. Plain h2c (no TLS).
 ///
 /// Usage:
-///   Terminal A: cargo run --example fake_central
-///   Terminal B: COOLD_CENTRAL_URL=http://127.0.0.1:50051 \
-///               COOLD_HOST_JWT_PATH=/tmp/jwt \
+///   Terminal A: cargo run --example fake_flux
+///   Terminal B: COOLIFY_COOLD_FLUX_URL=http://127.0.0.1:50051 \
+///               COOLIFY_COOLD_HOST_JWT_PATH=/tmp/jwt \
 ///               cargo run -- --host-mgmt-ip 127.0.0.1 ...
 use std::pin::Pin;
 
@@ -24,12 +24,12 @@ use proto::{
     client_msg, server_msg, ClientMsg, ListContainersReq, ServerMsg,
 };
 
-struct FakeCentral;
+struct FakeFlux;
 
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send>>;
 
 #[tonic::async_trait]
-impl Agent for FakeCentral {
+impl Agent for FakeFlux {
     type StreamStream = ResponseStream;
 
     async fn stream(
@@ -46,7 +46,7 @@ impl Agent for FakeCentral {
                 Some(Ok(msg)) => {
                     if let Some(client_msg::Payload::Hello(hello)) = msg.payload {
                         println!(
-                            "[fake_central] Hello from host_mgmt_ip={} coold_version={} schema={}-{}",
+                            "[fake_flux] Hello from host_mgmt_ip={} coold_version={} schema={}-{}",
                             hello.host_mgmt_ip,
                             hello.coold_version,
                             hello.schema_min,
@@ -55,11 +55,11 @@ impl Agent for FakeCentral {
                     }
                 }
                 Some(Err(e)) => {
-                    eprintln!("[fake_central] stream error: {e}");
+                    eprintln!("[fake_flux] stream error: {e}");
                     return;
                 }
                 None => {
-                    eprintln!("[fake_central] stream closed before Hello");
+                    eprintln!("[fake_flux] stream closed before Hello");
                     return;
                 }
             }
@@ -79,7 +79,7 @@ impl Agent for FakeCentral {
                     Ok(msg) => {
                         if let Some(client_msg::Payload::Response(resp)) = msg.payload {
                             if resp.request_id == req_id {
-                                println!("[fake_central] ListContainersResp:");
+                                println!("[fake_flux] ListContainersResp:");
                                 if let Some(proto::response::Body::ListContainers(lc)) = resp.body {
                                     for c in &lc.containers {
                                         println!(
@@ -88,18 +88,18 @@ impl Agent for FakeCentral {
                                         );
                                     }
                                     println!(
-                                        "[fake_central] done — {} container(s) listed",
+                                        "[fake_flux] done — {} container(s) listed",
                                         lc.containers.len()
                                     );
                                 } else if let Some(proto::response::Body::Error(e)) = resp.body {
-                                    eprintln!("[fake_central] error from coold: {} {}", e.code, e.message);
+                                    eprintln!("[fake_flux] error from coold: {} {}", e.code, e.message);
                                 }
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("[fake_central] stream error: {e}");
+                        eprintln!("[fake_flux] stream error: {e}");
                         break;
                     }
                 }
@@ -113,9 +113,9 @@ impl Agent for FakeCentral {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = "127.0.0.1:50051".parse()?;
-    println!("[fake_central] listening on {addr} (plain h2c)");
+    println!("[fake_flux] listening on {addr} (plain h2c)");
     Server::builder()
-        .add_service(AgentServer::new(FakeCentral))
+        .add_service(AgentServer::new(FakeFlux))
         .serve(addr)
         .await?;
     Ok(())

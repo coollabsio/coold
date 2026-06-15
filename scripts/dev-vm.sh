@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INSTANCE="${COOLD_LIMA_INSTANCE:-coold-dev}"
+INSTANCE="${COOLIFY_COOLD_LIMA_INSTANCE:-coold-dev}"
 YAML="$ROOT/dev/lima/coold.yaml"
 GUEST_ROOT="/workspace/coold"
 
@@ -19,7 +19,7 @@ Commands:
   delete   Delete the VM and all VM-local runtime state
 
 Environment:
-  COOLD_LIMA_INSTANCE  Override Lima instance name (default: coold-dev)
+  COOLIFY_COOLD_LIMA_INSTANCE  Override Lima instance name (default: coold-dev)
 USAGE
 }
 

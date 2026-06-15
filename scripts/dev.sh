@@ -9,13 +9,13 @@ if [[ "${REAL_COOLD:-0}" == "1" ]]; then
 fi
 
 command -v cargo >/dev/null 2>&1 || { echo "cargo is required for Rust dev." >&2; exit 1; }
-command -v openssl >/dev/null 2>&1 || { echo "openssl is required for local scheduler JWT generation." >&2; exit 1; }
+command -v openssl >/dev/null 2>&1 || { echo "openssl is required for local flux JWT generation." >&2; exit 1; }
 command -v perl >/dev/null 2>&1 || { echo "perl is required for process-group management." >&2; exit 1; }
 cargo watch --version >/dev/null 2>&1 || { echo "cargo-watch is required. Install it with: cargo install cargo-watch" >&2; exit 1; }
 
 DEV_DIR="$ROOT/.dev"
-SCHEDULER_GRPC_BIND="${SCHEDULER_GRPC_BIND:-127.0.0.1:6443}"
-SCHEDULER_UNIX_SOCKET_PATH="${SCHEDULER_UNIX_SOCKET_PATH:-/tmp/coolify-scheduler.sock}"
+COOLIFY_FLUX_GRPC_BIND="${COOLIFY_FLUX_GRPC_BIND:-127.0.0.1:6443}"
+COOLIFY_FLUX_UNIX_SOCKET_PATH="${COOLIFY_FLUX_UNIX_SOCKET_PATH:-/tmp/coolify-flux.sock}"
 FAKE_COOLD_HOST_ID="${FAKE_COOLD_HOST_ID:-host-local}"
 FAKE_COOLD_CAPS="${FAKE_COOLD_CAPS:-coold,builder}"
 JWT_PRIV="$DEV_DIR/dev-jwt.priv.pem"
@@ -126,7 +126,7 @@ cleanup() {
     wait "${pids[@]}" 2>/dev/null || true
   fi
 
-  rm -f "$SCHEDULER_UNIX_SOCKET_PATH"
+  rm -f "$COOLIFY_FLUX_UNIX_SOCKET_PATH"
   exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -178,15 +178,15 @@ start_service() {
 }
 
 mkdir -p "$DEV_DIR"
-rm -f "$SCHEDULER_UNIX_SOCKET_PATH"
+rm -f "$COOLIFY_FLUX_UNIX_SOCKET_PATH"
 
-preflight_port_free "$SCHEDULER_GRPC_BIND" "scheduler gRPC" "SCHEDULER_GRPC_BIND=127.0.0.1:6444"
+preflight_port_free "$COOLIFY_FLUX_GRPC_BIND" "flux gRPC" "COOLIFY_FLUX_GRPC_BIND=127.0.0.1:6444"
 
 log_line dev INFO "Generating local dev JWT for fake coold…"
 JWT_TMP="$DEV_DIR/dev-jwt.$$"
 JWT_TMP_PRIV="$JWT_TMP.priv.pem"
 JWT_TMP_PUB="$JWT_TMP.pub.pem"
-JWT="$(rtk cargo run -p scheduler --example sign_jwt -- "$FAKE_COOLD_HOST_ID" "$JWT_TMP_PRIV" "$JWT_TMP_PUB" "$FAKE_COOLD_CAPS" 2>/dev/null | tail -n1)"
+JWT="$(rtk cargo run -p flux --example sign_jwt -- "$FAKE_COOLD_HOST_ID" "$JWT_TMP_PRIV" "$JWT_TMP_PUB" "$FAKE_COOLD_CAPS" 2>/dev/null | tail -n1)"
 if [[ -z "$JWT" || ! -s "$JWT_TMP_PUB" ]]; then
   rm -f "$JWT_TMP_PRIV" "$JWT_TMP_PRIV.pkcs8" "$JWT_TMP_PUB"
   log_line dev ERROR "failed to generate JWT" >&2
@@ -197,20 +197,20 @@ mv "$JWT_TMP_PRIV.pkcs8" "$JWT_PRIV.pkcs8"
 mv "$JWT_TMP_PUB" "$JWT_PUB"
 
 log_line dev INFO "Coolify v5 dev stack"
-log_line dev INFO "scheduler: grpc://$SCHEDULER_GRPC_BIND + unix://$SCHEDULER_UNIX_SOCKET_PATH"
+log_line dev INFO "flux: grpc://$COOLIFY_FLUX_GRPC_BIND + unix://$COOLIFY_FLUX_UNIX_SOCKET_PATH"
 log_line dev INFO "fake coold: host_id=$FAKE_COOLD_HOST_ID caps=$FAKE_COOLD_CAPS"
 
-export ROOT JWT JWT_PUB SCHEDULER_GRPC_BIND SCHEDULER_UNIX_SOCKET_PATH
+export ROOT JWT JWT_PUB COOLIFY_FLUX_GRPC_BIND COOLIFY_FLUX_UNIX_SOCKET_PATH
 
-start_service "scheduler" 'exec env SCHEDULER_GRPC_BIND="$SCHEDULER_GRPC_BIND" SCHEDULER_UNIX_SOCKET_PATH="$SCHEDULER_UNIX_SOCKET_PATH" SCHEDULER_JWT_PUBLIC_KEY_PATH="$JWT_PUB" SCHEDULER_ALLOW_PUBLIC_BIND=1 rtk cargo watch -w scheduler -w proto -w Cargo.toml -w Cargo.lock -i target -x "run -p scheduler"'
-wait_for_tcp "$(host_part "$SCHEDULER_GRPC_BIND")" "$(port_part "$SCHEDULER_GRPC_BIND")" "scheduler gRPC"
-wait_for_socket "$SCHEDULER_UNIX_SOCKET_PATH" "scheduler UDS"
+start_service "flux" 'exec env COOLIFY_FLUX_GRPC_BIND="$COOLIFY_FLUX_GRPC_BIND" COOLIFY_FLUX_UNIX_SOCKET_PATH="$COOLIFY_FLUX_UNIX_SOCKET_PATH" COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH="$JWT_PUB" COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1 rtk cargo watch -w flux -w proto -w Cargo.toml -w Cargo.lock -i target -x "run -p flux"'
+wait_for_tcp "$(host_part "$COOLIFY_FLUX_GRPC_BIND")" "$(port_part "$COOLIFY_FLUX_GRPC_BIND")" "flux gRPC"
+wait_for_socket "$COOLIFY_FLUX_UNIX_SOCKET_PATH" "flux UDS"
 
-start_service "fake coold" 'while true; do env SCHEDULER_URL="http://$SCHEDULER_GRPC_BIND" JWT="$JWT" rtk cargo run -p scheduler --example fake_coold || true; sleep 1; done'
+start_service "fake coold" 'while true; do env COOLIFY_COOLD_FLUX_URL="http://$COOLIFY_FLUX_GRPC_BIND" JWT="$JWT" rtk cargo run -p flux --example fake_coold || true; sleep 1; done'
 
 check_children
 
-log_line dev INFO "scheduler UDS ready at $SCHEDULER_UNIX_SOCKET_PATH — point your Laravel control plane here."
+log_line dev INFO "flux UDS ready at $COOLIFY_FLUX_UNIX_SOCKET_PATH — point your Laravel control plane here."
 
 while true; do
   check_children

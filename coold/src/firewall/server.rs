@@ -28,7 +28,7 @@ const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// checkable at config time rather than buried in handlers.
 pub async fn run(config: Config) -> Result<()> {
     let Some(addr) = config.api_bind else {
-        info!("COOLD_API_BIND unset; firewall API disabled");
+        info!("COOLIFY_COOLD_API_BIND unset; firewall API disabled");
         std::future::pending::<()>().await;
         return Ok(());
     };
@@ -50,10 +50,16 @@ pub async fn run(config: Config) -> Result<()> {
     // Best-effort chain bootstrap. ensure_chain is idempotent; this lets
     // the very first API call skip the chain-missing fallback path.
     if let Err(e) = store.ensure_chain().await {
-        warn!(error = format!("{e:#}"), "initial ensure_chain failed; continuing");
+        warn!(
+            error = format!("{e:#}"),
+            "initial ensure_chain failed; continuing"
+        );
     }
     if let Err(e) = store.ensure_bridge_chain().await {
-        warn!(error = format!("{e:#}"), "initial ensure_bridge_chain failed; continuing");
+        warn!(
+            error = format!("{e:#}"),
+            "initial ensure_bridge_chain failed; continuing"
+        );
     }
 
     let state = ApiState {

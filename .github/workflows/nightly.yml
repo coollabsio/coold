@@ -37,8 +37,8 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.runner }}
     env:
-      COOLD_VERSION: ${{ needs.prep.outputs.tag }}
-      SCHEDULER_VERSION: ${{ needs.prep.outputs.tag }}
+      COOLIFY_COOLD_VERSION: ${{ needs.prep.outputs.tag }}
+      COOLIFY_FLUX_VERSION: ${{ needs.prep.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,12 +67,12 @@ jobs:
           rm dist/coold
           (cd dist && sha256sum coold-linux-${{ matrix.arch }}.tar.gz > coold-linux-${{ matrix.arch }}.tar.gz.sha256)
 
-      - name: Package scheduler
+      - name: Package flux
         run: |
-          cp target/${{ matrix.target }}/release/scheduler dist/scheduler
-          tar -czf dist/scheduler-linux-${{ matrix.arch }}.tar.gz -C dist scheduler
-          rm dist/scheduler
-          (cd dist && sha256sum scheduler-linux-${{ matrix.arch }}.tar.gz > scheduler-linux-${{ matrix.arch }}.tar.gz.sha256)
+          cp target/${{ matrix.target }}/release/flux dist/flux
+          tar -czf dist/flux-linux-${{ matrix.arch }}.tar.gz -C dist flux
+          rm dist/flux
+          (cd dist && sha256sum flux-linux-${{ matrix.arch }}.tar.gz > flux-linux-${{ matrix.arch }}.tar.gz.sha256)
 
       - name: Package builder
         run: |
@@ -114,8 +114,8 @@ jobs:
             echo "**Commit:** $(git log -1 --pretty=format:'%s')"
             echo
             echo "### Artifacts"
-            echo "- \`coold\` — per-host agent (holds the single gRPC stream to scheduler; spawns builder subprocess per BuildRequest when COOLD_BUILDER_ENABLED=1)"
-            echo "- \`scheduler\` — central-side gRPC stream scheduler (single listener on :6443; capability-aware routing)"
+            echo "- \`coold\` — per-host agent (holds the single gRPC stream to flux; spawns builder subprocess per BuildRequest when COOLIFY_COOLD_BUILDER_ENABLED=1)"
+            echo "- \`flux\` — central-side gRPC stream flux (single listener on :6443; capability-aware routing)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
             echo
             if [ -n "$PREV" ]; then
@@ -139,10 +139,10 @@ jobs:
             dist/coold-linux-amd64.tar.gz.sha256
             dist/coold-linux-arm64.tar.gz
             dist/coold-linux-arm64.tar.gz.sha256
-            dist/scheduler-linux-amd64.tar.gz
-            dist/scheduler-linux-amd64.tar.gz.sha256
-            dist/scheduler-linux-arm64.tar.gz
-            dist/scheduler-linux-arm64.tar.gz.sha256
+            dist/flux-linux-amd64.tar.gz
+            dist/flux-linux-amd64.tar.gz.sha256
+            dist/flux-linux-arm64.tar.gz
+            dist/flux-linux-arm64.tar.gz.sha256
             dist/builder-linux-amd64.tar.gz
             dist/builder-linux-amd64.tar.gz.sha256
             dist/builder-linux-arm64.tar.gz
@@ -162,10 +162,10 @@ jobs:
             dist/coold-linux-amd64.tar.gz.sha256 \
             dist/coold-linux-arm64.tar.gz \
             dist/coold-linux-arm64.tar.gz.sha256 \
-            dist/scheduler-linux-amd64.tar.gz \
-            dist/scheduler-linux-amd64.tar.gz.sha256 \
-            dist/scheduler-linux-arm64.tar.gz \
-            dist/scheduler-linux-arm64.tar.gz.sha256 \
+            dist/flux-linux-amd64.tar.gz \
+            dist/flux-linux-amd64.tar.gz.sha256 \
+            dist/flux-linux-arm64.tar.gz \
+            dist/flux-linux-arm64.tar.gz.sha256 \
             dist/builder-linux-amd64.tar.gz \
             dist/builder-linux-amd64.tar.gz.sha256 \
             dist/builder-linux-arm64.tar.gz \

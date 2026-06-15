@@ -55,10 +55,7 @@ pub async fn run(client: PodmanClient, tx: mpsc::Sender<EventMessage>) {
     }
 }
 
-async fn stream_once(
-    client: &PodmanClient,
-    tx: &mpsc::Sender<EventMessage>,
-) -> Result<()> {
+async fn stream_once(client: &PodmanClient, tx: &mpsc::Sender<EventMessage>) -> Result<()> {
     let res = client
         .events("/v5.0.0/libpod/events?stream=true")
         .await
@@ -114,7 +111,14 @@ async fn dispatch(line: &[u8], tx: &mpsc::Sender<EventMessage>) {
         return;
     }
 
-    if tx.send(EventMessage { kind, container_id: id }).await.is_err() {
+    if tx
+        .send(EventMessage {
+            kind,
+            container_id: id,
+        })
+        .await
+        .is_err()
+    {
         debug!("event receiver dropped");
     }
 }

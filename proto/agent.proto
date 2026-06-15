@@ -1,9 +1,9 @@
 syntax = "proto3";
 package coolify.agent.v1;
 
-// Scheduler is the gRPC server. coold dials the scheduler and opens this stream.
+// Flux is the gRPC server. coold dials the flux and opens this stream.
 // Flow: coold → ClientMsg (Hello first, then Responses).
-//       scheduler → ServerMsg (Commands with request_id).
+//       flux → ServerMsg (Commands with request_id).
 service Agent {
     rpc Stream(stream ClientMsg) returns (stream ServerMsg);
 }
@@ -23,7 +23,7 @@ message Hello {
     uint32 schema_max = 4;
 
     // Capabilities this coold advertises (e.g. "coold" always, plus
-    // "builder" when --builder-enabled). Scheduler cross-checks these against
+    // "builder" when --builder-enabled). Flux cross-checks these against
     // the JWT "caps" claim and uses them for capability-based routing.
     repeated string capabilities = 5;
 
@@ -32,7 +32,7 @@ message Hello {
     uint32 builder_capacity = 6;
 }
 
-// Command frame sent by scheduler.
+// Command frame sent by flux.
 message ServerMsg {
     string request_id = 1;
     oneof command {

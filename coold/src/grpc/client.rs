@@ -28,7 +28,7 @@ pub(crate) struct AssignmentRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct AssignmentResponse {
-    scheduler_url: String,
+    flux_url: String,
 }
 
 /// Read and validate the host JWT from disk. Refuses any file with
@@ -59,7 +59,7 @@ async fn load_host_jwt(path: &Path) -> Result<String> {
 }
 
 pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
-    if config.grpc_disabled || (config.scheduler_url.is_none() && config.assignment_url.is_none()) {
+    if config.grpc_disabled || (config.flux_url.is_none() && config.assignment_url.is_none()) {
         info!("grpc transport disabled; skipping");
         std::future::pending::<()>().await;
         return Ok(());
@@ -115,10 +115,10 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
         };
 
         let assignment_req = assignment_request(&config);
-        let url = match resolve_scheduler_url(
+        let url = match resolve_flux_url(
             &http,
             config.assignment_url.as_deref(),
-            config.scheduler_url.as_deref(),
+            config.flux_url.as_deref(),
             &jwt,
             &assignment_req,
         )
@@ -129,7 +129,7 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
                 warn!(
                     error = format!("{e:#}"),
                     backoff_ms = backoff.as_millis(),
-                    "resolve scheduler URL failed"
+                    "resolve flux URL failed"
                 );
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -170,10 +170,10 @@ fn assignment_request(config: &Config) -> AssignmentRequest {
     }
 }
 
-async fn resolve_scheduler_url(
+async fn resolve_flux_url(
     http: &reqwest::Client,
     assignment_url: Option<&str>,
-    scheduler_url: Option<&str>,
+    flux_url: Option<&str>,
     jwt: &str,
     req: &AssignmentRequest,
 ) -> Result<String> {
@@ -184,27 +184,27 @@ async fn resolve_scheduler_url(
             .json(req)
             .send()
             .await
-            .with_context(|| format!("POST scheduler assignment {url}"))?;
+            .with_context(|| format!("POST flux assignment {url}"))?;
 
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("scheduler assignment {url} returned {status}: {body}");
+            anyhow::bail!("flux assignment {url} returned {status}: {body}");
         }
 
         let body: AssignmentResponse = resp
             .json()
             .await
-            .with_context(|| format!("decode scheduler assignment response from {url}"))?;
-        if body.scheduler_url.trim().is_empty() {
-            anyhow::bail!("scheduler assignment {url} returned empty scheduler_url");
+            .with_context(|| format!("decode flux assignment response from {url}"))?;
+        if body.flux_url.trim().is_empty() {
+            anyhow::bail!("flux assignment {url} returned empty flux_url");
         }
-        return Ok(body.scheduler_url);
+        return Ok(body.flux_url);
     }
 
-    scheduler_url
-        .map(str::to_owned)
-        .ok_or_else(|| anyhow!("COOLD_ASSIGNMENT_URL or COOLD_SCHEDULER_URL must be set"))
+    flux_url.map(str::to_owned).ok_or_else(|| {
+        anyhow!("COOLIFY_COOLD_ASSIGNMENT_URL or COOLIFY_COOLD_FLUX_URL must be set")
+    })
 }
 
 async fn connect_and_serve(
@@ -215,10 +215,10 @@ async fn connect_and_serve(
     builder_ctx: Option<Arc<BuilderCtx>>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
-        .context("invalid scheduler URL")?
+        .context("invalid flux URL")?
         .connect()
         .await
-        .context("connect to scheduler")?;
+        .context("connect to flux")?;
 
     let bearer: MetadataValue<_> = format!("Bearer {jwt}")
         .parse()
@@ -266,7 +266,7 @@ async fn connect_and_serve(
         .context("open stream")?
         .into_inner();
 
-    info!(scheduler_url = url, "grpc stream established");
+    info!(flux_url = url, "grpc stream established");
 
     while let Some(msg) = inbound.message().await.context("receive ServerMsg")? {
         let request_id = msg.request_id.clone();
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scheduler_resolution_uses_static_url_without_assignment_url() {
+    async fn flux_resolution_uses_static_url_without_assignment_url() {
         let req = super::AssignmentRequest {
             host_id: "100.64.0.5".into(),
             coold_version: "test".into(),
@@ -356,21 +356,21 @@ mod tests {
             builder_capacity: 0,
         };
 
-        let got = super::resolve_scheduler_url(
+        let got = super::resolve_flux_url(
             &reqwest::Client::new(),
             None,
-            Some("https://scheduler.example.com"),
+            Some("https://flux.example.com"),
             "jwt",
             &req,
         )
         .await
         .unwrap();
 
-        assert_eq!(got, "https://scheduler.example.com");
+        assert_eq!(got, "https://flux.example.com");
     }
 
     #[tokio::test]
-    async fn scheduler_resolution_requires_some_url() {
+    async fn flux_resolution_requires_some_url() {
         let req = super::AssignmentRequest {
             host_id: "100.64.0.5".into(),
             coold_version: "test".into(),
@@ -378,19 +378,19 @@ mod tests {
             builder_capacity: 0,
         };
 
-        let err = super::resolve_scheduler_url(&reqwest::Client::new(), None, None, "jwt", &req)
+        let err = super::resolve_flux_url(&reqwest::Client::new(), None, None, "jwt", &req)
             .await
             .unwrap_err();
 
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("COOLD_ASSIGNMENT_URL or COOLD_SCHEDULER_URL"),
+            msg.contains("COOLIFY_COOLD_ASSIGNMENT_URL or COOLIFY_COOLD_FLUX_URL"),
             "got: {msg}"
         );
     }
 
     #[tokio::test]
-    async fn scheduler_resolution_posts_assignment_with_bearer_auth() {
+    async fn flux_resolution_posts_assignment_with_bearer_auth() {
         use axum::{
             extract::State,
             http::{HeaderMap, StatusCode},
@@ -414,7 +414,7 @@ mod tests {
                 .to_owned();
             *seen.0.lock().unwrap() = Some((auth, req.host_id));
             Ok(Json(serde_json::json!({
-                "scheduler_url": "https://assigned.example.com"
+                "flux_url": "https://assigned.example.com"
             })))
         }
 
@@ -435,7 +435,7 @@ mod tests {
             builder_capacity: 2,
         };
 
-        let got = super::resolve_scheduler_url(
+        let got = super::resolve_flux_url(
             &reqwest::Client::new(),
             Some(&format!("http://{addr}/assign")),
             Some("https://static.example.com"),

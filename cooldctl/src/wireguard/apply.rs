@@ -159,20 +159,20 @@ pub async fn apply_mesh<R: Runner>(
                 &desired.central_host,
                 user,
                 port,
-                &format!("cat {}", services::scheduler::SCHEDULER_JWT_PRIV_PATH),
+                &format!("cat {}", services::flux::COOLIFY_FLUX_JWT_PRIV_PATH),
             )
             .await?
             .stdout;
-        let scheduler_url = format!(
+        let flux_url = format!(
             "http://{}:{}",
             mgmt[&desired.central_host],
-            services::scheduler::SCHEDULER_GRPC_PORT
+            services::flux::COOLIFY_FLUX_GRPC_PORT
         );
         let p5 = for_each_server(&desired.nodes, concurrency, |host| {
             let mgmt = mgmt.clone();
             let subnets = subnets.clone();
             let pem = priv_pem.clone();
-            let url = scheduler_url.clone();
+            let url = flux_url.clone();
             let planned = planned.clone();
             async move {
                 phase5(
@@ -616,16 +616,16 @@ async fn phase4<R: Runner>(
     planned: &Plan,
 ) -> Result<Vec<ActionResult>> {
     let mut out = vec![];
-    if should_run(planned, host, ActionType::InstallScheduler, "") {
+    if should_run(planned, host, ActionType::InstallFlux, "") {
         step(
             runner,
             host,
             user,
             port,
             &mut out,
-            ActionType::InstallScheduler,
+            ActionType::InstallFlux,
             "",
-            services::scheduler::install_command(&desired.scheduler_version),
+            services::flux::install_command(&desired.flux_version),
         )
         .await?;
     }
@@ -638,14 +638,14 @@ async fn phase4<R: Runner>(
             &mut out,
             ActionType::GenerateJwtKeypair,
             "",
-            services::scheduler::ensure_jwt_keypair_command(),
+            services::flux::ensure_jwt_keypair_command(),
         )
         .await?;
     }
-    if should_run(planned, host, ActionType::InstallSchedulerService, "") {
-        let unit = services::scheduler::service_unit(
-            &format!("{central_ip}:{}", services::scheduler::SCHEDULER_GRPC_PORT),
-            services::scheduler::SCHEDULER_JWT_PUB_PATH,
+    if should_run(planned, host, ActionType::InstallFluxService, "") {
+        let unit = services::flux::service_unit(
+            &format!("{central_ip}:{}", services::flux::COOLIFY_FLUX_GRPC_PORT),
+            services::flux::COOLIFY_FLUX_JWT_PUB_PATH,
             &desired.interface,
         );
         step(
@@ -654,11 +654,11 @@ async fn phase4<R: Runner>(
             user,
             port,
             &mut out,
-            ActionType::InstallSchedulerService,
+            ActionType::InstallFluxService,
             "",
             format!(
-                "{} && systemctl daemon-reload && systemctl enable --now scheduler",
-                heredoc("/etc/systemd/system/scheduler.service", &unit, "0644")
+                "{} && systemctl daemon-reload && systemctl enable --now flux",
+                heredoc("/etc/systemd/system/flux.service", &unit, "0644")
             ),
         )
         .await?;
@@ -676,7 +676,7 @@ async fn phase5<R: Runner>(
     mgmt: &std::collections::BTreeMap<String, Ipv4Addr>,
     subnets: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, Ipv4Net>>,
     priv_pem: &[u8],
-    scheduler_url: &str,
+    flux_url: &str,
     planned: &Plan,
 ) -> Result<Vec<ActionResult>> {
     let mut out = vec![];
@@ -697,7 +697,7 @@ async fn phase5<R: Runner>(
             "",
             format!(
                 "mkdir -p /etc/coolify && {}",
-                heredoc(services::scheduler::HOST_JWT_PATH, &jwt, "0600")
+                heredoc(services::flux::HOST_JWT_PATH, &jwt, "0600")
             ),
         )
         .await?;
@@ -715,7 +715,7 @@ async fn phase5<R: Runner>(
         )
         .await?;
     }
-    if should_run(planned, host, ActionType::UpdateCooldSchedulerEnv, "") {
+    if should_run(planned, host, ActionType::UpdateCooldFluxEnv, "") {
         let ns = desired
             .sorted_namespaces()
             .iter()
@@ -739,9 +739,9 @@ async fn phase5<R: Runner>(
         } else {
             None
         };
-        let sched = services::coold::SchedulerConfig {
-            url: scheduler_url.into(),
-            jwt_path: services::scheduler::HOST_JWT_PATH.into(),
+        let flux = services::coold::FluxConfig {
+            url: flux_url.into(),
+            jwt_path: services::flux::HOST_JWT_PATH.into(),
         };
         step(
             runner,
@@ -749,13 +749,13 @@ async fn phase5<R: Runner>(
             user,
             port,
             &mut out,
-            ActionType::UpdateCooldSchedulerEnv,
+            ActionType::UpdateCooldFluxEnv,
             "",
             format!(
                 "{} && systemctl daemon-reload && systemctl restart coold",
                 heredoc(
                     "/etc/systemd/system/coold.service",
-                    &services::coold::service_unit(mgmt[host], &ns, Some(&sched), builder.as_ref()),
+                    &services::coold::service_unit(mgmt[host], &ns, Some(&flux), builder.as_ref()),
                     "0644"
                 )
             ),

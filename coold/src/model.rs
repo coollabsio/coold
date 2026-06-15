@@ -40,7 +40,9 @@ pub fn diff(
 
     for id in current.keys() {
         if !desired.contains_key(id) {
-            out.push(Delta::Delete { container_id: id.clone() });
+            out.push(Delta::Delete {
+                container_id: id.clone(),
+            });
         }
     }
 
@@ -71,7 +73,7 @@ mod tests {
 
         let mut current = HashMap::new();
         current.insert("a".into(), ep("a", "10.210.5.99")); // changed IP → upsert
-        current.insert("c".into(), ep("c", "10.210.5.4"));  // missing from desired → delete
+        current.insert("c".into(), ep("c", "10.210.5.4")); // missing from desired → delete
 
         let deltas = diff(&desired, &current);
         assert_eq!(deltas.len(), 3);

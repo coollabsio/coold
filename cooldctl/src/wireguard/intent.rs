@@ -46,13 +46,11 @@ fn categorize(a: &PlannedAction) -> Category {
         | WriteCorrosionConfig
         | InstallCorrosionService
         | InstallCooldService
-        | InstallSchedulerService
+        | InstallFluxService
         | WriteHostJwt
-        | UpdateCooldSchedulerEnv => Category::PeerRefresh,
+        | UpdateCooldFluxEnv => Category::PeerRefresh,
         RecreatePodmanNetwork => Category::DestructiveReplace,
-        InstallCorrosion | InstallCoold | InstallScheduler | InstallBuilder => {
-            Category::VersionBump
-        }
+        InstallCorrosion | InstallCoold | InstallFlux | InstallBuilder => Category::VersionBump,
         WriteCorrosionSchema if a.detail.contains("DB will be reset") => Category::WipeDb,
         WriteCorrosionSchema => Category::SchemaFirstWrite,
     }
@@ -80,7 +78,7 @@ pub fn validate_intent(d: &DesiredMesh) -> Result<()> {
                     versions.push(("--corrosion-version", &d.corrosion_version));
                 }
                 if !d.central_host.is_empty() {
-                    versions.push(("--scheduler-version", &d.scheduler_version));
+                    versions.push(("--flux-version", &d.flux_version));
                 }
                 for (flag, v) in versions {
                     if v == "nightly" {
@@ -126,7 +124,7 @@ fn decide(a: &PlannedAction, d: &DesiredMesh, new_nodes: &BTreeSet<String>) -> O
         },
         Intent::Upgrade => match categorize(a) {
             Category::VersionBump => None,
-            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService|ActionType::InstallSchedulerService) => None,
+            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService|ActionType::InstallFluxService) => None,
             Category::PeerRefresh => Some("upgrade: peer-refresh skipped; use `cooldctl init extend` for mesh topology changes".into()),
             _ => Some("upgrade: non-version-bump action skipped".into()),
         }
@@ -158,7 +156,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: String::new(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -220,10 +218,10 @@ mod tests {
                 d.corrosion_version = "nightly".into();
                 d
             }),
-            ("scheduler", {
+            ("flux", {
                 let mut d = desired(Intent::Upgrade);
                 d.central_host = "A".into();
-                d.scheduler_version = "nightly".into();
+                d.flux_version = "nightly".into();
                 d
             }),
         ] {
@@ -294,7 +292,7 @@ mod tests {
         let mut p = plan(vec![
             action("A", ActionType::InstallCoold),
             action("A", ActionType::InstallCorrosion),
-            action("A", ActionType::InstallScheduler),
+            action("A", ActionType::InstallFlux),
             action("A", ActionType::InstallCooldService),
             action("A", ActionType::WriteConfig),
             action("A", ActionType::CreatePodmanNetwork),
@@ -306,7 +304,7 @@ mod tests {
             vec![
                 ActionType::InstallCoold,
                 ActionType::InstallCorrosion,
-                ActionType::InstallScheduler,
+                ActionType::InstallFlux,
                 ActionType::InstallCooldService,
             ]
         );

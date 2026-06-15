@@ -15,9 +15,9 @@ use std::time::Duration;
 
 use e2e_tests::hetzner::EphemeralCluster;
 use e2e_tests::install::{
-    coold_allow, coold_revoke, coold_token, local_coolify, podman_ping, podman_pull,
-    run_container, ssh, ssh_ping, unit_active, wait_for, wg0_ip, wg_peers_handshaken,
-    InstallEnv, NAMESPACE, NET, TEST_IMAGE,
+    coold_allow, coold_revoke, coold_token, local_coolify, podman_ping, podman_pull, run_container,
+    ssh, ssh_ping, unit_active, wait_for, wg0_ip, wg_peers_handshaken, InstallEnv, NAMESPACE, NET,
+    TEST_IMAGE,
 };
 
 const MGMT_POOL: &str = "100.64.0.0/16";
@@ -26,9 +26,9 @@ const CONTAINER_POOL: &str = "10.210.0.0/16";
 // Systemd units that must be `active` on every coold host post-install.
 const CORE_UNITS: &[&str] = &["coold", "corrosion", "coolify-mesh-fw", "wg-quick@wg0"];
 
-// Central-only units. Scheduler runs the UDS command bus — Redis is no
+// Central-only units. Flux runs the UDS command bus — Redis is no
 // longer installed by the CLI.
-const CENTRAL_UNITS: &[&str] = &["scheduler"];
+const CENTRAL_UNITS: &[&str] = &["flux"];
 
 fn assert_central_units(ssh_key: &str, host: &str) {
     for unit in CENTRAL_UNITS {
@@ -38,15 +38,15 @@ fn assert_central_units(ssh_key: &str, host: &str) {
         );
         ok(&format!("{host}: systemd unit {unit} active"));
     }
-    assert_scheduler_socket(ssh_key, host);
+    assert_flux_socket(ssh_key, host);
     assert_core_file_perms(ssh_key, host);
 }
 
-/// Verify the scheduler UDS is present, is a socket, has the expected
+/// Verify the flux UDS is present, is a socket, has the expected
 /// filesystem perms (0600 when no group is configured, 0660 when one is),
 /// and is live on `/v1/health`.
-fn assert_scheduler_socket(ssh_key: &str, host: &str) {
-    const SOCK: &str = "/run/coolify/scheduler.sock";
+fn assert_flux_socket(ssh_key: &str, host: &str) {
+    const SOCK: &str = "/run/coolify/flux.sock";
 
     // 1. File type: socket.
     let stat_type = ssh(ssh_key, host, &format!("stat -c %F {SOCK}"))
@@ -96,14 +96,14 @@ fn assert_scheduler_socket(ssh_key: &str, host: &str) {
     .unwrap_or_default();
     assert!(
         ping.contains("\"ok\":true"),
-        "scheduler UDS /v1/health did not return ok on {host}: {ping:?}"
+        "flux UDS /v1/health did not return ok on {host}: {ping:?}"
     );
-    ok(&format!("{host}: scheduler UDS /v1/health → ok"));
+    ok(&format!("{host}: flux UDS /v1/health → ok"));
 }
 
 /// Verify the runtime dirs + systemd unit files coold relies on exist,
 /// are the right object type, and have the expected mode + owner. Called
-/// on every host that runs scheduler (central). Covers the scheduler parent
+/// on every host that runs flux (central). Covers the flux parent
 /// dir, the builder work tree, and both systemd unit files.
 fn assert_core_file_perms(ssh_key: &str, host: &str) {
     // (path, expected `stat -c %F` kind, allowed mode strings, expected owner)
@@ -128,7 +128,7 @@ fn assert_core_file_perms(ssh_key: &str, host: &str) {
             "root",
         ),
         (
-            "/etc/systemd/system/scheduler.service",
+            "/etc/systemd/system/flux.service",
             "regular file",
             &["644"],
             "root",
@@ -155,7 +155,9 @@ fn assert_core_file_perms(ssh_key: &str, host: &str) {
             owner, *want_owner,
             "{path} on {host} owner={owner}, expected {want_owner} ({line})"
         );
-        ok(&format!("{host}: {path} kind={kind} mode={mode} owner={owner}"));
+        ok(&format!(
+            "{host}: {path} kind={kind} mode={mode} owner={owner}"
+        ));
     }
 }
 
@@ -179,7 +181,9 @@ fn assert_default_deny_scaffold(ssh_key: &str, host: &str) {
         intra.contains("-j DROP"),
         "COOLIFY-INTRA missing terminal DROP on {host}:\n{intra}"
     );
-    ok(&format!("{host}: iptables COOLIFY-INTRA has ALLOW→DROP chain"));
+    ok(&format!(
+        "{host}: iptables COOLIFY-INTRA has ALLOW→DROP chain"
+    ));
 
     // nft intra-host bridge scaffold.
     let nft = ssh(ssh_key, host, "nft list table bridge coolify_bridge")

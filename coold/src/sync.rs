@@ -87,10 +87,7 @@ pub async fn run(config: Config) -> Result<()> {
 /// A normal `Ok(())` return is treated as an unexpected early exit and
 /// bubbled up as an error so systemd can restart the daemon instead of
 /// silently losing a worker.
-fn propagate(
-    task: &str,
-    res: std::result::Result<Result<()>, JoinError>,
-) -> Result<()> {
+fn propagate(task: &str, res: std::result::Result<Result<()>, JoinError>) -> Result<()> {
     match res {
         Ok(Ok(())) => {
             warn!(task, "task exited unexpectedly");

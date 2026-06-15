@@ -1,7 +1,7 @@
-//! Minimal fake coold: dials scheduler, sends Hello, answers ListContainers with a stub.
+//! Minimal fake coold: dials flux, sends Hello, answers ListContainers with a stub.
 //!
 //! Usage:
-//!   SCHEDULER_URL=http://127.0.0.1:6443 JWT=<token> cargo run -p scheduler --example fake_coold
+//!   COOLIFY_COOLD_FLUX_URL=http://127.0.0.1:6443 JWT=<token> cargo run -p flux --example fake_coold
 
 use anyhow::{Context, Result};
 use tokio::sync::mpsc;
@@ -19,7 +19,8 @@ use coolify_proto::agent::v1::{
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let url = std::env::var("SCHEDULER_URL").unwrap_or_else(|_| "http://127.0.0.1:6443".into());
+    let url =
+        std::env::var("COOLIFY_COOLD_FLUX_URL").unwrap_or_else(|_| "http://127.0.0.1:6443".into());
     let jwt = std::env::var("JWT").context("JWT env var required")?;
 
     let channel = Channel::from_shared(url.clone())?

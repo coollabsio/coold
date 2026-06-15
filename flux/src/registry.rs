@@ -8,7 +8,7 @@ use crate::{config::Config, state::Streams};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct HeartbeatPayload {
-    pub scheduler_id: String,
+    pub flux_id: String,
     pub public_url: String,
     pub internal_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -19,7 +19,7 @@ pub struct HeartbeatPayload {
 
 impl HeartbeatPayload {
     pub fn new(
-        scheduler_id: impl Into<String>,
+        flux_id: impl Into<String>,
         public_url: impl Into<String>,
         internal_url: impl Into<String>,
         region: Option<&str>,
@@ -27,7 +27,7 @@ impl HeartbeatPayload {
         connected_agents_count: usize,
     ) -> Self {
         Self {
-            scheduler_id: scheduler_id.into(),
+            flux_id: flux_id.into(),
             public_url: public_url.into(),
             internal_url: internal_url.into(),
             region: region.map(str::to_owned),
@@ -39,7 +39,7 @@ impl HeartbeatPayload {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct AgentConnectionPayload {
-    pub scheduler_id: String,
+    pub flux_id: String,
     pub host_id: String,
     pub capabilities: Vec<String>,
     pub builder_capacity: u32,
@@ -49,14 +49,14 @@ pub struct AgentConnectionPayload {
 
 impl AgentConnectionPayload {
     pub fn connected(
-        scheduler_id: impl Into<String>,
+        flux_id: impl Into<String>,
         host_id: impl Into<String>,
         capabilities: Vec<String>,
         builder_capacity: u32,
         coold_version: Option<String>,
     ) -> Self {
         Self {
-            scheduler_id: scheduler_id.into(),
+            flux_id: flux_id.into(),
             host_id: host_id.into(),
             capabilities,
             builder_capacity,
@@ -67,7 +67,7 @@ impl AgentConnectionPayload {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DisconnectPayload {
-    pub scheduler_id: String,
+    pub flux_id: String,
     pub host_id: String,
     pub reason: String,
 }
@@ -77,7 +77,7 @@ pub struct RegistryClient {
     http: reqwest::Client,
     base_url: String,
     token: String,
-    scheduler_id: String,
+    flux_id: String,
     public_url: String,
     internal_url: String,
     region: Option<String>,
@@ -93,12 +93,12 @@ impl RegistryClient {
             .trim_end_matches('/')
             .to_string();
         let token = config.laravel_api_token.as_ref()?.trim().to_string();
-        let scheduler_id = config.scheduler_id.as_ref()?.trim().to_string();
-        let public_url = config.scheduler_public_url.as_ref()?.trim().to_string();
-        let internal_url = config.scheduler_internal_url.as_ref()?.trim().to_string();
+        let flux_id = config.flux_id.as_ref()?.trim().to_string();
+        let public_url = config.flux_public_url.as_ref()?.trim().to_string();
+        let internal_url = config.flux_internal_url.as_ref()?.trim().to_string();
         if base_url.is_empty()
             || token.is_empty()
-            || scheduler_id.is_empty()
+            || flux_id.is_empty()
             || public_url.is_empty()
             || internal_url.is_empty()
         {
@@ -108,17 +108,17 @@ impl RegistryClient {
             http: reqwest::Client::new(),
             base_url,
             token,
-            scheduler_id,
+            flux_id,
             public_url,
             internal_url,
-            region: config.scheduler_region.clone(),
+            region: config.flux_region.clone(),
             capacity: config.agent_capacity,
         })
     }
 
     pub fn heartbeat_payload(&self, connected_agents_count: usize) -> HeartbeatPayload {
         HeartbeatPayload::new(
-            &self.scheduler_id,
+            &self.flux_id,
             &self.public_url,
             &self.internal_url,
             self.region.as_deref(),
@@ -129,7 +129,7 @@ impl RegistryClient {
 
     pub async fn heartbeat(&self, connected_agents_count: usize) -> Result<()> {
         self.post(
-            "/api/v1/internal/schedulers/heartbeat",
+            "/api/v1/internal/fluxs/heartbeat",
             &self.heartbeat_payload(connected_agents_count),
         )
         .await
@@ -143,7 +143,7 @@ impl RegistryClient {
         coold_version: Option<String>,
     ) -> Result<()> {
         let payload = AgentConnectionPayload::connected(
-            &self.scheduler_id,
+            &self.flux_id,
             host_id,
             capabilities,
             builder_capacity,
@@ -155,7 +155,7 @@ impl RegistryClient {
 
     pub async fn disconnect(&self, host_id: &str, reason: &str) -> Result<()> {
         let payload = DisconnectPayload {
-            scheduler_id: self.scheduler_id.clone(),
+            flux_id: self.flux_id.clone(),
             host_id: host_id.to_owned(),
             reason: reason.to_owned(),
         };
@@ -194,10 +194,7 @@ pub async fn heartbeat_loop(config: Config, streams: Streams) -> Result<()> {
     loop {
         ticker.tick().await;
         if let Err(e) = client.heartbeat(streams.len()).await {
-            warn!(
-                error = format!("{e:#}"),
-                "Laravel scheduler heartbeat failed"
-            );
+            warn!(error = format!("{e:#}"), "Laravel flux heartbeat failed");
         }
     }
 }
@@ -207,19 +204,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn heartbeat_payload_includes_scheduler_identity_and_capacity() {
+    fn heartbeat_payload_includes_flux_identity_and_capacity() {
         let payload = HeartbeatPayload::new(
-            "sched-eu-1",
-            "https://sched-eu-1.agent.coolify.io",
-            "http://sched-eu-1.internal:6444",
+            "flux-eu-1",
+            "https://flux-eu-1.agent.coolify.io",
+            "http://flux-eu-1.internal:6444",
             Some("eu"),
             10_000,
             42,
         );
 
-        assert_eq!(payload.scheduler_id, "sched-eu-1");
-        assert_eq!(payload.public_url, "https://sched-eu-1.agent.coolify.io");
-        assert_eq!(payload.internal_url, "http://sched-eu-1.internal:6444");
+        assert_eq!(payload.flux_id, "flux-eu-1");
+        assert_eq!(payload.public_url, "https://flux-eu-1.agent.coolify.io");
+        assert_eq!(payload.internal_url, "http://flux-eu-1.internal:6444");
         assert_eq!(payload.region.as_deref(), Some("eu"));
         assert_eq!(payload.capacity, 10_000);
         assert_eq!(payload.connected_agents_count, 42);
@@ -228,14 +225,14 @@ mod tests {
     #[test]
     fn connection_payload_carries_stream_ownership() {
         let payload = AgentConnectionPayload::connected(
-            "sched-eu-1",
+            "flux-eu-1",
             "100.64.0.5",
             vec!["coold".into(), "builder".into()],
             2,
             Some("0.1.0".into()),
         );
 
-        assert_eq!(payload.scheduler_id, "sched-eu-1");
+        assert_eq!(payload.flux_id, "flux-eu-1");
         assert_eq!(payload.host_id, "100.64.0.5");
         assert_eq!(payload.capabilities, vec!["coold", "builder"]);
         assert_eq!(payload.builder_capacity, 2);

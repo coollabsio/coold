@@ -104,9 +104,7 @@ async fn run_for_gateway(
                 continue;
             }
             Err(e) => {
-                return Err(e.context(format!(
-                    "dns bind/serve on {addr} (namespace {namespace})"
-                )))
+                return Err(e.context(format!("dns bind/serve on {addr} (namespace {namespace})")))
             }
         }
     }

@@ -1,5 +1,5 @@
 //! JSON envelope types exchanged with the central caller (Laravel) over the
-//! scheduler UDS. Serde shape is deliberately stable — these are the public API.
+//! flux UDS. Serde shape is deliberately stable — these are the public API.
 //!
 //! Coold side (`/v1/coold/*`): `DispatchEnvelope` / `ResponseEnvelope`.
 //! Build side (`/v1/build/*`): `BuildDispatchEnvelope` / `BuildResponseEnvelope`.
@@ -89,7 +89,7 @@ impl ResponseBody {
 
 #[derive(Debug, Deserialize)]
 pub struct BuildDispatchEnvelope {
-    /// Pin to a specific host. Absent → scheduler load-balances across
+    /// Pin to a specific host. Absent → flux load-balances across
     /// builder-capable hosts.
     #[serde(default)]
     pub host_id: Option<String>,

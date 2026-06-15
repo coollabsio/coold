@@ -60,10 +60,7 @@ impl PodmanClient {
             .await
             .with_context(|| format!("podman GET {path}"))?;
         if !res.status().is_success() {
-            return Err(anyhow!(
-                "podman {path} returned HTTP {}",
-                res.status()
-            ));
+            return Err(anyhow!("podman {path} returned HTTP {}", res.status()));
         }
         Ok(res)
     }
@@ -82,10 +79,7 @@ impl PodmanClient {
     }
 }
 
-async fn read_json<T: DeserializeOwned>(
-    res: Response<Incoming>,
-    path: &str,
-) -> Result<T> {
+async fn read_json<T: DeserializeOwned>(res: Response<Incoming>, path: &str) -> Result<T> {
     let status = res.status();
     let bytes = res
         .into_body()

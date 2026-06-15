@@ -28,7 +28,7 @@ pub struct FirewallFlags {
     pub wg_interface: String,
     #[arg(long)]
     pub coold_token: Option<String>,
-    #[arg(long, default_value_t = services::coold::COOLD_API_PORT)]
+    #[arg(long, default_value_t = services::coold::COOLIFY_COOLD_API_PORT)]
     pub coold_port: u16,
 }
 #[derive(Debug, Args)]
@@ -166,7 +166,7 @@ async fn token<R: Runner>(runner: &R, host: &str, flags: &FirewallFlags) -> Resu
             host,
             &flags.ssh.ssh_user,
             flags.ssh.ssh_port,
-            &format!("cat {}", services::coold::COOLD_API_TOKEN_PATH),
+            &format!("cat {}", services::coold::COOLIFY_COOLD_API_TOKEN_PATH),
         )
         .await?;
     let token = out.stdout.trim();
@@ -580,7 +580,10 @@ mod tests {
         std::env::remove_var("COOLIFY_COOLD_TOKEN");
 
         let runner = FakeRunner {
-            responses: vec![(services::coold::COOLD_API_TOKEN_PATH, "file-token\n")],
+            responses: vec![(
+                services::coold::COOLIFY_COOLD_API_TOKEN_PATH,
+                "file-token\n",
+            )],
             ..Default::default()
         };
         assert_eq!(token(&runner, "h1", &f).await.unwrap(), "file-token");
@@ -604,7 +607,7 @@ mod tests {
         let runner = FakeRunner {
             responses: vec![
                 ("ip -4 -o addr show dev wg0", "100.64.0.9\n"),
-                (services::coold::COOLD_API_TOKEN_PATH, "tok\n"),
+                (services::coold::COOLIFY_COOLD_API_TOKEN_PATH, "tok\n"),
                 ("curl -fsS", "[]"),
             ],
             ..Default::default()

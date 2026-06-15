@@ -28,7 +28,14 @@ pub async fn handle(
                     message: format!("{e:#}"),
                 }),
             };
-            send_response(&tx, Response { request_id, body: Some(body) }).await;
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
         }
         server_msg::Command::Build(req) => match builder_ctx {
             Some(ctx) => ctx.dispatch(request_id, req, tx),
@@ -42,7 +49,14 @@ pub async fn handle(
                         },
                     )),
                 });
-                send_response(&tx, Response { request_id, body: Some(body) }).await;
+                send_response(
+                    &tx,
+                    Response {
+                        request_id,
+                        body: Some(body),
+                    },
+                )
+                .await;
             }
         },
         server_msg::Command::CancelBuild(_) => match builder_ctx {
@@ -104,5 +118,7 @@ async fn list_containers(podman: &PodmanClient) -> Result<ListContainersResp> {
         })
         .collect();
 
-    Ok(ListContainersResp { containers: summaries })
+    Ok(ListContainersResp {
+        containers: summaries,
+    })
 }

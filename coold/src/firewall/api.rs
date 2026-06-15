@@ -178,10 +178,7 @@ struct BulkResponse {
     total: usize,
 }
 
-async fn reconcile(
-    State(s): State<ApiState>,
-    headers: HeaderMap,
-) -> Result<StatusCode, ApiError> {
+async fn reconcile(State(s): State<ApiState>, headers: HeaderMap) -> Result<StatusCode, ApiError> {
     authorize(&headers, &s.token)?;
     s.store
         .reconcile_from_file()

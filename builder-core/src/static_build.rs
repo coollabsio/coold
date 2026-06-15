@@ -38,11 +38,24 @@ pub async fn run(
     // unless terminated with `--`. Without it a malicious `repo_url` like
     // `--upload-pack=...` becomes a flag and runs arbitrary commands. Same
     // story for `git_ref` on `checkout` / `fetch`.
-    emit(sink, "git", format!("cloning {} @ {}", req.repo_url, req.git_ref), 0);
+    emit(
+        sink,
+        "git",
+        format!("cloning {} @ {}", req.repo_url, req.git_ref),
+        0,
+    );
 
     if !run_ok(
         "git",
-        &["clone", "--depth", "1", "--no-tags", "--", &req.repo_url, "repo"],
+        &[
+            "clone",
+            "--depth",
+            "1",
+            "--no-tags",
+            "--",
+            &req.repo_url,
+            "repo",
+        ],
         work_dir,
     )
     .await?
@@ -60,17 +73,30 @@ pub async fn run(
         )
         .await?
         {
-            return Err(err(500, "git", format!("git fetch ref {} failed", req.git_ref)));
+            return Err(err(
+                500,
+                "git",
+                format!("git fetch ref {} failed", req.git_ref),
+            ));
         }
         run_ok("git", &["checkout", "--", "FETCH_HEAD"], &repo_dir).await?;
     }
 
     emit(sink, "git", "clone complete", 10);
 
-    emit(sink, "detect", format!("checking output_dir: {output_dir}"), 15);
+    emit(
+        sink,
+        "detect",
+        format!("checking output_dir: {output_dir}"),
+        15,
+    );
     let out_path = repo_dir.join(&output_dir);
     if !out_path.exists() {
-        return Err(err(400, "detect", format!("output_dir '{output_dir}' not found in repo")));
+        return Err(err(
+            400,
+            "detect",
+            format!("output_dir '{output_dir}' not found in repo"),
+        ));
     }
 
     let containerfile = format!("FROM {base_image}\nCOPY ./{output_dir} /usr/share/nginx/html\n");
@@ -78,7 +104,12 @@ pub async fn run(
         .await
         .map_err(|e| err(500, "detect", format!("write Containerfile: {e}")))?;
 
-    emit(sink, "build", format!("buildah bud → {}", req.target_image), 20);
+    emit(
+        sink,
+        "build",
+        format!("buildah bud → {}", req.target_image),
+        20,
+    );
     info!(target_image = %req.target_image, "starting buildah bud");
 
     // `--iidfile` writes the image ID (sha256:… of the OCI config) during
@@ -109,7 +140,11 @@ pub async fn run(
     )
     .await?
     {
-        return Err(err(500, "build", format!("buildah bud failed for {}", req.target_image)));
+        return Err(err(
+            500,
+            "build",
+            format!("buildah bud failed for {}", req.target_image),
+        ));
     }
 
     emit(sink, "build", "build complete", 80);
@@ -117,11 +152,21 @@ pub async fn run(
     emit(sink, "store", "reading image digest", 90);
     let digest = tokio::fs::read_to_string(&iid_path)
         .await
-        .map_err(|e| err(500, "store", format!("read iidfile {}: {e}", iid_path.display())))?
+        .map_err(|e| {
+            err(
+                500,
+                "store",
+                format!("read iidfile {}: {e}", iid_path.display()),
+            )
+        })?
         .trim()
         .to_owned();
     if !digest.starts_with("sha256:") {
-        return Err(err(500, "store", format!("unexpected iidfile content: {digest:?}")));
+        return Err(err(
+            500,
+            "store",
+            format!("unexpected iidfile content: {digest:?}"),
+        ));
     }
 
     let registry_ref = format!("{}@{}", req.target_image, digest);
@@ -220,8 +265,12 @@ fn is_safe_output_dir(s: &str) -> bool {
     if p.is_absolute() {
         return false;
     }
-    p.components()
-        .all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+    p.components().all(|c| {
+        matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    })
 }
 
 #[cfg(test)]

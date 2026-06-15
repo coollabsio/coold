@@ -1,6 +1,6 @@
-//! Builder + scheduler lifecycle e2e. Provisions 2 Hetzner VMs
+//! Builder + flux lifecycle e2e. Provisions 2 Hetzner VMs
 //! (A = central + builder, B = coold-only), runs `coolify init bootstrap`,
-//! then exercises every scheduler dispatch path, cancel, restart-adoption,
+//! then exercises every flux dispatch path, cancel, restart-adoption,
 //! and on-disk artifact permissions against the live cluster.
 //!
 //! Single bundled `#[test]` so one 2-VM cluster is reused across every
@@ -17,9 +17,7 @@ use std::time::Duration;
 
 use e2e_tests::hetzner::EphemeralCluster;
 use e2e_tests::install::{local_coolify, ssh, unit_active, wg0_ip, InstallEnv};
-use e2e_tests::{
-    build_envelope, log_line, set_tag, uniq_req_id, wait_until, DispatchResult, Env,
-};
+use e2e_tests::{build_envelope, log_line, set_tag, uniq_req_id, wait_until, DispatchResult, Env};
 
 // Small static-site repo for happy-path fixtures.
 const SMALL_REPO: &str = "https://github.com/mdn/beginner-html-site";
@@ -72,18 +70,18 @@ fn builder_lifecycle() {
     .expect("coolify init bootstrap");
     ok("init bootstrap returned success");
 
-    // 2. Wait for coold + scheduler to be active. The CLI returns once the
+    // 2. Wait for coold + flux to be active. The CLI returns once the
     //    systemd units are enabled, but the services may still be in
-    //    `activating`; dispatch tests fail hard if scheduler isn't ready.
+    //    `activating`; dispatch tests fail hard if flux isn't ready.
     step("2/9  wait systemd units active");
     assert!(
         wait_until(
-            || unit_active(&cfg.ssh_key, &host_a, "scheduler"),
+            || unit_active(&cfg.ssh_key, &host_a, "flux"),
             Duration::from_secs(60),
         ),
-        "scheduler never active on {host_a}"
+        "flux never active on {host_a}"
     );
-    ok(&format!("{host_a}: scheduler active"));
+    ok(&format!("{host_a}: flux active"));
     assert!(
         wait_until(
             || unit_active(&cfg.ssh_key, &host_a, "coold"),
@@ -102,11 +100,13 @@ fn builder_lifecycle() {
     ok(&format!("{host_b}: coold active"));
 
     // 3. Resolve wg0 mgmt IPs post-install. These are the `host_id`
-    //    values the scheduler matches against.
+    //    values the flux matches against.
     step("3/9  resolve wg0 addresses");
     let builder_mgmt = wg0_ip(&cfg.ssh_key, &host_a);
     let cool_only_mgmt = wg0_ip(&cfg.ssh_key, &host_b);
-    ok(&format!("builder_mgmt={builder_mgmt}  cool_only_mgmt={cool_only_mgmt}"));
+    ok(&format!(
+        "builder_mgmt={builder_mgmt}  cool_only_mgmt={cool_only_mgmt}"
+    ));
 
     let env = Env::from_cluster(&cluster, builder_mgmt, cool_only_mgmt);
 
@@ -152,11 +152,11 @@ fn scenario_builder_env_rendered(cfg: &InstallEnv, host_a: &str, host_b: &str) {
     .unwrap_or_else(|e| panic!("read coold.service on {host_a}: {e}"));
 
     for want in [
-        "Environment=COOLD_BUILDER_ENABLED=true",
-        "Environment=COOLD_BUILDER_CPU_QUOTA=150%",
-        "Environment=COOLD_BUILDER_MEMORY_MAX=1G",
-        "Environment=COOLD_BUILDER_TIMEOUT_SECS=900",
-        "Environment=COOLD_BUILDER_CAPACITY=2",
+        "Environment=COOLIFY_COOLD_BUILDER_ENABLED=true",
+        "Environment=COOLIFY_COOLD_BUILDER_CPU_QUOTA=150%",
+        "Environment=COOLIFY_COOLD_BUILDER_MEMORY_MAX=1G",
+        "Environment=COOLIFY_COOLD_BUILDER_TIMEOUT_SECS=900",
+        "Environment=COOLIFY_COOLD_BUILDER_CAPACITY=2",
     ] {
         assert!(
             unit_a.contains(want),
@@ -174,7 +174,7 @@ fn scenario_builder_env_rendered(cfg: &InstallEnv, host_a: &str, host_b: &str) {
     )
     .unwrap_or_else(|e| panic!("read coold.service on {host_b}: {e}"));
     assert!(
-        !unit_b.contains("COOLD_BUILDER_"),
+        !unit_b.contains("COOLIFY_COOLD_BUILDER_"),
         "coold-only host {host_b} unexpectedly has builder env:\n{unit_b}"
     );
     ok(&format!("{host_b}: coold.service has no builder env"));
@@ -187,8 +187,15 @@ fn scenario_pin_to_builder(e: &Env) {
     let payload = build_envelope(&req, &e.builder_mgmt, SMALL_REPO, "main", &target, ".");
     let resp = e.dispatch_and_wait(&payload, &req, Duration::from_secs(180));
     assert_eq!(resp.status, "ok", "unexpected response: {resp:?}");
-    assert!(resp.digest.starts_with("sha256:"), "digest={:?}", resp.digest);
-    assert!(e.has_image(&e.builder_host, &req), "image missing on builder");
+    assert!(
+        resp.digest.starts_with("sha256:"),
+        "digest={:?}",
+        resp.digest
+    );
+    assert!(
+        e.has_image(&e.builder_host, &req),
+        "image missing on builder"
+    );
     assert!(
         !e.has_image(&e.cool_only_host, &req),
         "image leaked to coold-only host"
@@ -232,7 +239,7 @@ fn scenario_load_balance(e: &Env) {
     let req = uniq_req_id("e2e-lb");
     let target = format!("localhost/{req}");
 
-    // host_id empty → scheduler picks.
+    // host_id empty → flux picks.
     let payload = build_envelope(&req, "", SMALL_REPO, "main", &target, ".");
     let resp = e.dispatch_and_wait(&payload, &req, Duration::from_secs(180));
     assert_eq!(resp.status, "ok", "unexpected response: {resp:?}");
@@ -373,5 +380,8 @@ fn assert_build_artifact_perms(e: &Env, host: &str, req: &str) {
         .unwrap_or_else(|err| panic!("stat {events_ndjson}: {err}"));
     assert_eq!(kind, "regular file", "{events_ndjson} kind={kind:?}");
     assert_eq!(mode, "600", "{events_ndjson} mode={mode}, expected 600");
-    assert_eq!(owner, "root", "{events_ndjson} owner={owner}, expected root");
+    assert_eq!(
+        owner, "root",
+        "{events_ndjson} owner={owner}, expected root"
+    );
 }

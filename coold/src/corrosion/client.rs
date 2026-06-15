@@ -16,7 +16,10 @@ pub struct Statement {
 
 impl Statement {
     pub fn new(sql: impl Into<String>, params: Vec<Value>) -> Self {
-        Self { sql: sql.into(), params }
+        Self {
+            sql: sql.into(),
+            params,
+        }
     }
 
     fn to_json(&self) -> Value {
@@ -67,10 +70,7 @@ impl CorrosionClient {
     }
 
     /// Load the subset of `service_endpoints` owned by the given host.
-    pub async fn snapshot_for_host(
-        &self,
-        host_mgmt_ip: &str,
-    ) -> Result<HashMap<String, Endpoint>> {
+    pub async fn snapshot_for_host(&self, host_mgmt_ip: &str) -> Result<HashMap<String, Endpoint>> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = json!([
             "SELECT container_id, container_name, namespace, host_mgmt_ip, container_ip, state, health \
@@ -150,7 +150,9 @@ fn parse_ip_column(bytes: &[u8]) -> Result<Vec<String>> {
             if row.len() != 2 {
                 continue;
             }
-            let Some(values) = row[1].as_array() else { continue };
+            let Some(values) = row[1].as_array() else {
+                continue;
+            };
             if let Some(ip) = values.first().and_then(|v| v.as_str()) {
                 out.push(ip.to_string());
             }
@@ -174,7 +176,9 @@ fn parse_rows(bytes: &[u8]) -> Result<HashMap<String, Endpoint>> {
             if row.len() != 2 {
                 continue;
             }
-            let Some(values) = row[1].as_array() else { continue };
+            let Some(values) = row[1].as_array() else {
+                continue;
+            };
             if values.len() < 7 {
                 continue;
             }

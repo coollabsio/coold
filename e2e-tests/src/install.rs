@@ -90,11 +90,7 @@ pub fn local_coolify(coolify_bin: &str, args: &[&str]) -> Result<String, String>
         .output()
         .map_err(|e| format!("spawn {coolify_bin}: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "coolify {:?} exit {:?}",
-            args,
-            out.status.code()
-        ));
+        return Err(format!("coolify {:?} exit {:?}", args, out.status.code()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -150,34 +146,21 @@ pub fn podman_pull(ssh_key: &str, host: &str, image: &str) {
 }
 
 /// Start a detached container and return its IP on `net`.
-pub fn run_container(
-    ssh_key: &str,
-    host: &str,
-    name: &str,
-    net: &str,
-    image: &str,
-) -> String {
+pub fn run_container(ssh_key: &str, host: &str, name: &str, net: &str, image: &str) -> String {
     // `sleep infinity` keeps alpine alive without needing an init.
     ssh(
         ssh_key,
         host,
-        &format!(
-            "podman run -d --name {name} --network {net} {image} sleep infinity >/dev/null"
-        ),
+        &format!("podman run -d --name {name} --network {net} {image} sleep infinity >/dev/null"),
     )
     .unwrap_or_else(|e| panic!("run_container {name} on {host}: {e}"));
 
     // Fetch IP on the given bridge. `index` is required because network
     // names contain hyphens, which Go templates can't dot-access as
     // identifiers (`.Networks.coolify-default-mesh` is a parse error).
-    let tpl =
-        format!(r#"{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}"#);
-    let out = ssh(
-        ssh_key,
-        host,
-        &format!("podman inspect -f '{tpl}' {name}"),
-    )
-    .unwrap_or_else(|e| panic!("inspect {name}: {e}"));
+    let tpl = format!(r#"{{{{(index .NetworkSettings.Networks "{net}").IPAddress}}}}"#);
+    let out = ssh(ssh_key, host, &format!("podman inspect -f '{tpl}' {name}"))
+        .unwrap_or_else(|e| panic!("inspect {name}: {e}"));
     let ip = out.trim().to_string();
     assert!(!ip.is_empty(), "container {name} has no IP on {net}");
     ip
@@ -196,9 +179,7 @@ pub fn podman_ping(ssh_key: &str, host: &str, from: &str, to_ip: &str) -> bool {
     ssh(
         ssh_key,
         host,
-        &format!(
-            "podman exec {from} ping -c1 -W2 {to_ip} >/dev/null 2>&1 && echo Y || echo N"
-        ),
+        &format!("podman exec {from} ping -c1 -W2 {to_ip} >/dev/null 2>&1 && echo Y || echo N"),
     )
     .map(|s| s.trim() == "Y")
     .unwrap_or(false)
@@ -239,8 +220,7 @@ pub fn coold_allow(
          http://{mgmt_ip}:8443/api/v1/firewall/allow \
          -d '{body_json}'"
     );
-    let out = ssh(ssh_key, host, &cmd)
-        .unwrap_or_else(|e| panic!("coold_allow on {host}: {e}"));
+    let out = ssh(ssh_key, host, &cmd).unwrap_or_else(|e| panic!("coold_allow on {host}: {e}"));
     let v: serde_json::Value = serde_json::from_str(out.trim())
         .unwrap_or_else(|e| panic!("parse allow response {out:?}: {e}"));
     v["id"]
@@ -249,20 +229,13 @@ pub fn coold_allow(
         .to_string()
 }
 
-pub fn coold_revoke(
-    ssh_key: &str,
-    host: &str,
-    mgmt_ip: &str,
-    token: &str,
-    id: &str,
-) {
+pub fn coold_revoke(ssh_key: &str, host: &str, mgmt_ip: &str, token: &str, id: &str) {
     let cmd = format!(
         "curl -fsS -XDELETE \
          -H 'Authorization: Bearer {token}' \
          http://{mgmt_ip}:8443/api/v1/firewall/allow/{id}"
     );
-    ssh(ssh_key, host, &cmd)
-        .unwrap_or_else(|e| panic!("coold_revoke {id} on {host}: {e}"));
+    ssh(ssh_key, host, &cmd).unwrap_or_else(|e| panic!("coold_revoke {id} on {host}: {e}"));
 }
 
 /// Default path where the CLI writes the api bearer token on central hosts.
@@ -309,9 +282,7 @@ pub fn ssh_http(
         Some(b) => format!(" -H 'Content-Type: application/json' --data '{b}'"),
         None => String::new(),
     };
-    let cmd = format!(
-        "curl -sS -X {method}{body_arg} -w '\\n__CODE__%{{http_code}}__' {url}"
-    );
+    let cmd = format!("curl -sS -X {method}{body_arg} -w '\\n__CODE__%{{http_code}}__' {url}");
     let out = ssh(ssh_key, host, &cmd)?;
     let (body, code_part) = out
         .rsplit_once("__CODE__")

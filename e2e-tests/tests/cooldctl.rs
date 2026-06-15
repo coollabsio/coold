@@ -23,7 +23,7 @@ use e2e_tests::install::{
 const MGMT_POOL: &str = "100.64.0.0/16";
 const CONTAINER_POOL: &str = "10.210.0.0/16";
 const CORE_UNITS: &[&str] = &["coold", "corrosion", "coolify-mesh-fw", "wg-quick@wg0"];
-const CENTRAL_UNITS: &[&str] = &["scheduler"];
+const CENTRAL_UNITS: &[&str] = &["flux"];
 
 fn step(msg: &str) {
     e2e_tests::log_line(&format!("─── {msg} ───"));

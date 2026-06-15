@@ -77,9 +77,7 @@ impl HetznerClient {
         }
         cmd.arg(&url);
 
-        let out = cmd
-            .output()
-            .map_err(|e| format!("curl spawn: {e}"))?;
+        let out = cmd.output().map_err(|e| format!("curl spawn: {e}"))?;
         if !out.status.success() {
             return Err(format!(
                 "curl {method} {path} exit {:?}: {}",
@@ -132,11 +130,7 @@ impl HetznerClient {
         let target = normalize_pubkey(pubkey);
         let mut page = 1u32;
         loop {
-            let resp = self.curl(
-                "GET",
-                &format!("/ssh_keys?per_page=50&page={page}"),
-                None,
-            )?;
+            let resp = self.curl("GET", &format!("/ssh_keys?per_page=50&page={page}"), None)?;
             let items = resp["ssh_keys"].as_array().cloned().unwrap_or_default();
             for k in &items {
                 if let Some(pk) = k["public_key"].as_str() {
@@ -262,8 +256,8 @@ impl EphemeralCluster {
     pub fn provision(count: usize, prefix: &str) -> Self {
         assert!(count >= 1, "count must be >= 1");
         let ssh_key = must_env("SSH_KEY");
-        let pubkey = derive_pubkey(&ssh_key)
-            .unwrap_or_else(|e| panic!("derive pubkey from {ssh_key}: {e}"));
+        let pubkey =
+            derive_pubkey(&ssh_key).unwrap_or_else(|e| panic!("derive pubkey from {ssh_key}: {e}"));
 
         let client = Arc::new(HetznerClient::from_env());
         let location = std::env::var("HETZNER_LOCATION").unwrap_or_else(|_| "nbg1".into());
@@ -363,7 +357,10 @@ impl Drop for EphemeralCluster {
         // running for manual poking. Clean them up later with the
         // cleanup_leaked_hetzner sweeper (CONFIRM_SWEEP=1) or the Hetzner UI.
         if std::env::var("E2E_KEEP_VMS").as_deref() == Ok("1") {
-            hlog!("E2E_KEEP_VMS=1 — keeping {} server(s) alive:", self.servers.len());
+            hlog!(
+                "E2E_KEEP_VMS=1 — keeping {} server(s) alive:",
+                self.servers.len()
+            );
             for s in &self.servers {
                 hlog!("  kept server {} ({}) {}", s.id, s.name, s.ipv4);
             }
@@ -397,12 +394,7 @@ impl Drop for EphemeralCluster {
     }
 }
 
-fn best_effort_cleanup(
-    client: &HetznerClient,
-    key_id: u64,
-    key_owned: bool,
-    servers: &[Server],
-) {
+fn best_effort_cleanup(client: &HetznerClient, key_id: u64, key_owned: bool, servers: &[Server]) {
     for s in servers {
         if let Err(e) = client.delete_server(s.id) {
             hlog!("WARN cleanup delete server {}: {e}", s.id);
@@ -476,8 +468,7 @@ fn normalize_pubkey(pk: &str) -> String {
 fn derive_pubkey(privkey_path: &str) -> Result<String, String> {
     let sibling = format!("{privkey_path}.pub");
     if std::path::Path::new(&sibling).exists() {
-        let pk = std::fs::read_to_string(&sibling)
-            .map_err(|e| format!("read {sibling}: {e}"))?;
+        let pk = std::fs::read_to_string(&sibling).map_err(|e| format!("read {sibling}: {e}"))?;
         return Ok(pk.trim().to_string());
     }
     let out = Command::new("ssh-keygen")
@@ -493,7 +484,9 @@ fn derive_pubkey(privkey_path: &str) -> Result<String, String> {
     }
     let pk = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if pk.is_empty() {
-        return Err(format!("ssh-keygen produced empty output for {privkey_path}"));
+        return Err(format!(
+            "ssh-keygen produced empty output for {privkey_path}"
+        ));
     }
     Ok(pk)
 }

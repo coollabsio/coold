@@ -18,13 +18,7 @@ use std::{
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use tokio::{
-    fs,
-    io::AsyncWriteExt,
-    process::Command,
-    sync::Mutex,
-    time,
-};
+use tokio::{fs, io::AsyncWriteExt, process::Command, sync::Mutex, time};
 use tracing::{debug, info, warn};
 
 /// Cap blocking iptables-restore / nft -f - invocations so a hung child can
@@ -379,7 +373,9 @@ impl FirewallStore {
 
         if out.status.success() {
             // nft applied cleanly — clear warned flag and persist to disk.
-            self.inner.bridge_plane_warned.store(false, Ordering::Relaxed);
+            self.inner
+                .bridge_plane_warned
+                .store(false, Ordering::Relaxed);
             self.write_bridge_snapshot(fragment.as_bytes()).await?;
             return Ok(());
         }
@@ -409,11 +405,17 @@ impl FirewallStore {
                 .await
                 .with_context(|| format!("mkdir {}", parent.display()))?;
         }
-        let file_name = self.inner.cfg.bridge_rules_path
+        let file_name = self
+            .inner
+            .cfg
+            .bridge_rules_path
             .file_name()
             .expect("bridge_rules_path has no filename")
             .to_string_lossy();
-        let tmp = self.inner.cfg.bridge_rules_path
+        let tmp = self
+            .inner
+            .cfg
+            .bridge_rules_path
             .with_file_name(format!("{file_name}.tmp"));
         let mut f = fs::File::create(&tmp)
             .await
@@ -447,7 +449,11 @@ pub struct BulkOutcome {
 /// Sorts by namespace (empty → "default") then by rule id.
 fn rule_sort_key<'a>(r: &'a AllowRule) -> (&'a str, &'a str) {
     (
-        if r.namespace.is_empty() { "default" } else { &r.namespace },
+        if r.namespace.is_empty() {
+            "default"
+        } else {
+            &r.namespace
+        },
         r.id.as_deref().unwrap_or(""),
     )
 }
@@ -470,7 +476,11 @@ fn render_fragment(chain: &str, rules: &[AllowRule]) -> String {
 
     let mut current_ns: Option<&str> = None;
     for r in &sorted {
-        let ns = if r.namespace.is_empty() { "default" } else { &r.namespace };
+        let ns = if r.namespace.is_empty() {
+            "default"
+        } else {
+            &r.namespace
+        };
         if current_ns != Some(ns) {
             out.push_str(&format!("# namespace: {ns}\n"));
             current_ns = Some(ns);
@@ -615,11 +625,14 @@ mod tests {
         let out = render_bridge_fragment(&[r1, r2, r3]);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(
-            lines[0],
-            "flush chain bridge coolify_bridge coolify_allow",
+            lines[0], "flush chain bridge coolify_bridge coolify_allow",
             "first line must be flush"
         );
-        let rule_lines: Vec<&str> = lines[1..].iter().copied().filter(|l| !l.is_empty()).collect();
+        let rule_lines: Vec<&str> = lines[1..]
+            .iter()
+            .copied()
+            .filter(|l| !l.is_empty())
+            .collect();
         assert_eq!(rule_lines.len(), 3, "should have 3 rule lines");
     }
 
@@ -636,6 +649,9 @@ mod tests {
         let out = render_bridge_fragment(&[r1, r2]);
         let alpha_pos = out.find("alpha").unwrap();
         let default_pos = out.find("default").unwrap();
-        assert!(alpha_pos < default_pos, "alpha namespace should appear before default");
+        assert!(
+            alpha_pos < default_pos,
+            "alpha namespace should appear before default"
+        );
     }
 }

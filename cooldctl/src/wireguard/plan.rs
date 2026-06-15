@@ -37,11 +37,11 @@ pub enum ActionType {
     WriteCorrosionSchema,
     InstallCorrosionService,
     InstallCooldService,
-    InstallScheduler,
+    InstallFlux,
     GenerateJwtKeypair,
-    InstallSchedulerService,
+    InstallFluxService,
     WriteHostJwt,
-    UpdateCooldSchedulerEnv,
+    UpdateCooldFluxEnv,
     InstallBuilder,
 }
 impl std::fmt::Display for ActionType {
@@ -406,11 +406,8 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
             &mut plan,
             &desired.central_host,
             "",
-            ActionType::InstallScheduler,
-            &format!(
-                "scheduler {} → /usr/local/bin/scheduler",
-                desired.scheduler_version
-            ),
+            ActionType::InstallFlux,
+            &format!("flux {} → /usr/local/bin/flux", desired.flux_version),
         );
         push(
             &mut plan,
@@ -423,10 +420,10 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
             &mut plan,
             &desired.central_host,
             "",
-            ActionType::InstallSchedulerService,
+            ActionType::InstallFluxService,
             &format!(
-                "scheduler.service (:{} )",
-                services::scheduler::SCHEDULER_GRPC_PORT
+                "flux.service (:{} )",
+                services::flux::COOLIFY_FLUX_GRPC_PORT
             ),
         );
         for host in &desired.nodes {
@@ -435,14 +432,14 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                 host,
                 "",
                 ActionType::WriteHostJwt,
-                services::scheduler::HOST_JWT_PATH,
+                services::flux::HOST_JWT_PATH,
             );
             push(
                 &mut plan,
                 host,
                 "",
-                ActionType::UpdateCooldSchedulerEnv,
-                "coold.service += SCHEDULER_URL + HOST_JWT_PATH",
+                ActionType::UpdateCooldFluxEnv,
+                "coold.service += COOLIFY_COOLD_FLUX_URL + COOLIFY_COOLD_HOST_JWT_PATH",
             );
         }
         for host in &desired.nodes {
@@ -508,7 +505,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -549,7 +546,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -565,7 +562,7 @@ mod tests {
     }
 
     #[test]
-    fn central_host_installs_scheduler_not_coold() {
+    fn central_host_installs_flux_not_coold() {
         let d = DesiredMesh {
             hosts: vec!["central".into(), "worker".into()],
             nodes: vec!["worker".into()],
@@ -583,7 +580,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -599,11 +596,11 @@ mod tests {
         assert!(plan
             .actions
             .iter()
-            .any(|a| a.host == "central" && a.action_type == ActionType::InstallScheduler));
+            .any(|a| a.host == "central" && a.action_type == ActionType::InstallFlux));
         assert!(!plan
             .actions
             .iter()
-            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallScheduler));
+            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallFlux));
         assert!(!plan
             .actions
             .iter()
@@ -633,7 +630,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "one".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -647,7 +644,7 @@ mod tests {
         };
         let plan = build_plan(&d, &MeshState::default()).unwrap();
         for action in [
-            ActionType::InstallScheduler,
+            ActionType::InstallFlux,
             ActionType::InstallCoold,
             ActionType::InstallPodman,
         ] {
@@ -679,7 +676,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -692,10 +689,7 @@ mod tests {
             allow_nightly: false,
         };
         let plan = build_plan(&d, &MeshState::default()).unwrap();
-        for action in [
-            ActionType::InstallWg,
-            ActionType::InstallScheduler,
-        ] {
+        for action in [ActionType::InstallWg, ActionType::InstallFlux] {
             assert!(
                 plan.actions
                     .iter()
@@ -709,7 +703,7 @@ mod tests {
             ActionType::InstallCorrosion,
             ActionType::InstallFirewall,
             ActionType::WriteHostJwt,
-            ActionType::UpdateCooldSchedulerEnv,
+            ActionType::UpdateCooldFluxEnv,
         ] {
             assert!(
                 !plan
@@ -740,7 +734,7 @@ mod tests {
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
             central_host: "central".into(),
-            scheduler_version: "v1".into(),
+            flux_version: "v1".into(),
             enable_builder: false,
             builder_hosts: vec![],
             builder_capacity: 2,

@@ -100,7 +100,7 @@ pub struct DesiredMesh {
     pub corrosion_gossip_port: u16,
     pub corrosion_api_port: u16,
     pub central_host: String,
-    pub scheduler_version: String,
+    pub flux_version: String,
     pub enable_builder: bool,
     pub builder_hosts: Vec<String>,
     pub builder_capacity: u32,

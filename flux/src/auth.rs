@@ -60,13 +60,13 @@ pub fn verify_jwt(token: &str, public_key_pem: &str) -> Result<VerifiedJwt> {
     let mut validation = Validation::new(alg);
     validation.set_audience(&["coold"]);
     // jsonwebtoken 9.x defaults `leeway` to 60s — enough slack for normal NTP
-    // drift between Laravel and the scheduler. Reassert explicitly so a future
+    // drift between Laravel and the flux. Reassert explicitly so a future
     // major-version bump that changes the default surfaces here, not at the
     // expiry boundary.
     validation.leeway = 60;
 
-    let data =
-        decode::<Claims>(token, &key, &validation).map_err(|e| anyhow!("JWT verification failed: {e}"))?;
+    let data = decode::<Claims>(token, &key, &validation)
+        .map_err(|e| anyhow!("JWT verification failed: {e}"))?;
 
     Ok(VerifiedJwt {
         host_id: data.claims.sub,
@@ -92,7 +92,10 @@ mod tests {
     }
 
     fn now() -> usize {
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as usize
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as usize
     }
 
     fn claims(exp_offset: i64) -> TestClaims {
@@ -119,7 +122,12 @@ mod tests {
         let pub_path = dir.path().join("ec.pub.pem");
         assert!(Command::new("openssl")
             .args([
-                "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out",
+                "ecparam",
+                "-name",
+                "prime256v1",
+                "-genkey",
+                "-noout",
+                "-out",
                 priv_path.to_str().unwrap(),
             ])
             .status()
@@ -127,15 +135,24 @@ mod tests {
             .success());
         assert!(Command::new("openssl")
             .args([
-                "pkcs8", "-topk8", "-nocrypt", "-in", priv_path.to_str().unwrap(),
-                "-out", pkcs8_path.to_str().unwrap(),
+                "pkcs8",
+                "-topk8",
+                "-nocrypt",
+                "-in",
+                priv_path.to_str().unwrap(),
+                "-out",
+                pkcs8_path.to_str().unwrap(),
             ])
             .status()
             .unwrap()
             .success());
         assert!(Command::new("openssl")
             .args([
-                "ec", "-in", priv_path.to_str().unwrap(), "-pubout", "-out",
+                "ec",
+                "-in",
+                priv_path.to_str().unwrap(),
+                "-pubout",
+                "-out",
                 pub_path.to_str().unwrap(),
             ])
             .status()
@@ -160,15 +177,24 @@ mod tests {
         let pub_path = dir.path().join("rsa.pub.pem");
         assert!(Command::new("openssl")
             .args([
-                "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
-                "-out", priv_path.to_str().unwrap(),
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                priv_path.to_str().unwrap(),
             ])
             .status()
             .unwrap()
             .success());
         assert!(Command::new("openssl")
             .args([
-                "rsa", "-in", priv_path.to_str().unwrap(), "-pubout", "-out",
+                "rsa",
+                "-in",
+                priv_path.to_str().unwrap(),
+                "-pubout",
+                "-out",
                 pub_path.to_str().unwrap(),
             ])
             .status()
@@ -207,7 +233,9 @@ mod tests {
         // key-confusion attack. Must be rejected purely on alg, before signature check.
         let enc = EncodingKey::from_secret(&keys.pub_pem);
         let jwt = encode(&Header::new(Algorithm::HS256), &claims(3600), &enc).unwrap();
-        let err = verify_jwt(&jwt, std::str::from_utf8(&keys.pub_pem).unwrap()).err().unwrap();
+        let err = verify_jwt(&jwt, std::str::from_utf8(&keys.pub_pem).unwrap())
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("not allowed"), "got: {err}");
     }
 
@@ -218,7 +246,9 @@ mod tests {
         // ES256 token verified against RSA public key — must be rejected on alg.
         let enc = EncodingKey::from_ec_pem(&ec.priv_pkcs8_pem).unwrap();
         let jwt = encode(&Header::new(Algorithm::ES256), &claims(3600), &enc).unwrap();
-        let err = verify_jwt(&jwt, std::str::from_utf8(&rsa.pub_pem).unwrap()).err().unwrap();
+        let err = verify_jwt(&jwt, std::str::from_utf8(&rsa.pub_pem).unwrap())
+            .err()
+            .unwrap();
         assert!(err.to_string().contains("not allowed"), "got: {err}");
     }
 
@@ -227,7 +257,12 @@ mod tests {
         let keys = gen_ec_keys();
         let enc = EncodingKey::from_ec_pem(&keys.priv_pkcs8_pem).unwrap();
         let jwt = encode(&Header::new(Algorithm::ES256), &claims(-3600), &enc).unwrap();
-        let err = verify_jwt(&jwt, std::str::from_utf8(&keys.pub_pem).unwrap()).err().unwrap();
-        assert!(err.to_string().contains("verification failed"), "got: {err}");
+        let err = verify_jwt(&jwt, std::str::from_utf8(&keys.pub_pem).unwrap())
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("verification failed"),
+            "got: {err}"
+        );
     }
 }

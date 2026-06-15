@@ -1,13 +1,13 @@
 [package]
-name = "scheduler"
+name = "flux"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-description = "gRPC stream scheduler: terminates coold streams, exposes HTTP-over-UDS dispatch to the central plane."
+description = "Flux gRPC stream router: terminates coold streams, exposes HTTP-over-UDS dispatch to the central plane."
 license.workspace = true
 
 [[bin]]
-name = "scheduler"
+name = "flux"
 path = "src/main.rs"
 
 [dependencies]

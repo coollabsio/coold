@@ -1,7 +1,7 @@
 //! Generate ES256 keypair and sign a test JWT.
 //!
 //! Usage:
-//!   cargo run -p scheduler --example sign_jwt -- <host_id> <priv_pem_out> <pub_pem_out> [caps]
+//!   cargo run -p flux --example sign_jwt -- <host_id> <priv_pem_out> <pub_pem_out> [caps]
 //!
 //! `caps` is an optional comma-separated capability list; defaults to "coold".
 //! Example: `coold,builder` for a host that should accept build dispatches.
@@ -34,17 +34,38 @@ fn main() -> anyhow::Result<()> {
     let pub_path = &args[3];
     let caps: Vec<String> = args
         .get(4)
-        .map(|s| s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect())
+        .map(|s| {
+            s.split(',')
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect()
+        })
         .unwrap_or_else(|| vec!["coold".to_string()]);
 
     let status = Command::new("openssl")
-        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", priv_path])
+        .args([
+            "ecparam",
+            "-name",
+            "prime256v1",
+            "-genkey",
+            "-noout",
+            "-out",
+            priv_path,
+        ])
         .status()?;
     anyhow::ensure!(status.success(), "openssl ecparam failed");
 
     let pkcs8_path = format!("{priv_path}.pkcs8");
     let status = Command::new("openssl")
-        .args(["pkcs8", "-topk8", "-nocrypt", "-in", priv_path, "-out", &pkcs8_path])
+        .args([
+            "pkcs8",
+            "-topk8",
+            "-nocrypt",
+            "-in",
+            priv_path,
+            "-out",
+            &pkcs8_path,
+        ])
         .status()?;
     anyhow::ensure!(status.success(), "openssl pkcs8 failed");
 

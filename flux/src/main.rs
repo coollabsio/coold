@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
     info!(
         grpc_bind = %config.grpc_bind,
         uds_path = %config.unix_socket_path.display(),
-        "scheduler starting",
+        "flux starting",
     );
 
     let streams = state::Streams::new();
@@ -76,9 +76,9 @@ mod grpc_server {
     pub(super) fn validate_bind(addr: SocketAddr, allow_public: bool) -> Result<()> {
         if addr.ip().is_unspecified() && !allow_public {
             anyhow::bail!(
-                "refusing to bind {addr}: SCHEDULER_GRPC_BIND must be a specific \
+                "refusing to bind {addr}: COOLIFY_FLUX_GRPC_BIND must be a specific \
                  interface IP (typically the WireGuard mgmt IP). Set \
-                 SCHEDULER_ALLOW_PUBLIC_BIND=1 to override (dev only — JWTs \
+                 COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1 to override (dev only — JWTs \
                  cross the wire in cleartext)."
             );
         }
@@ -86,27 +86,30 @@ mod grpc_server {
     }
 
     fn allow_public_bind() -> bool {
-        std::env::var("SCHEDULER_ALLOW_PUBLIC_BIND").ok().as_deref() == Some("1")
+        std::env::var("COOLIFY_FLUX_ALLOW_PUBLIC_BIND")
+            .ok()
+            .as_deref()
+            == Some("1")
     }
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr: SocketAddr = config
             .grpc_bind
             .parse()
-            .with_context(|| format!("parse SCHEDULER_GRPC_BIND={}", config.grpc_bind))?;
+            .with_context(|| format!("parse COOLIFY_FLUX_GRPC_BIND={}", config.grpc_bind))?;
 
         let allow_public = allow_public_bind();
         validate_bind(addr, allow_public)?;
         if addr.ip().is_unspecified() {
             warn!(
                 %addr,
-                "SCHEDULER_ALLOW_PUBLIC_BIND=1 — binding on every interface; \
+                "COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1 — binding on every interface; \
                  JWTs cross the wire unencrypted",
             );
         }
 
         let registry = RegistryClient::from_config(&config);
-        let svc = SchedulerAgent {
+        let svc = FluxAgent {
             config,
             streams,
             pending,
@@ -121,7 +124,7 @@ mod grpc_server {
         Ok(())
     }
 
-    struct SchedulerAgent {
+    struct FluxAgent {
         config: Config,
         streams: Streams,
         pending: Pending,
@@ -131,7 +134,7 @@ mod grpc_server {
     type ServerMsgStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send + 'static>>;
 
     #[tonic::async_trait]
-    impl Agent for SchedulerAgent {
+    impl Agent for FluxAgent {
         type StreamStream = ServerMsgStream;
 
         async fn stream(

@@ -90,11 +90,7 @@ impl BuilderCtx {
 
     pub async fn ensure_work_root(&self) -> std::io::Result<()> {
         tokio::fs::create_dir_all(&self.work_root).await?;
-        tokio::fs::set_permissions(
-            &self.work_root,
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .await
+        tokio::fs::set_permissions(&self.work_root, std::fs::Permissions::from_mode(0o700)).await
     }
 
     /// Resume or reap builder transient units left by a prior coold run.
@@ -109,9 +105,14 @@ impl BuilderCtx {
         if units.is_empty() {
             return;
         }
-        info!(count = units.len(), "resuming builder units from prior coold run");
+        info!(
+            count = units.len(),
+            "resuming builder units from prior coold run"
+        );
         for unit in units {
-            let Some(request_id) = parse_request_id(&unit) else { continue };
+            let Some(request_id) = parse_request_id(&unit) else {
+                continue;
+            };
             let work_dir = self.work_root.join(&request_id);
             let active = systemctl_is_active(&unit).await;
             let result_path = work_dir.join("result.json");
@@ -123,7 +124,9 @@ impl BuilderCtx {
                 // then spawn a waiter task.
                 self.active.lock().await.insert(
                     request_id.clone(),
-                    BuildHandle { unit_name: unit.clone() },
+                    BuildHandle {
+                        unit_name: unit.clone(),
+                    },
                 );
                 let ctx = self.clone();
                 let tx = tx.clone();
@@ -194,7 +197,12 @@ impl BuilderCtx {
     /// Spawn a build. Returns immediately after the subprocess is started;
     /// the reader task stays alive in a detached tokio task and sends the
     /// final `Response` frame on `tx` when the subprocess exits.
-    pub fn dispatch(self: Arc<Self>, request_id: String, req: BuildRequest, tx: mpsc::Sender<ClientMsg>) {
+    pub fn dispatch(
+        self: Arc<Self>,
+        request_id: String,
+        req: BuildRequest,
+        tx: mpsc::Sender<ClientMsg>,
+    ) {
         let ctx = self;
         tokio::spawn(async move {
             // request_id is interpolated into a filesystem path (`work_root`
@@ -211,14 +219,20 @@ impl BuilderCtx {
             let outcome = ctx.run_build(&request_id, req).await;
             drop(permit);
             let body = match outcome {
-                Ok(ok) => BuildResponseBody { body: Some(build_response_body::Body::Ok(ok)) },
-                Err(e) => BuildResponseBody { body: Some(build_response_body::Body::Err(e)) },
+                Ok(ok) => BuildResponseBody {
+                    body: Some(build_response_body::Body::Ok(ok)),
+                },
+                Err(e) => BuildResponseBody {
+                    body: Some(build_response_body::Body::Err(e)),
+                },
             };
             let msg = ClientMsg {
-                payload: Some(crate::grpc::proto::client_msg::Payload::Response(Response {
-                    request_id,
-                    body: Some(response::Body::Build(body)),
-                })),
+                payload: Some(crate::grpc::proto::client_msg::Payload::Response(
+                    Response {
+                        request_id,
+                        body: Some(response::Body::Build(body)),
+                    },
+                )),
             };
             if let Err(e) = tx.send(msg).await {
                 warn!(error = %e, "failed to enqueue build response");
@@ -255,7 +269,11 @@ impl BuilderCtx {
         }
     }
 
-    async fn run_build(&self, request_id: &str, req: BuildRequest) -> Result<BuildResult, BuildError> {
+    async fn run_build(
+        &self,
+        request_id: &str,
+        req: BuildRequest,
+    ) -> Result<BuildResult, BuildError> {
         let work_dir = self.work_root.join(request_id);
         let wd = work_dir.clone();
         tokio::task::spawn_blocking(move || {
@@ -362,8 +380,7 @@ impl BuilderCtx {
         for net in &self.deny_nets {
             cmd.arg("-p").arg(format!("IPAddressDeny={net}"));
         }
-        cmd
-            .arg("--")
+        cmd.arg("--")
             .arg(&self.builder_bin)
             .arg(&req_path)
             .arg(&work_dir)
@@ -371,10 +388,12 @@ impl BuilderCtx {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
-        self.active
-            .lock()
-            .await
-            .insert(request_id.to_string(), BuildHandle { unit_name: unit_name.clone() });
+        self.active.lock().await.insert(
+            request_id.to_string(),
+            BuildHandle {
+                unit_name: unit_name.clone(),
+            },
+        );
 
         let outcome = self.spawn_and_reap(&mut cmd, request_id, &work_dir).await;
 
@@ -410,7 +429,11 @@ impl BuilderCtx {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             match serde_json::from_str::<Frame>(&line) {
-                Ok(Frame::Progress { stage, log, percent }) => {
+                Ok(Frame::Progress {
+                    stage,
+                    log,
+                    percent,
+                }) => {
                     info!(%request_id, %stage, %percent, "{log}");
                 }
                 Ok(Frame::Result { ok }) => {
@@ -450,15 +473,25 @@ fn build_err(code: u32, stage: &str, message: impl Into<String>) -> BuildError {
     }
 }
 
-async fn send_err(tx: &mpsc::Sender<ClientMsg>, request_id: &str, code: u32, message: &str, stage: &str) {
+async fn send_err(
+    tx: &mpsc::Sender<ClientMsg>,
+    request_id: &str,
+    code: u32,
+    message: &str,
+    stage: &str,
+) {
     let body = BuildResponseBody {
-        body: Some(build_response_body::Body::Err(build_err(code, stage, message))),
+        body: Some(build_response_body::Body::Err(build_err(
+            code, stage, message,
+        ))),
     };
     let msg = ClientMsg {
-        payload: Some(crate::grpc::proto::client_msg::Payload::Response(Response {
-            request_id: request_id.to_string(),
-            body: Some(response::Body::Build(body)),
-        })),
+        payload: Some(crate::grpc::proto::client_msg::Payload::Response(
+            Response {
+                request_id: request_id.to_string(),
+                body: Some(response::Body::Build(body)),
+            },
+        )),
     };
     let _ = tx.send(msg).await;
 }
@@ -527,10 +560,13 @@ impl SubprocessStack {
 impl SubprocessRequest {
     fn from_proto(req: &BuildRequest) -> Self {
         let stack = BuildStack::try_from(req.stack).unwrap_or(BuildStack::Unspecified);
-        let static_cfg = req.static_cfg.as_ref().map(|c: &StaticConfig| SubprocessStatic {
-            output_dir: c.output_dir.clone(),
-            base_image: c.base_image.clone(),
-        });
+        let static_cfg = req
+            .static_cfg
+            .as_ref()
+            .map(|c: &StaticConfig| SubprocessStatic {
+                output_dir: c.output_dir.clone(),
+                base_image: c.base_image.clone(),
+            });
         SubprocessRequest {
             repo_url: req.repo_url.clone(),
             git_ref: req.git_ref.clone(),
@@ -545,9 +581,17 @@ impl SubprocessRequest {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Frame {
-    Progress { stage: String, log: String, percent: u32 },
-    Result { ok: FrameResult },
-    Error { err: FrameError },
+    Progress {
+        stage: String,
+        log: String,
+        percent: u32,
+    },
+    Result {
+        ok: FrameResult,
+    },
+    Error {
+        err: FrameError,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,7 +623,11 @@ struct FrameError {
 
 impl FrameError {
     fn into_proto(self) -> BuildError {
-        BuildError { code: self.code, message: self.message, stage: self.stage }
+        BuildError {
+            code: self.code,
+            message: self.message,
+            stage: self.stage,
+        }
     }
 }
 
@@ -708,20 +756,28 @@ struct StoredError {
 
 impl StoredError {
     fn into_proto(self) -> BuildError {
-        BuildError { code: self.code, message: self.message, stage: self.stage }
+        BuildError {
+            code: self.code,
+            message: self.message,
+            stage: self.stage,
+        }
     }
 }
 
 fn body_from_result_bytes(bytes: &[u8]) -> BuildResponseBody {
     match serde_json::from_slice::<StoredResult>(bytes) {
-        Ok(r) => BuildResponseBody { body: Some(build_response_body::Body::Ok(r.into_proto())) },
+        Ok(r) => BuildResponseBody {
+            body: Some(build_response_body::Body::Ok(r.into_proto())),
+        },
         Err(e) => body_fabricated_error(&format!("malformed result.json: {e}")),
     }
 }
 
 fn body_from_error_bytes(bytes: &[u8]) -> BuildResponseBody {
     match serde_json::from_slice::<StoredError>(bytes) {
-        Ok(e) => BuildResponseBody { body: Some(build_response_body::Body::Err(e.into_proto())) },
+        Ok(e) => BuildResponseBody {
+            body: Some(build_response_body::Body::Err(e.into_proto())),
+        },
         Err(e) => body_fabricated_error(&format!("malformed error.json: {e}")),
     }
 }
@@ -742,10 +798,12 @@ async fn emit_build_response(
     body: BuildResponseBody,
 ) {
     let msg = ClientMsg {
-        payload: Some(crate::grpc::proto::client_msg::Payload::Response(Response {
-            request_id: request_id.to_owned(),
-            body: Some(response::Body::Build(body)),
-        })),
+        payload: Some(crate::grpc::proto::client_msg::Payload::Response(
+            Response {
+                request_id: request_id.to_owned(),
+                body: Some(response::Body::Build(body)),
+            },
+        )),
     };
     if let Err(e) = tx.send(msg).await {
         warn!(%request_id, error = %e, "failed to enqueue resumed build response");

@@ -2,9 +2,13 @@
 //! No I/O, no stream writes — callers (the UDS bridge) map outcomes to
 //! side effects. Separating this keeps routing logic unit-testable.
 
-use coolify_proto::agent::v1::{server_msg, BuildRequest, CancelBuild, ListContainersReq, ServerMsg, StaticConfig};
+use coolify_proto::agent::v1::{
+    server_msg, BuildRequest, CancelBuild, ListContainersReq, ServerMsg, StaticConfig,
+};
 
-use crate::envelope::{BuildCommandPayload, BuildDispatchEnvelope, CommandPayload, DispatchEnvelope};
+use crate::envelope::{
+    BuildCommandPayload, BuildDispatchEnvelope, CommandPayload, DispatchEnvelope,
+};
 use crate::state::{InsertOutcome, Pending, PendingKind, Streams};
 
 /// What the caller should do next. `SendCoold` / `SendBuild` / `SendCancel`
@@ -101,7 +105,7 @@ pub fn route_build(
                 InsertOutcome::AtCapacity => {
                     return RouteOutcome::PushError {
                         code: 503,
-                        message: "scheduler at pending-dispatch capacity",
+                        message: "flux at pending-dispatch capacity",
                     };
                 }
             }
@@ -114,14 +118,18 @@ pub fn route_build(
                 cache_key: String::new(),
                 static_cfg: Some(StaticConfig {
                     output_dir: output_dir.unwrap_or_else(|| "dist".into()),
-                    base_image: base_image.unwrap_or_else(|| "docker.io/library/nginx:alpine".into()),
+                    base_image: base_image
+                        .unwrap_or_else(|| "docker.io/library/nginx:alpine".into()),
                 }),
             };
             let msg = ServerMsg {
                 request_id: env.request_id,
                 command: Some(server_msg::Command::Build(build_req)),
             };
-            RouteOutcome::SendBuild { host_id: target_host, msg }
+            RouteOutcome::SendBuild {
+                host_id: target_host,
+                msg,
+            }
         }
         BuildCommandPayload::Cancel {} => {
             let Some(entry) = pending.get(&env.request_id) else {
@@ -131,13 +139,18 @@ pub fn route_build(
                 };
             };
             if !streams.has_cap(&entry.host_id, "builder") {
-                return RouteOutcome::DropCancelHostGone { host_id: entry.host_id };
+                return RouteOutcome::DropCancelHostGone {
+                    host_id: entry.host_id,
+                };
             }
             let msg = ServerMsg {
                 request_id: env.request_id,
                 command: Some(server_msg::Command::CancelBuild(CancelBuild {})),
             };
-            RouteOutcome::SendCancel { host_id: entry.host_id, msg }
+            RouteOutcome::SendCancel {
+                host_id: entry.host_id,
+                msg,
+            }
         }
     }
 }

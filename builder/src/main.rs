@@ -121,7 +121,9 @@ async fn main() -> ExitCode {
     install_sigpipe_ignore();
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .with_writer(std::io::stderr)
         .with_target(false)
         .compact()
@@ -156,8 +158,15 @@ async fn main() -> ExitCode {
     {
         Ok(r) => r,
         Err(e) => {
-            let err = BuildError { code: 400, message: e, stage: "load".into() };
-            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+            let err = BuildError {
+                code: 400,
+                message: e,
+                stage: "load".into(),
+            };
+            write_json_atomic(
+                &work_dir.join("error.json"),
+                &serde_json::to_vec(&err).unwrap_or_default(),
+            );
             emit_frame(Frame::Error { err: &err }, &mut events);
             return ExitCode::from(2);
         }
@@ -166,14 +175,23 @@ async fn main() -> ExitCode {
     let mut sigterm = match signal(SignalKind::terminate()) {
         Ok(s) => s,
         Err(e) => {
-            let err = BuildError { code: 500, message: format!("install SIGTERM: {e}"), stage: "init".into() };
-            write_json_atomic(&work_dir.join("error.json"), &serde_json::to_vec(&err).unwrap_or_default());
+            let err = BuildError {
+                code: 500,
+                message: format!("install SIGTERM: {e}"),
+                stage: "init".into(),
+            };
+            write_json_atomic(
+                &work_dir.join("error.json"),
+                &serde_json::to_vec(&err).unwrap_or_default(),
+            );
             emit_frame(Frame::Error { err: &err }, &mut events);
             return ExitCode::from(2);
         }
     };
 
-    let mut sink = DualSink { events: &mut events };
+    let mut sink = DualSink {
+        events: &mut events,
+    };
     let build_fut = builder_core::run_build(req, &work_dir, &mut sink);
 
     tokio::select! {

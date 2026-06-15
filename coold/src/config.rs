@@ -45,7 +45,7 @@ impl<'a> IntoIterator for &'a Namespaces {
     }
 }
 
-pub const VERSION: &str = match option_env!("COOLD_VERSION") {
+pub const VERSION: &str = match option_env!("COOLIFY_COOLD_VERSION") {
     Some(v) => v,
     None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
 };
@@ -54,15 +54,23 @@ pub const VERSION: &str = match option_env!("COOLD_VERSION") {
 #[command(name = "coold", version = VERSION, about)]
 pub struct Config {
     /// WireGuard management IP for this host (e.g. 100.64.0.5).
-    #[arg(long, env = "COOLD_HOST_MGMT_IP")]
+    #[arg(long, env = "COOLIFY_COOLD_HOST_MGMT_IP")]
     pub host_mgmt_ip: String,
 
     /// Path to the local Podman Unix socket.
-    #[arg(long, env = "COOLD_PODMAN_SOCKET", default_value = "/run/podman/podman.sock")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_PODMAN_SOCKET",
+        default_value = "/run/podman/podman.sock"
+    )]
     pub podman_socket: PathBuf,
 
     /// Base URL of the local Corrosion agent's HTTP API.
-    #[arg(long, env = "COOLD_CORROSION_URL", default_value = "http://127.0.0.1:8080")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_CORROSION_URL",
+        default_value = "http://127.0.0.1:8080"
+    )]
     pub corrosion_url: String,
 
     /// Comma-separated list of `<name>:<network>:<gateway-ip>` triples, one
@@ -75,7 +83,7 @@ pub struct Config {
     /// test deployments).
     #[arg(
         long,
-        env = "COOLD_NAMESPACES",
+        env = "COOLIFY_COOLD_NAMESPACES",
         value_parser = parse_namespaces,
         default_value = "",
     )]
@@ -84,125 +92,153 @@ pub struct Config {
     /// Periodic full reconcile cadence.
     #[arg(
         long,
-        env = "COOLD_RECONCILE_INTERVAL",
+        env = "COOLIFY_COOLD_RECONCILE_INTERVAL",
         default_value = "2s",
         value_parser = parse_duration,
     )]
     pub reconcile_interval: Duration,
 
     /// `tracing_subscriber` env filter (e.g. `info`, `coold=debug`).
-    #[arg(long, env = "COOLD_LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "COOLIFY_COOLD_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
 
     /// DNS zone served authoritatively by coold. Records take the shape
     /// `<container>.<namespace>.<zone>` (e.g. `web.default.coolify.internal`).
-    #[arg(long, env = "COOLD_DNS_ZONE", default_value = "coolify.internal")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_DNS_ZONE",
+        default_value = "coolify.internal"
+    )]
     pub dns_zone: String,
 
     /// Upstream resolver for queries outside `dns_zone`.
-    #[arg(long, env = "COOLD_DNS_UPSTREAM", default_value = "1.1.1.1:53")]
+    #[arg(long, env = "COOLIFY_COOLD_DNS_UPSTREAM", default_value = "1.1.1.1:53")]
     pub dns_upstream: SocketAddr,
 
     /// Bind address for the firewall REST API (e.g. `100.64.0.5:8443`).
     /// When unset, the API server is disabled. In production set this to
     /// `<host_mgmt_ip>:8443` so the API is reachable only over the wg0
     /// management overlay and never exposed on a public interface.
-    #[arg(long, env = "COOLD_API_BIND")]
+    #[arg(long, env = "COOLIFY_COOLD_API_BIND")]
     pub api_bind: Option<SocketAddr>,
 
     /// Path to a file containing the API bearer token. When unset, the API
     /// refuses to start (no anonymous access). The file should be root-owned
     /// and mode 0600; contents are trimmed of leading/trailing whitespace.
-    #[arg(long, env = "COOLD_API_TOKEN_FILE")]
+    #[arg(long, env = "COOLIFY_COOLD_API_TOKEN_FILE")]
     pub api_token_file: Option<PathBuf>,
 
     /// PEM-encoded TLS certificate chain for the API. When both cert and key
     /// are set the API serves HTTPS; otherwise it serves plain HTTP (intended
     /// only for dev/alpha on a trusted overlay).
-    #[arg(long, env = "COOLD_TLS_CERT")]
+    #[arg(long, env = "COOLIFY_COOLD_TLS_CERT")]
     pub tls_cert: Option<PathBuf>,
 
     /// PEM-encoded TLS private key for the API.
-    #[arg(long, env = "COOLD_TLS_KEY")]
+    #[arg(long, env = "COOLIFY_COOLD_TLS_KEY")]
     pub tls_key: Option<PathBuf>,
 
     /// Path where coold snapshots the COOLIFY-ALLOW chain as an
     /// iptables-restore fragment. `coolify-mesh-allow.service` restores this
     /// on boot via `iptables-restore --noflush`.
-    #[arg(long, env = "COOLD_RULES_PATH", default_value = "/etc/coolify/allow.rules")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_RULES_PATH",
+        default_value = "/etc/coolify/allow.rules"
+    )]
     pub rules_path: PathBuf,
 
     /// Path where coold writes the nft bridge-family allow snapshot.
     /// The firewall systemd unit restores this on start/restart via
     /// `nft -f /etc/coolify/allow.nft`. coold writes it on every rule mutate.
-    #[arg(long, env = "COOLD_BRIDGE_RULES_PATH", default_value = "/etc/coolify/allow.nft")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_BRIDGE_RULES_PATH",
+        default_value = "/etc/coolify/allow.nft"
+    )]
     pub bridge_rules_path: PathBuf,
 
     /// Name of the iptables chain coold owns. Must match the chain created
     /// by `coolify init --default-deny` and jumped to from COOLIFY-INTRA.
-    #[arg(long, env = "COOLD_CHAIN_NAME", default_value = "COOLIFY-ALLOW")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_CHAIN_NAME",
+        default_value = "COOLIFY-ALLOW"
+    )]
     pub chain_name: String,
 
-    /// Scheduler gRPC URL (e.g. `http://127.0.0.1:6443` for h2c or
+    /// Flux gRPC URL (e.g. `http://127.0.0.1:6443` for h2c or
     /// `https://central.example.com:6443` for TLS). When unset, the gRPC
     /// transport is disabled and coold runs in REST-only / local mode.
-    #[arg(long, env = "COOLD_SCHEDULER_URL")]
-    pub scheduler_url: Option<String>,
+    #[arg(long, env = "COOLIFY_COOLD_FLUX_URL")]
+    pub flux_url: Option<String>,
 
     /// Laravel assignment endpoint used by hosted Coolify Cloud. When set,
-    /// coold POSTs its host JWT and capabilities here before each scheduler
-    /// connection attempt and dials the returned scheduler URL. Self-hosted
-    /// installs can leave this unset and use `COOLD_SCHEDULER_URL` directly.
-    #[arg(long, env = "COOLD_ASSIGNMENT_URL")]
+    /// coold POSTs its host JWT and capabilities here before each flux
+    /// connection attempt and dials the returned flux URL. Self-hosted
+    /// installs can leave this unset and use `COOLIFY_COOLD_FLUX_URL` directly.
+    #[arg(long, env = "COOLIFY_COOLD_ASSIGNMENT_URL")]
     pub assignment_url: Option<String>,
 
     /// Path to the per-host JWT file used to authenticate the outbound gRPC
     /// stream. Must be readable; coold exits at boot if the file is absent or
-    /// empty and `scheduler_url` or `assignment_url` is set.
+    /// empty and `flux_url` or `assignment_url` is set.
     #[arg(
         long,
-        env = "COOLD_HOST_JWT_PATH",
+        env = "COOLIFY_COOLD_HOST_JWT_PATH",
         default_value = "/etc/coolify/host-jwt"
     )]
     pub host_jwt_path: PathBuf,
 
-    /// Disable the outbound gRPC transport even when `scheduler_url` is set.
+    /// Disable the outbound gRPC transport even when `flux_url` is set.
     /// Useful for alpha hosts that are not yet enrolled with central.
-    #[arg(long, env = "COOLD_GRPC_DISABLED", default_value = "false")]
+    #[arg(long, env = "COOLIFY_COOLD_GRPC_DISABLED", default_value = "false")]
     pub grpc_disabled: bool,
 
     /// Advertise the `builder` capability and accept `BuildRequest` frames
-    /// from the scheduler. Each build runs as a short-lived `builder` subprocess
+    /// from the flux. Each build runs as a short-lived `builder` subprocess
     /// inside a `systemd-run --scope` transient unit for cgroup + FS
     /// isolation.
-    #[arg(long, env = "COOLD_BUILDER_ENABLED", default_value = "false")]
+    #[arg(long, env = "COOLIFY_COOLD_BUILDER_ENABLED", default_value = "false")]
     pub builder_enabled: bool,
 
     /// Per-request scratch root. A subdirectory named after the `request_id`
     /// is created here for each build and removed after the subprocess exits.
-    #[arg(long, env = "COOLD_BUILDER_WORK_DIR", default_value = "/var/lib/coolify-builder/work")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_BUILDER_WORK_DIR",
+        default_value = "/var/lib/coolify-builder/work"
+    )]
     pub builder_work_dir: PathBuf,
 
     /// Max concurrent builds this coold will accept. Semaphore permits.
-    #[arg(long, env = "COOLD_BUILDER_CAPACITY", default_value = "2")]
+    #[arg(long, env = "COOLIFY_COOLD_BUILDER_CAPACITY", default_value = "2")]
     pub builder_capacity: u32,
 
     /// Path to the builder binary coold spawns per request.
-    #[arg(long, env = "COOLD_BUILDER_BIN", default_value = "/usr/local/bin/builder")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_BUILDER_BIN",
+        default_value = "/usr/local/bin/builder"
+    )]
     pub builder_bin: PathBuf,
 
     /// Hard timeout per build. Passed to the transient scope via
     /// `-p RuntimeMaxSec=`; systemd escalates to SIGKILL if exceeded.
-    #[arg(long, env = "COOLD_BUILDER_TIMEOUT_SECS", default_value = "1800")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_BUILDER_TIMEOUT_SECS",
+        default_value = "1800"
+    )]
     pub builder_timeout_secs: u64,
 
     /// cgroup memory cap for each build scope (systemd `MemoryMax` value).
-    #[arg(long, env = "COOLD_BUILDER_MEMORY_MAX", default_value = "2G")]
+    #[arg(long, env = "COOLIFY_COOLD_BUILDER_MEMORY_MAX", default_value = "2G")]
     pub builder_memory_max: String,
 
     /// cgroup CPU quota for each build scope (systemd `CPUQuota` value; e.g.
     /// "200%" allows two full cores).
-    #[arg(long, env = "COOLD_BUILDER_CPU_QUOTA", default_value = "200%")]
+    #[arg(long, env = "COOLIFY_COOLD_BUILDER_CPU_QUOTA", default_value = "200%")]
     pub builder_cpu_quota: String,
 
     /// Comma-separated list of CIDRs the builder subprocess is forbidden to
@@ -212,7 +248,12 @@ pub struct Config {
     /// additionally blocks a fixed set (`127.0.0.1`, `169.254.0.0/16`,
     /// `::1/128`, `fc00::/7`, `fe80::/10`) so the operator does not need to
     /// repeat them; `127.0.0.53` stays reachable so DNS keeps working.
-    #[arg(long, env = "COOLD_BUILDER_DENY_NETS", value_delimiter = ',', default_value = "")]
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_BUILDER_DENY_NETS",
+        value_delimiter = ',',
+        default_value = ""
+    )]
     pub builder_deny_nets: Vec<String>,
 }
 
@@ -249,7 +290,7 @@ fn parse_namespaces(raw: &str) -> Result<Namespaces> {
         let parts: Vec<&str> = chunk.splitn(3, ':').collect();
         if parts.len() != 3 {
             return Err(anyhow!(
-                "COOLD_NAMESPACES entry must be `<name>:<network>:<gateway-ip>`, got {chunk:?}"
+                "COOLIFY_COOLD_NAMESPACES entry must be `<name>:<network>:<gateway-ip>`, got {chunk:?}"
             ));
         }
         let name = parts[0].trim().to_string();
@@ -259,7 +300,9 @@ fn parse_namespaces(raw: &str) -> Result<Namespaces> {
             .parse()
             .map_err(|e| anyhow!("invalid gateway ip in {chunk:?}: {e}"))?;
         if name.is_empty() || network.is_empty() {
-            return Err(anyhow!("empty name or network in COOLD_NAMESPACES entry {chunk:?}"));
+            return Err(anyhow!(
+                "empty name or network in COOLIFY_COOLD_NAMESPACES entry {chunk:?}"
+            ));
         }
         out.push(NamespaceConfig {
             name,
@@ -268,7 +311,7 @@ fn parse_namespaces(raw: &str) -> Result<Namespaces> {
         });
     }
     if out.is_empty() {
-        return Err(anyhow!("COOLD_NAMESPACES parsed to zero entries"));
+        return Err(anyhow!("COOLIFY_COOLD_NAMESPACES parsed to zero entries"));
     }
     Ok(Namespaces(out))
 }

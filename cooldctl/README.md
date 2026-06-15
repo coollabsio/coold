@@ -1,7 +1,7 @@
 # cooldctl
 
 `cooldctl` is the Rust CLI for **Coolify v5 cluster operations** that live with
-`coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion/scheduler
+`coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion/flux
 installation, builder capability setup, and SSH-bounced firewall control.
 
 It intentionally does **not** migrate Coolify v4 CLI features such as contexts,
@@ -16,7 +16,7 @@ Included:
 - `init plan` — inspect host state and print the actions needed to converge.
 - `init bootstrap` — first-time v5 mesh install.
 - `init extend` — add new nodes while only peer-refreshing existing mesh hosts.
-- `init upgrade` — bump coold/corrosion/scheduler/builder binaries without
+- `init upgrade` — bump coold/corrosion/flux/builder binaries without
   changing mesh topology.
 - `firewall containers` — discover Podman containers attached to v5 mesh
   networks.
@@ -51,7 +51,7 @@ Most commands need SSH access to every target node. `init` also accepts a
 separate `--central` control-plane host:
 
 ```bash
---central IP             Scheduler (control-plane) host.
+--central IP             Flux (control-plane) host.
 --nodes IP1,IP2          Comma-separated deployment node list.
 --ssh-key ~/.ssh/key      SSH private key.
 --ssh-user root           Defaults to root.
@@ -120,20 +120,20 @@ Useful version pins:
 ```bash
 --coold-version vX.Y.Z
 --corrosion-version vX.Y.Z
---scheduler-version nightly|latest|vX.Y.Z
+--flux-version nightly|latest|vX.Y.Z
 ```
 
 `nightly` is the default for bootstrap. `init upgrade` rejects `nightly`
 unless `--allow-nightly` is passed because a moving target would reinstall on
 every run.
 
-When `--central` is set, `cooldctl` installs `scheduler` on that central host,
-writes `/etc/systemd/system/scheduler.service`, and enables it. The Laravel
-control plane runs separately and talks to scheduler over its Unix socket. Use
-`--scheduler-version latest` to consume the latest stable release asset, or pin a
+When `--central` is set, `cooldctl` installs `flux` on that central host,
+writes `/etc/systemd/system/flux.service`, and enables it. The Laravel
+control plane runs separately and talks to flux over its Unix socket. Use
+`--flux-version latest` to consume the latest stable release asset, or pin a
 specific tag such as `v0.2.0`.
 
-The central host always joins the WireGuard management mesh so scheduler ↔ coold
+The central host always joins the WireGuard management mesh so flux ↔ coold
 traffic stays private. It only runs Podman/coold/Corrosion/firewall when it is
 also listed in `--nodes`.
 
@@ -179,7 +179,7 @@ cooldctl init upgrade \
   --central 203.0.113.10 \
   --coold-version v0.2.0 \
   --corrosion-version v0.2.0 \
-  --scheduler-version v0.2.0 \
+  --flux-version v0.2.0 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 

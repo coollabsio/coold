@@ -18,22 +18,22 @@ cargo watch --version >/dev/null 2>&1 || { echo "cargo-watch is required. Instal
 DEV_DIR="$ROOT/.dev"
 CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/coold-target}"
 export CARGO_TARGET_DIR
-CORROSION_DIR="${COOLD_VM_CORROSION_DIR:-/var/lib/corrosion}"
-CORROSION_RUN_DIR="${COOLD_VM_CORROSION_RUN_DIR:-/run/corrosion}"
+CORROSION_DIR="${COOLIFY_COOLD_VM_CORROSION_DIR:-/var/lib/corrosion}"
+CORROSION_RUN_DIR="${COOLIFY_COOLD_VM_CORROSION_RUN_DIR:-/run/corrosion}"
 CORROSION_CONFIG="$DEV_DIR/corrosion.vm.toml"
-SCHEDULER_GRPC_BIND="${SCHEDULER_GRPC_BIND:-127.0.0.1:6443}"
-SCHEDULER_UNIX_SOCKET_PATH="${SCHEDULER_UNIX_SOCKET_PATH:-/tmp/coolify-scheduler.sock}"
-COOLD_HOST_ID="${COOLD_HOST_ID:-host-local}"
-COOLD_HOST_MGMT_IP="${COOLD_HOST_MGMT_IP:-127.0.0.1}"
-COOLD_NETWORK_NAME="${COOLD_NETWORK_NAME:-coolify-default-mesh}"
-COOLD_NETWORK_SUBNET="${COOLD_NETWORK_SUBNET:-10.210.0.0/24}"
-COOLD_NETWORK_GATEWAY="${COOLD_NETWORK_GATEWAY:-10.210.0.1}"
-COOLD_NAMESPACES="${COOLD_NAMESPACES:-default:${COOLD_NETWORK_NAME}:${COOLD_NETWORK_GATEWAY}}"
-COOLD_PODMAN_SOCKET="${COOLD_PODMAN_SOCKET:-/run/podman/podman.sock}"
-COOLD_FIREWALL_API_BIND="${COOLD_FIREWALL_API_BIND:-127.0.0.1:8443}"
-COOLD_API_TOKEN_FILE="${COOLD_API_TOKEN_FILE:-$DEV_DIR/coold-api-token}"
-COOLD_RULES_PATH="${COOLD_RULES_PATH:-/etc/coolify/allow.rules}"
-COOLD_BRIDGE_RULES_PATH="${COOLD_BRIDGE_RULES_PATH:-/etc/coolify/allow.nft}"
+COOLIFY_FLUX_GRPC_BIND="${COOLIFY_FLUX_GRPC_BIND:-127.0.0.1:6443}"
+COOLIFY_FLUX_UNIX_SOCKET_PATH="${COOLIFY_FLUX_UNIX_SOCKET_PATH:-/tmp/coolify-flux.sock}"
+COOLIFY_COOLD_HOST_ID="${COOLIFY_COOLD_HOST_ID:-host-local}"
+COOLIFY_COOLD_HOST_MGMT_IP="${COOLIFY_COOLD_HOST_MGMT_IP:-127.0.0.1}"
+COOLIFY_COOLD_NETWORK_NAME="${COOLIFY_COOLD_NETWORK_NAME:-coolify-default-mesh}"
+COOLIFY_COOLD_NETWORK_SUBNET="${COOLIFY_COOLD_NETWORK_SUBNET:-10.210.0.0/24}"
+COOLIFY_COOLD_NETWORK_GATEWAY="${COOLIFY_COOLD_NETWORK_GATEWAY:-10.210.0.1}"
+COOLIFY_COOLD_NAMESPACES="${COOLIFY_COOLD_NAMESPACES:-default:${COOLIFY_COOLD_NETWORK_NAME}:${COOLIFY_COOLD_NETWORK_GATEWAY}}"
+COOLIFY_COOLD_PODMAN_SOCKET="${COOLIFY_COOLD_PODMAN_SOCKET:-/run/podman/podman.sock}"
+COOLIFY_COOLD_FIREWALL_API_BIND="${COOLIFY_COOLD_FIREWALL_API_BIND:-127.0.0.1:8443}"
+COOLIFY_COOLD_API_TOKEN_FILE="${COOLIFY_COOLD_API_TOKEN_FILE:-$DEV_DIR/coold-api-token}"
+COOLIFY_COOLD_RULES_PATH="${COOLIFY_COOLD_RULES_PATH:-/etc/coolify/allow.rules}"
+COOLIFY_COOLD_BRIDGE_RULES_PATH="${COOLIFY_COOLD_BRIDGE_RULES_PATH:-/etc/coolify/allow.nft}"
 JWT_PRIV="$DEV_DIR/dev-jwt.priv.pem"
 JWT_PUB="$DEV_DIR/dev-jwt.pub.pem"
 JWT_FILE="$DEV_DIR/host-jwt"
@@ -110,7 +110,7 @@ cleanup() {
     done
     wait "${pids[@]}" 2>/dev/null || true
   fi
-  rm -f "$SCHEDULER_UNIX_SOCKET_PATH"
+  rm -f "$COOLIFY_FLUX_UNIX_SOCKET_PATH"
   exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -160,24 +160,24 @@ start_service() {
 mkdir -p "$DEV_DIR" "$CARGO_TARGET_DIR"
 sudo mkdir -p "$CORROSION_DIR" "$CORROSION_RUN_DIR"
 sudo chmod 777 "$CORROSION_DIR" "$CORROSION_RUN_DIR"
-rm -f "$SCHEDULER_UNIX_SOCKET_PATH"
+rm -f "$COOLIFY_FLUX_UNIX_SOCKET_PATH"
 
-preflight_port_free "$SCHEDULER_GRPC_BIND" "scheduler gRPC" "SCHEDULER_GRPC_BIND=127.0.0.1:6444"
-preflight_port_free "127.0.0.1:8080" "Corrosion API" "COOLD_CORROSION_URL=http://127.0.0.1:8081"
-preflight_port_free "$COOLD_FIREWALL_API_BIND" "coold firewall API" "COOLD_FIREWALL_API_BIND=127.0.0.1:8444"
+preflight_port_free "$COOLIFY_FLUX_GRPC_BIND" "flux gRPC" "COOLIFY_FLUX_GRPC_BIND=127.0.0.1:6444"
+preflight_port_free "127.0.0.1:8080" "Corrosion API" "COOLIFY_COOLD_CORROSION_URL=http://127.0.0.1:8081"
+preflight_port_free "$COOLIFY_COOLD_FIREWALL_API_BIND" "coold firewall API" "COOLIFY_COOLD_FIREWALL_API_BIND=127.0.0.1:8444"
 
-if [[ ! -S "$COOLD_PODMAN_SOCKET" ]]; then
+if [[ ! -S "$COOLIFY_COOLD_PODMAN_SOCKET" ]]; then
   log_line dev INFO "Starting rootful podman.socket via systemd…"
   sudo systemctl enable --now podman.socket >/dev/null
 fi
-if [[ ! -S "$COOLD_PODMAN_SOCKET" ]]; then
-  log_line dev ERROR "Podman socket not found at $COOLD_PODMAN_SOCKET" >&2
+if [[ ! -S "$COOLIFY_COOLD_PODMAN_SOCKET" ]]; then
+  log_line dev ERROR "Podman socket not found at $COOLIFY_COOLD_PODMAN_SOCKET" >&2
   exit 1
 fi
 
-log_line dev INFO "Ensuring dev Podman network $COOLD_NETWORK_NAME ($COOLD_NETWORK_SUBNET gateway $COOLD_NETWORK_GATEWAY)…"
-if ! sudo podman network exists "$COOLD_NETWORK_NAME"; then
-  sudo podman network create --subnet "$COOLD_NETWORK_SUBNET" --gateway "$COOLD_NETWORK_GATEWAY" "$COOLD_NETWORK_NAME" >/dev/null
+log_line dev INFO "Ensuring dev Podman network $COOLIFY_COOLD_NETWORK_NAME ($COOLIFY_COOLD_NETWORK_SUBNET gateway $COOLIFY_COOLD_NETWORK_GATEWAY)…"
+if ! sudo podman network exists "$COOLIFY_COOLD_NETWORK_NAME"; then
+  sudo podman network create --subnet "$COOLIFY_COOLD_NETWORK_SUBNET" --gateway "$COOLIFY_COOLD_NETWORK_GATEWAY" "$COOLIFY_COOLD_NETWORK_NAME" >/dev/null
 fi
 
 cat >"$CORROSION_CONFIG" <<CFG
@@ -202,7 +202,7 @@ log_line dev INFO "Generating local dev JWT for real coold…"
 JWT_TMP="$DEV_DIR/dev-jwt.$$"
 JWT_TMP_PRIV="$JWT_TMP.priv.pem"
 JWT_TMP_PUB="$JWT_TMP.pub.pem"
-JWT="$(rtk cargo run -p scheduler --example sign_jwt -- "$COOLD_HOST_ID" "$JWT_TMP_PRIV" "$JWT_TMP_PUB" "coold,builder" 2>/dev/null | tail -n1)"
+JWT="$(rtk cargo run -p flux --example sign_jwt -- "$COOLIFY_COOLD_HOST_ID" "$JWT_TMP_PRIV" "$JWT_TMP_PUB" "coold,builder" 2>/dev/null | tail -n1)"
 if [[ -z "$JWT" || ! -s "$JWT_TMP_PUB" ]]; then
   rm -f "$JWT_TMP_PRIV" "$JWT_TMP_PRIV.pkcs8" "$JWT_TMP_PUB"
   log_line dev ERROR "failed to generate JWT" >&2
@@ -212,29 +212,29 @@ mv "$JWT_TMP_PRIV" "$JWT_PRIV"
 mv "$JWT_TMP_PRIV.pkcs8" "$JWT_PRIV.pkcs8"
 mv "$JWT_TMP_PUB" "$JWT_PUB"
 printf '%s\n' "$JWT" >"$JWT_FILE"
-printf '%s\n' "dev-firewall-token" >"$COOLD_API_TOKEN_FILE"
-chmod 600 "$JWT_FILE" "$COOLD_API_TOKEN_FILE"
+printf '%s\n' "dev-firewall-token" >"$COOLIFY_COOLD_API_TOKEN_FILE"
+chmod 600 "$JWT_FILE" "$COOLIFY_COOLD_API_TOKEN_FILE"
 
 log_line dev INFO "Coolify v5 Lima real-coold dev stack"
-log_line dev INFO "scheduler: grpc://$SCHEDULER_GRPC_BIND + unix://$SCHEDULER_UNIX_SOCKET_PATH"
+log_line dev INFO "flux: grpc://$COOLIFY_FLUX_GRPC_BIND + unix://$COOLIFY_FLUX_UNIX_SOCKET_PATH"
 log_line dev INFO "corrosion: http://127.0.0.1:8080"
-log_line dev INFO "coold: host_id=$COOLD_HOST_ID host_mgmt_ip=$COOLD_HOST_MGMT_IP namespaces=$COOLD_NAMESPACES firewall_api=$COOLD_FIREWALL_API_BIND"
+log_line dev INFO "coold: host_id=$COOLIFY_COOLD_HOST_ID host_mgmt_ip=$COOLIFY_COOLD_HOST_MGMT_IP namespaces=$COOLIFY_COOLD_NAMESPACES firewall_api=$COOLIFY_COOLD_FIREWALL_API_BIND"
 
-export ROOT JWT JWT_PUB JWT_FILE SCHEDULER_GRPC_BIND SCHEDULER_UNIX_SOCKET_PATH CORROSION_CONFIG COOLD_HOST_MGMT_IP COOLD_NAMESPACES COOLD_PODMAN_SOCKET COOLD_FIREWALL_API_BIND COOLD_API_TOKEN_FILE COOLD_RULES_PATH COOLD_BRIDGE_RULES_PATH
+export ROOT JWT JWT_PUB JWT_FILE COOLIFY_FLUX_GRPC_BIND COOLIFY_FLUX_UNIX_SOCKET_PATH CORROSION_CONFIG COOLIFY_COOLD_HOST_MGMT_IP COOLIFY_COOLD_NAMESPACES COOLIFY_COOLD_PODMAN_SOCKET COOLIFY_COOLD_FIREWALL_API_BIND COOLIFY_COOLD_API_TOKEN_FILE COOLIFY_COOLD_RULES_PATH COOLIFY_COOLD_BRIDGE_RULES_PATH
 
 start_service "corrosion" 'exec corrosion -c "$CORROSION_CONFIG" agent'
 wait_for_tcp 127.0.0.1 8080 "Corrosion API"
 
-start_service "scheduler" 'exec env SCHEDULER_GRPC_BIND="$SCHEDULER_GRPC_BIND" SCHEDULER_UNIX_SOCKET_PATH="$SCHEDULER_UNIX_SOCKET_PATH" SCHEDULER_JWT_PUBLIC_KEY_PATH="$JWT_PUB" SCHEDULER_ALLOW_PUBLIC_BIND=1 rtk cargo watch -w scheduler -w proto -w Cargo.toml -w Cargo.lock -i target -x "run -p scheduler"'
-wait_for_tcp "$(host_part "$SCHEDULER_GRPC_BIND")" "$(port_part "$SCHEDULER_GRPC_BIND")" "scheduler gRPC"
-wait_for_socket "$SCHEDULER_UNIX_SOCKET_PATH" "scheduler UDS"
+start_service "flux" 'exec env COOLIFY_FLUX_GRPC_BIND="$COOLIFY_FLUX_GRPC_BIND" COOLIFY_FLUX_UNIX_SOCKET_PATH="$COOLIFY_FLUX_UNIX_SOCKET_PATH" COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH="$JWT_PUB" COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1 rtk cargo watch -w flux -w proto -w Cargo.toml -w Cargo.lock -i target -x "run -p flux"'
+wait_for_tcp "$(host_part "$COOLIFY_FLUX_GRPC_BIND")" "$(port_part "$COOLIFY_FLUX_GRPC_BIND")" "flux gRPC"
+wait_for_socket "$COOLIFY_FLUX_UNIX_SOCKET_PATH" "flux UDS"
 
-start_service "coold" 'exec env COOLD_HOST_MGMT_IP="$COOLD_HOST_MGMT_IP" COOLD_PODMAN_SOCKET="$COOLD_PODMAN_SOCKET" COOLD_CORROSION_URL="http://127.0.0.1:8080" COOLD_NAMESPACES="$COOLD_NAMESPACES" COOLD_SCHEDULER_URL="http://$SCHEDULER_GRPC_BIND" COOLD_HOST_JWT_PATH="$JWT_FILE" COOLD_API_BIND="$COOLD_FIREWALL_API_BIND" COOLD_API_TOKEN_FILE="$COOLD_API_TOKEN_FILE" COOLD_RULES_PATH="$COOLD_RULES_PATH" COOLD_BRIDGE_RULES_PATH="$COOLD_BRIDGE_RULES_PATH" COOLD_BUILDER_ENABLED=false rtk cargo watch -w coold -w proto -w Cargo.toml -w Cargo.lock -i target -s "cargo build -p coold && sudo -E $CARGO_TARGET_DIR/debug/coold"'
+start_service "coold" 'exec env COOLIFY_COOLD_HOST_MGMT_IP="$COOLIFY_COOLD_HOST_MGMT_IP" COOLIFY_COOLD_PODMAN_SOCKET="$COOLIFY_COOLD_PODMAN_SOCKET" COOLIFY_COOLD_CORROSION_URL="http://127.0.0.1:8080" COOLIFY_COOLD_NAMESPACES="$COOLIFY_COOLD_NAMESPACES" COOLIFY_COOLD_FLUX_URL="http://$COOLIFY_FLUX_GRPC_BIND" COOLIFY_COOLD_HOST_JWT_PATH="$JWT_FILE" COOLIFY_COOLD_API_BIND="$COOLIFY_COOLD_FIREWALL_API_BIND" COOLIFY_COOLD_API_TOKEN_FILE="$COOLIFY_COOLD_API_TOKEN_FILE" COOLIFY_COOLD_RULES_PATH="$COOLIFY_COOLD_RULES_PATH" COOLIFY_COOLD_BRIDGE_RULES_PATH="$COOLIFY_COOLD_BRIDGE_RULES_PATH" COOLIFY_COOLD_BUILDER_ENABLED=false rtk cargo watch -w coold -w proto -w Cargo.toml -w Cargo.lock -i target -s "cargo build -p coold && sudo -E $CARGO_TARGET_DIR/debug/coold"'
 
 check_children
 
-log_line dev INFO "scheduler UDS ready at $SCHEDULER_UNIX_SOCKET_PATH — point your Laravel control plane here."
-log_line dev INFO "Optional sample: sudo podman run -d --name coold-dev-web --network $COOLD_NETWORK_NAME docker.io/library/nginx:alpine"
+log_line dev INFO "flux UDS ready at $COOLIFY_FLUX_UNIX_SOCKET_PATH — point your Laravel control plane here."
+log_line dev INFO "Optional sample: sudo podman run -d --name coold-dev-web --network $COOLIFY_COOLD_NETWORK_NAME docker.io/library/nginx:alpine"
 
 while true; do
   check_children

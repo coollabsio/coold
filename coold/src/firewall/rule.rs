@@ -216,8 +216,7 @@ pub fn parse_chain_line(line: &str, chain: &str) -> Option<AllowRule> {
     // Comment format: `cid:<12-hex>` (legacy) or `cid:<12-hex>:<namespace>`
     // (current). The second form lets listings surface the namespace
     // without any sidecar state.
-    let (id, namespace) = match comment.and_then(|c| c.strip_prefix("cid:").map(str::to_string))
-    {
+    let (id, namespace) = match comment.and_then(|c| c.strip_prefix("cid:").map(str::to_string)) {
         Some(rest) => match rest.split_once(':') {
             Some((hash, ns)) => (Some(hash.to_string()), ns.to_string()),
             None => (Some(rest), String::new()),
@@ -249,7 +248,9 @@ pub fn render_bridge_line(rule: &AllowRule) -> String {
     } else {
         &rule.namespace
     };
-    let id = rule.id.as_deref().expect("render_bridge_line called on unnormalized rule (id is None); call .normalize() first");
+    let id = rule.id.as_deref().expect(
+        "render_bridge_line called on unnormalized rule (id is None); call .normalize() first",
+    );
 
     let mut line = format!(
         "add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr {} ip daddr {}",
@@ -464,12 +465,20 @@ mod tests {
     #[test]
     fn parse_chain_line_rejects_non_append() {
         assert!(parse_chain_line("-N COOLIFY-ALLOW", "COOLIFY-ALLOW").is_none());
-        assert!(parse_chain_line("-A OTHER -s 1.2.3.4 -d 5.6.7.8 -j ACCEPT", "COOLIFY-ALLOW").is_none());
+        assert!(
+            parse_chain_line("-A OTHER -s 1.2.3.4 -d 5.6.7.8 -j ACCEPT", "COOLIFY-ALLOW").is_none()
+        );
     }
 
     // ── render_bridge_line tests ────────────────────────────────────────────
 
-    fn make_rule(src: &str, dst: &str, proto: Option<&str>, port: Option<u16>, ns: &str) -> AllowRule {
+    fn make_rule(
+        src: &str,
+        dst: &str,
+        proto: Option<&str>,
+        port: Option<u16>,
+        ns: &str,
+    ) -> AllowRule {
         AllowRule {
             src: ipv4(src),
             dst: ipv4(dst),
@@ -526,16 +535,21 @@ mod tests {
         assert!(line_default.contains(&format!("cid:{id_default}:default")));
         assert!(line_alpha.contains(&format!("cid:{id_alpha}:alpha")));
         // (c) lines differ only in cid and ns suffix
-        let stripped_default = line_default
-            .replace(&format!("cid:{id_default}:default"), "cid:HASH:NS");
-        let stripped_alpha = line_alpha
-            .replace(&format!("cid:{id_alpha}:alpha"), "cid:HASH:NS");
+        let stripped_default =
+            line_default.replace(&format!("cid:{id_default}:default"), "cid:HASH:NS");
+        let stripped_alpha = line_alpha.replace(&format!("cid:{id_alpha}:alpha"), "cid:HASH:NS");
         assert_eq!(stripped_default, stripped_alpha);
     }
 
     #[test]
     fn test_render_bridge_line_stable() {
-        let rule = make_rule("10.210.0.2", "10.210.1.3", Some("tcp"), Some(443), "default");
+        let rule = make_rule(
+            "10.210.0.2",
+            "10.210.1.3",
+            Some("tcp"),
+            Some(443),
+            "default",
+        );
         let line1 = render_bridge_line(&rule);
         let line2 = render_bridge_line(&rule);
         assert_eq!(line1, line2);

@@ -10,17 +10,17 @@ coold is the only process on a host with access to the Podman socket, the iptabl
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Laravel (Coolify brain — app model, scheduler, deploy ctrl)│
+│ Laravel (Coolify brain — app model, flux, deploy ctrl)│
 └──────────────────────────┬─────────────────────────────────┘
-                           │ HTTP over /run/coolify/scheduler.sock
+                           │ HTTP over /run/coolify/flux.sock
                            ▼
 ┌────────────────────────────────────────────────────────────┐
-│ scheduler                                                  │
+│ flux                                                  │
 │  • gRPC :6443 (coold dials in; HTTP/2 bidi, JWT bearer)    │
-│  • UDS /run/coolify/scheduler.sock (Laravel; fs-perm auth) │
+│  • UDS /run/coolify/flux.sock (Laravel; fs-perm auth) │
 │  • Streams map (host_id) + Pending map (request_id)        │
 └──────────────────────────┬─────────────────────────────────┘
-                           │ grpcs://scheduler:6443/v1/agent
+                           │ grpcs://flux:6443/v1/agent
                            ▼
 ┌────────────────────────────────────────────────────────────┐
 │ coold (per host)                                           │
@@ -44,7 +44,7 @@ coold is the only process on a host with access to the Podman socket, the iptabl
 proto/          Shared Protobuf: Agent.Stream, Hello, ServerMsg, ClientMsg,
                 Response, BuildRequest, CancelBuild, capabilities.
 coold/          Per-host agent.
-scheduler/      gRPC server coold dials + UDS lane for Laravel.
+flux/      gRPC server coold dials + UDS lane for Laravel.
 builder/        One-shot OCI build CLI, spawned by coold per build.
 builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
 cooldctl/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
@@ -55,18 +55,18 @@ e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
 
 The central control plane (the "brain") is a separate Laravel app, not in
 this workspace. It owns app-aware logic and persistent state, and talks to
-`scheduler` directly over the scheduler's Unix-socket HTTP/JSON lane.
+`flux` directly over the flux's Unix-socket HTTP/JSON lane.
 
 ---
 
 ## Control plane (Laravel)
 
-The Coolify v5 brain is a separate Laravel app. It talks to `scheduler` over
-the scheduler's Unix-socket HTTP/JSON lane (default `/run/coolify/scheduler.sock`)
+The Coolify v5 brain is a separate Laravel app. It talks to `flux` over
+the flux's Unix-socket HTTP/JSON lane (default `/run/coolify/flux.sock`)
 — no Rust API binary sits between them. Grant the Laravel/php-fpm group access
-to the socket via `SCHEDULER_UNIX_SOCKET_GROUP`.
+to the socket via `COOLIFY_FLUX_UNIX_SOCKET_GROUP`.
 
-Scheduler UDS surface (consumed by Laravel):
+Flux UDS surface (consumed by Laravel):
 
 ```http
 GET  /v1/health
@@ -77,18 +77,18 @@ GET  /v1/build/result/:request_id
 POST /v1/build/:request_id/cancel
 ```
 
-Live host reads flow: Laravel → scheduler UDS → coold outbound gRPC stream → Podman.
+Live host reads flow: Laravel → flux UDS → coold outbound gRPC stream → Podman.
 
 ### Local development
 
-One command starts scheduler + a fake coold; point your Laravel app at the
-printed scheduler socket:
+One command starts flux + a fake coold; point your Laravel app at the
+printed flux socket:
 
 ```bash
 bun run dev
 ```
 
-Full-fidelity Lima VM development (Podman, Corrosion, scheduler, real coold all run inside an isolated Linux VM):
+Full-fidelity Lima VM development (Podman, Corrosion, flux, real coold all run inside an isolated Linux VM):
 
 ```bash
 bun run dev:vm:up   # create/start the VM
@@ -112,7 +112,7 @@ REAL_COOLD=1 bun run dev
 Useful override:
 
 ```bash
-SCHEDULER_GRPC_BIND=127.0.0.1:6444 \
+COOLIFY_FLUX_GRPC_BIND=127.0.0.1:6444 \
 bun run dev
 ```
 
@@ -131,7 +131,7 @@ Current command surface:
 cooldctl init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
 cooldctl init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
 cooldctl init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
-cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --scheduler-version latest
+cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --flux-version latest
 
 cooldctl firewall containers --nodes IP1,IP2 --ssh-key KEY
 cooldctl firewall list --nodes IP1,IP2 --ssh-key KEY
@@ -139,10 +139,10 @@ cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ss
 cooldctl firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
 ```
 
-The CLI shares the v5 mesh model: bootstrap over SSH, central `scheduler`
+The CLI shares the v5 mesh model: bootstrap over SSH, central `flux`
 installation on `--central`, deployment nodes via `--nodes`, and day-to-day
 firewall mutation through coold's wg0-local REST API via SSH bounce. The central
-host joins WireGuard for private scheduler/coold streams but only runs
+host joins WireGuard for private flux/coold streams but only runs
 Podman/coold/Corrosion when also listed in `--nodes`.
 
 ---
@@ -172,24 +172,24 @@ Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on bo
 
 ## Transport
 
-**Outbound gRPC stream.** coold dials `grpcs://scheduler:6443/v1/agent` at startup with per-host JWT. Scheduler routes command frames down the open stream. Works through NAT and corporate firewalls — scheduler never opens inbound to a host.
+**Outbound gRPC stream.** coold dials `grpcs://flux:6443/v1/agent` at startup with per-host JWT. Flux routes command frames down the open stream. Works through NAT and corporate firewalls — flux never opens inbound to a host.
 
 **Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `cooldctl firewall` (SSH-bounced), peer coolds, optional per-customer gateways.
 
 ---
 
-## Scheduler
+## Flux
 
-Central connection-holder. Laravel (PHP-FPM request/response model) can't hold thousands of long-lived HTTP/2 streams; scheduler does.
+Central connection-holder. Laravel (PHP-FPM request/response model) can't hold thousands of long-lived HTTP/2 streams; flux does.
 
 - `:6443` gRPC — single listener. coold dispatch + build dispatch share it.
-- `/run/coolify/scheduler.sock` UDS — Laravel's sync + async lane. Mode `0660` when `SCHEDULER_UNIX_SOCKET_GROUP` set, else `0600`. No TLS, no bearer — filesystem perms replace auth.
+- `/run/coolify/flux.sock` UDS — Laravel's sync + async lane. Mode `0660` when `COOLIFY_FLUX_UNIX_SOCKET_GROUP` set, else `0600`. No TLS, no bearer — filesystem perms replace auth.
 - `Streams`: DashMap<host_id, StreamHandle{tx, caps, builder_capacity}>.
-- `Pending`: DashMap<request_id, Waiting | Landed>. Cap `SCHEDULER_PENDING_MAX=10_000`. Landed entries hold 30 s TTL so late pollers still claim results.
+- `Pending`: DashMap<request_id, Waiting | Landed>. Cap `COOLIFY_FLUX_PENDING_MAX=10_000`. Landed entries hold 30 s TTL so late pollers still claim results.
 - Sweeper evicts `Waiting` coold-lane entries after 10 s → 504.
 - JWT verify (ES256/RS256) with `sub=host_id` + `caps` claim.
 
-### UDS wire surface (Laravel → scheduler)
+### UDS wire surface (Laravel → flux)
 
 ```
 GET  /v1/health
@@ -201,7 +201,7 @@ POST /v1/build/:id/cancel        204
 
 ### Coold dispatch flow
 
-Laravel POST → scheduler checks `Streams::get(host_id)` (miss → 404) → `Pending::insert_waiting` (cap overflow → 503) → parks oneshot → pushes `ServerMsg` onto host's mpsc → coold runs command against podman.sock → writes `Response` on same stream → scheduler fires parked sinks, transitions to `Landed` with 30 s TTL. 10 s no-response → 504. Stream dropped mid-dispatch → 503.
+Laravel POST → flux checks `Streams::get(host_id)` (miss → 404) → `Pending::insert_waiting` (cap overflow → 503) → parks oneshot → pushes `ServerMsg` onto host's mpsc → coold runs command against podman.sock → writes `Response` on same stream → flux fires parked sinks, transitions to `Landed` with 30 s TTL. 10 s no-response → 504. Stream dropped mid-dispatch → 503.
 
 ---
 
@@ -264,12 +264,12 @@ No raw podman passthrough. New verbs require a coold release.
 
 Separate binary. coold never builds directly — it spawns the builder per-request.
 
-- Builder rides coold's gRPC stream: one stream per host. coold advertises `"builder"` in Hello `capabilities` when `COOLD_BUILDER_ENABLED=1`. Scheduler capability-routes build envelopes to any host carrying it.
+- Builder rides coold's gRPC stream: one stream per host. coold advertises `"builder"` in Hello `capabilities` when `COOLIFY_COOLD_BUILDER_ENABLED=1`. Flux capability-routes build envelopes to any host carrying it.
 - Per build: `systemd-run --pipe --scope coolify-build-<request_id>` transient unit. Sandbox: `PrivateTmp`, `ProtectSystem=strict`, allowlisted `ReadWritePaths`, `MemoryMax`, `CPUQuota`, `RuntimeMaxSec`, `IPAddressDeny` for mgmt + container CIDRs.
 - Builder clones repo shallow, runs toolchain, writes OCI image to shared `/var/lib/containers/storage` (same store as podman/coold — no registry hop on single-node).
 - Durable output: NDJSON frames appended to `<work_dir>/events.ndjson`. Final outcome atomically written as `result.json` (success) or `error.json` (failure/cancel). Exit codes: 0 ok, 1 build err, 2 usage/IO, 130 SIGTERM.
 - Restart adoption (`resume_or_reap`): on coold boot, scans `coolify-build-*.service` units. Active → re-register + poll `systemctl is-active`. Inactive + result/error → emit `Response` immediately. Inactive + neither → emit `500 builder exited without result file`.
-- Cancel: `POST /v1/build/:id/cancel` → scheduler finds owning host in `Pending` → pushes `CancelBuild` → coold runs `systemctl kill --signal=SIGTERM <scope>`. cgroup takes builder + buildah + git together.
+- Cancel: `POST /v1/build/:id/cancel` → flux finds owning host in `Pending` → pushes `CancelBuild` → coold runs `systemctl kill --signal=SIGTERM <scope>`. cgroup takes builder + buildah + git together.
 
 ### Supported stacks (v0.1 MVP)
 
@@ -290,7 +290,7 @@ All tasks run concurrently in one `tokio::select!` in `coold/src/sync.rs::run`. 
 | Event trigger + reconcile | `coold/src/sync.rs` | Debounce → immediate reconcile; 2 s periodic |
 | DNS servers | `coold/src/dns/server.rs` | hickory-server per namespace |
 | Firewall API | `coold/src/firewall/server.rs` | axum REST, dual-plane writer |
-| gRPC client | `coold/src/grpc/{mod,client,handlers}.rs` | Dials scheduler, Hello, handles dispatched commands + build lifecycle |
+| gRPC client | `coold/src/grpc/{mod,client,handlers}.rs` | Dials flux, Hello, handles dispatched commands + build lifecycle |
 | Builder subprocess driver | `coold/src/builder/mod.rs` | Spawns `systemd-run`, parses `result.json`, restart adoption |
 
 Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `coold/src/firewall/rule.rs` (SHA256 12-hex ID), `coold/src/corrosion/client.rs` (HTTP to local Corrosion), `coold/src/dns/resolver.rs` (CoolifyResolver, 5 s TTL).
@@ -299,7 +299,7 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 
 ## Network model
 
-- **Namespace = tenancy unit.** Each namespace gets a podman bridge `coolify-<ns>-mesh` with its own per-host `/24`. `coolify init --namespaces default,alpha,…` provisions every namespace on every host. coold receives full list via `COOLD_NAMESPACES=<name>:<network>:<gateway-ip>,…`.
+- **Namespace = tenancy unit.** Each namespace gets a podman bridge `coolify-<ns>-mesh` with its own per-host `/24`. `coolify init --namespaces default,alpha,…` provisions every namespace on every host. coold receives full list via `COOLIFY_COOLD_NAMESPACES=<name>:<network>:<gateway-ip>,…`.
 - **Per-app sub-networks.** Inside a namespace, additional podman networks via `POST /networks`.
 - **Egress.** Bridge-NAT to host default route. Cross-host container traffic rides wg0 via peer `AllowedIPs`.
 - **Two enforcement planes, both coold-written.** iptables FORWARD (cross-host) + nft `coolify_bridge` (intra-host same-bridge, fills a Linux gap where bridge L2 forwarding bypasses iptables FORWARD).
@@ -319,7 +319,7 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 | Deny filter on container create | **coold** |
 | Compose parsing, Dockerfile/Buildpacks/Nixpacks | **builder / central** |
 | App model, service graph, deployment history | **central** |
-| Scheduler (host placement) | **central** |
+| Flux (host placement) | **central** |
 | Rolling deploy state machine, health gating, rollback | **central** |
 | Ingress config templating, TLS cert mgmt | **central** |
 | Secrets (stored encrypted, resolved at deploy time) | **central** |
@@ -335,7 +335,7 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 T0  Central builder clones source, invokes buildah / buildpack / nixpacks.
     Output: OCI image in containers-storage (single-node) or registry (multi-node).
 
-T1  Central scheduler picks target host H.
+T1  Central flux picks target host H.
 
 T2  POST /images/pull  {ref: "localhost/tenant/web:v2"}      (skipped on single-node)
 
@@ -365,7 +365,7 @@ coold never sees "deploy app X". Only primitive frames.
 
 ## Security boundary
 
-- **Authn**: static bearer token (local REST, `/etc/coolify/api-token` mode 0600); per-host JWT (outbound stream, issued at enrollment); filesystem perms (scheduler UDS).
+- **Authn**: static bearer token (local REST, `/etc/coolify/api-token` mode 0600); per-host JWT (outbound stream, issued at enrollment); filesystem perms (flux UDS).
 - **Deny filter on `POST /containers`**: rejects `-privileged`, `-cap-add=SYS_ADMIN/NET_ADMIN`, host-path bind mounts outside an allowlist, `-net=host` (unless coold itself). Returns 403 with offending field.
 - **No secret storage.** Central resolves secrets into `POST /containers` env/mounts; coold passes through and forgets.
 - **No business audit.** coold keeps ops/debug request log only (endpoint, status, duration). Who-why lives in central.
@@ -389,9 +389,9 @@ Builder-side persistence: `<work_dir>/events.ndjson` + `result.json` / `error.js
 ## Systemd layout (single-node)
 
 ```
-coold.service    Dials scheduler :6443, advertises "builder" cap when enabled,
+coold.service    Dials flux :6443, advertises "builder" cap when enabled,
                  spawns builder subprocesses in transient units per build.
-scheduler.service :6443 (coold gRPC) + /run/coolify/scheduler.sock (Laravel UDS).
+flux.service :6443 (coold gRPC) + /run/coolify/flux.sock (Laravel UDS).
 ```
 
 Builder has no long-lived unit; each build runs under `coolify-build-<request_id>.service` (transient, cleaned by systemd on exit or by `resume_or_reap` on next start).
@@ -404,37 +404,37 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 
 | Var | Default | Role |
 | --- | --- | --- |
-| `COOLD_HOST_MGMT_IP` | required | wg0 mgmt IP |
-| `COOLD_NAMESPACES` | `default:coolify-default-mesh:0.0.0.0` | `<name>:<network>:<gateway-ip>,…` |
-| `COOLD_ASSIGNMENT_URL` | — | Hosted-cloud mode: Laravel endpoint coold calls before each scheduler connection to receive the current scheduler URL. |
-| `COOLD_SCHEDULER_URL` | — | Static scheduler URL for self-hosted/private mode; used when `COOLD_ASSIGNMENT_URL` is unset. |
-| `COOLD_BUILDER_ENABLED` | unset | Advertise `"builder"` cap in Hello |
-| `COOLD_API_BIND` | unset | wg0:8443 firewall REST (unset = disabled) |
-| `COOLD_API_TOKEN_FILE` | unset | Required when API bind set |
-| `COOLD_TLS_CERT` / `COOLD_TLS_KEY` | unset | Enables HTTPS on firewall API |
-| `COOLD_RULES_PATH` / `COOLD_BRIDGE_RULES_PATH` | `/etc/coolify/allow.rules` / `.nft` | Snapshot paths |
-| `COOLD_RECONCILE_INTERVAL` | `2s` | Reconcile cadence |
-| `COOLD_DNS_ZONE` / `COOLD_DNS_UPSTREAM` | `coolify.internal` / `1.1.1.1:53` | DNS |
+| `COOLIFY_COOLD_HOST_MGMT_IP` | required | wg0 mgmt IP |
+| `COOLIFY_COOLD_NAMESPACES` | `default:coolify-default-mesh:0.0.0.0` | `<name>:<network>:<gateway-ip>,…` |
+| `COOLIFY_COOLD_ASSIGNMENT_URL` | — | Hosted-cloud mode: Laravel endpoint coold calls before each flux connection to receive the current flux URL. |
+| `COOLIFY_COOLD_FLUX_URL` | — | Static flux URL for self-hosted/private mode; used when `COOLIFY_COOLD_ASSIGNMENT_URL` is unset. |
+| `COOLIFY_COOLD_BUILDER_ENABLED` | unset | Advertise `"builder"` cap in Hello |
+| `COOLIFY_COOLD_API_BIND` | unset | wg0:8443 firewall REST (unset = disabled) |
+| `COOLIFY_COOLD_API_TOKEN_FILE` | unset | Required when API bind set |
+| `COOLIFY_COOLD_TLS_CERT` / `COOLIFY_COOLD_TLS_KEY` | unset | Enables HTTPS on firewall API |
+| `COOLIFY_COOLD_RULES_PATH` / `COOLIFY_COOLD_BRIDGE_RULES_PATH` | `/etc/coolify/allow.rules` / `.nft` | Snapshot paths |
+| `COOLIFY_COOLD_RECONCILE_INTERVAL` | `2s` | Reconcile cadence |
+| `COOLIFY_COOLD_DNS_ZONE` / `COOLIFY_COOLD_DNS_UPSTREAM` | `coolify.internal` / `1.1.1.1:53` | DNS |
 
-### scheduler env vars
+### flux env vars
 
 | Var | Default | Role |
 | --- | --- | --- |
-| `SCHEDULER_GRPC_BIND` | _required_ | coold dials this. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `SCHEDULER_ALLOW_PUBLIC_BIND=1` (dev only — JWTs cross the wire in cleartext). |
-| `SCHEDULER_ALLOW_PUBLIC_BIND` | unset | Override to allow `0.0.0.0` / `::` bind. Dev/test only. |
-| `SCHEDULER_ID` | unset | Stable scheduler identity reported to Laravel in hosted-cloud mode (e.g. `sched-eu-1`). |
-| `SCHEDULER_PUBLIC_URL` | unset | Public TLS URL Laravel returns from assignment for coold to dial. |
-| `SCHEDULER_INTERNAL_URL` | unset | Private URL Laravel uses when dispatching to this scheduler. |
-| `SCHEDULER_REGION` | unset | Optional scheduler region label reported to Laravel. |
-| `SCHEDULER_LARAVEL_API_URL` | unset | Laravel base URL for scheduler heartbeat and connection registry calls. Unset disables reporting. |
-| `SCHEDULER_LARAVEL_API_TOKEN` | unset | Bearer token for Laravel internal scheduler registry endpoints. |
-| `SCHEDULER_AGENT_CAPACITY` | `10000` | Max long-lived coold streams this scheduler should be assigned. |
-| `SCHEDULER_LARAVEL_HEARTBEAT_INTERVAL_SECS` | `10` | Scheduler heartbeat interval to Laravel. |
-| `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS |
-| `SCHEDULER_UNIX_SOCKET_GROUP` | unset | PHP-FPM group grants `0660` |
-| `SCHEDULER_PENDING_MAX` | `10000` | In-flight + landed cap |
-| `SCHEDULER_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | Verifies coold stream JWT |
-| `SCHEDULER_LOG_LEVEL` | `info` | tracing EnvFilter |
+| `COOLIFY_FLUX_GRPC_BIND` | _required_ | coold dials this. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1` (dev only — JWTs cross the wire in cleartext). |
+| `COOLIFY_FLUX_ALLOW_PUBLIC_BIND` | unset | Override to allow `0.0.0.0` / `::` bind. Dev/test only. |
+| `COOLIFY_FLUX_ID` | unset | Stable flux identity reported to Laravel in hosted-cloud mode (e.g. `flux-eu-1`). |
+| `COOLIFY_FLUX_PUBLIC_URL` | unset | Public TLS URL Laravel returns from assignment for coold to dial. |
+| `COOLIFY_FLUX_INTERNAL_URL` | unset | Private URL Laravel uses when dispatching to this flux. |
+| `COOLIFY_FLUX_REGION` | unset | Optional flux region label reported to Laravel. |
+| `COOLIFY_FLUX_LARAVEL_API_URL` | unset | Laravel base URL for flux heartbeat and connection registry calls. Unset disables reporting. |
+| `COOLIFY_FLUX_LARAVEL_API_TOKEN` | unset | Bearer token for Laravel internal flux registry endpoints. |
+| `COOLIFY_FLUX_AGENT_CAPACITY` | `10000` | Max long-lived coold streams this flux should be assigned. |
+| `COOLIFY_FLUX_LARAVEL_HEARTBEAT_INTERVAL_SECS` | `10` | Flux heartbeat interval to Laravel. |
+| `COOLIFY_FLUX_UNIX_SOCKET_PATH` | `/run/coolify/flux.sock` | Laravel UDS |
+| `COOLIFY_FLUX_UNIX_SOCKET_GROUP` | unset | PHP-FPM group grants `0660` |
+| `COOLIFY_FLUX_PENDING_MAX` | `10000` | In-flight + landed cap |
+| `COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | Verifies coold stream JWT |
+| `COOLIFY_FLUX_LOG_LEVEL` | `info` | tracing EnvFilter |
 
 ---
 
@@ -453,20 +453,20 @@ Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_BIN`, optional loca
 
 - No Compose parser in coold (Laravel-side).
 - No Dockerfile / Buildpacks / Nixpacks in coold (builder + builder-core own these).
-- No scheduler, no deploy state machine, no ingress templating, no RBAC, no audit, no secret storage.
+- No flux, no deploy state machine, no ingress templating, no RBAC, no audit, no secret storage.
 - No raw podman passthrough. Enumerated verbs only.
 - No IPv6 (AAAA → NODATA).
 - No WireGuard peer management.
 
 
-### Scheduler stream sync
+### Flux stream sync
 
 Connected agents become visible through this flow:
 
 ```txt
-coold connects → scheduler streams → POST /api/v1/servers/sync-streams → SQLite servers → live container endpoint
+coold connects → flux streams → POST /api/v1/servers/sync-streams → SQLite servers → live container endpoint
 ```
 
-The sync endpoint creates or updates servers by scheduler `host_id`, stores
+The sync endpoint creates or updates servers by flux `host_id`, stores
 capabilities, sets `last_seen_at`, marks the server online, and records an
 event.

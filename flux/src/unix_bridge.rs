@@ -1,7 +1,7 @@
 //! HTTP-over-Unix-domain-socket bridge.
 //!
 //! Access control is the filesystem: the socket is bound as
-//! `owner:group` = `<scheduler_user>:<SCHEDULER_UNIX_SOCKET_GROUP>` with mode
+//! `owner:group` = `<flux_user>:<COOLIFY_FLUX_UNIX_SOCKET_GROUP>` with mode
 //! `0660`. No TLS, no auth header — any local process with group
 //! membership on the socket is a trusted central-plane caller.
 
@@ -167,7 +167,7 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
                     return coold_err(&request_id, 409, "request_id already in flight");
                 }
                 InsertOutcome::AtCapacity => {
-                    return coold_err(&request_id, 503, "scheduler at pending-dispatch capacity");
+                    return coold_err(&request_id, 503, "flux at pending-dispatch capacity");
                 }
             }
 

@@ -21,11 +21,7 @@ const POSITIVE_TTL: u32 = 5;
 /// without spinning up Corrosion.
 #[async_trait]
 pub trait EndpointLookup: Send + Sync + 'static {
-    async fn lookup(
-        &self,
-        container_name: &str,
-        namespace: &str,
-    ) -> anyhow::Result<Vec<IpAddr>>;
+    async fn lookup(&self, container_name: &str, namespace: &str) -> anyhow::Result<Vec<IpAddr>>;
 }
 
 /// Production backend: consults the local Corrosion HTTP API for endpoints
@@ -42,11 +38,7 @@ impl CorrosionBackend {
 
 #[async_trait]
 impl EndpointLookup for CorrosionBackend {
-    async fn lookup(
-        &self,
-        container_name: &str,
-        namespace: &str,
-    ) -> anyhow::Result<Vec<IpAddr>> {
+    async fn lookup(&self, container_name: &str, namespace: &str) -> anyhow::Result<Vec<IpAddr>> {
         let ips = self
             .client
             .query_ips_by_name(container_name, namespace)
@@ -88,10 +80,7 @@ impl CoolifyResolver {
     /// `web.default.coolify.internal.` → `Some(("web", "default"))`.
     /// Anything shorter (bare `<name>.<zone>`, zone apex) returns `None` so
     /// the resolver answers NXDOMAIN — callers must fully qualify.
-    fn container_and_namespace<'a>(
-        &self,
-        query_name: &'a LowerName,
-    ) -> Option<(String, String)> {
+    fn container_and_namespace<'a>(&self, query_name: &'a LowerName) -> Option<(String, String)> {
         if !self.zone.zone_of(query_name) {
             return None;
         }
