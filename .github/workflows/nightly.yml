@@ -31,9 +31,13 @@ jobs:
         include:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+            musl_target: x86_64-unknown-linux-musl
+            musl_cc_env: CC_x86_64_unknown_linux_musl
             arch: amd64
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            musl_target: aarch64-unknown-linux-musl
+            musl_cc_env: CC_aarch64_unknown_linux_musl
             arch: arm64
     runs-on: ${{ matrix.runner }}
     env:
@@ -44,7 +48,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.target }},${{ matrix.musl_target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -53,8 +57,8 @@ jobs:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
 
       - name: Build workspace
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
@@ -73,6 +77,21 @@ jobs:
           tar -czf dist/flux-linux-${{ matrix.arch }}.tar.gz -C dist flux
           rm dist/flux
           (cd dist && sha256sum flux-linux-${{ matrix.arch }}.tar.gz > flux-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - name: Build Alpine-compatible Flux
+        env:
+          MUSL_CC_ENV: ${{ matrix.musl_cc_env }}
+        run: |
+          echo "${MUSL_CC_ENV}=musl-gcc" >> "$GITHUB_ENV"
+          export "${MUSL_CC_ENV}=musl-gcc"
+          cargo build -p flux --release --locked --target ${{ matrix.musl_target }}
+
+      - name: Package Alpine-compatible flux
+        run: |
+          cp target/${{ matrix.musl_target }}/release/flux dist/flux
+          tar -czf dist/flux-linux-musl-${{ matrix.arch }}.tar.gz -C dist flux
+          rm dist/flux
+          (cd dist && sha256sum flux-linux-musl-${{ matrix.arch }}.tar.gz > flux-linux-musl-${{ matrix.arch }}.tar.gz.sha256)
 
       - name: Package builder
         run: |
@@ -115,7 +134,7 @@ jobs:
             echo
             echo "### Artifacts"
             echo "- \`coold\` — per-host agent (holds the single gRPC stream to flux; spawns builder subprocess per BuildRequest when COOLIFY_COOLD_BUILDER_ENABLED=1)"
-            echo "- \`flux\` — central-side gRPC stream flux (single listener on :6443; capability-aware routing)"
+            echo "- \`flux\` — central-side gRPC stream router (single listener on :6443; capability-aware routing; musl artifacts are Alpine-compatible)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
             echo
             if [ -n "$PREV" ]; then
@@ -143,6 +162,10 @@ jobs:
             dist/flux-linux-amd64.tar.gz.sha256
             dist/flux-linux-arm64.tar.gz
             dist/flux-linux-arm64.tar.gz.sha256
+            dist/flux-linux-musl-amd64.tar.gz
+            dist/flux-linux-musl-amd64.tar.gz.sha256
+            dist/flux-linux-musl-arm64.tar.gz
+            dist/flux-linux-musl-arm64.tar.gz.sha256
             dist/builder-linux-amd64.tar.gz
             dist/builder-linux-amd64.tar.gz.sha256
             dist/builder-linux-arm64.tar.gz
@@ -166,6 +189,10 @@ jobs:
             dist/flux-linux-amd64.tar.gz.sha256 \
             dist/flux-linux-arm64.tar.gz \
             dist/flux-linux-arm64.tar.gz.sha256 \
+            dist/flux-linux-musl-amd64.tar.gz \
+            dist/flux-linux-musl-amd64.tar.gz.sha256 \
+            dist/flux-linux-musl-arm64.tar.gz \
+            dist/flux-linux-musl-arm64.tar.gz.sha256 \
             dist/builder-linux-amd64.tar.gz \
             dist/builder-linux-amd64.tar.gz.sha256 \
             dist/builder-linux-arm64.tar.gz \
