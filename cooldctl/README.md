@@ -133,42 +133,6 @@ control plane runs separately and talks to scheduler over its Unix socket. Use
 `--scheduler-version latest` to consume the latest stable release asset, or pin a
 specific tag such as `v0.2.0`.
 
-### Scheduler container image
-
-The default self-hosted path is still the systemd-managed binary above. Nightly
-builds also publish a multi-arch OCI image for container-native deployments:
-
-```bash
-docker pull ghcr.io/coollabsio/coold/scheduler:nightly
-```
-
-The image exposes port `6443` and defaults to the same scheduler paths as the
-systemd unit: `/etc/coolify/jwt.pub` for the coold JWT public key and
-`/run/coolify/scheduler.sock` for Laravel's HTTP-over-UDS lane.
-
-```bash
-docker run --rm \
-  --network host \
-  -e SCHEDULER_GRPC_BIND=100.64.0.1:6443 \
-  -e SCHEDULER_JWT_PUBLIC_KEY_PATH=/etc/coolify/jwt.pub \
-  -e SCHEDULER_UNIX_SOCKET_PATH=/run/coolify/scheduler.sock \
-  -v /etc/coolify/jwt.pub:/etc/coolify/jwt.pub:ro \
-  -v /run/coolify:/run/coolify \
-  ghcr.io/coollabsio/coold/scheduler:nightly
-```
-
-By default the entrypoint drops from root to the non-root `scheduler` user. If a
-Laravel/PHP-FPM process needs group access to the UDS from another container,
-set `SCHEDULER_UNIX_SOCKET_GROUP_ID=<gid>` and optionally
-`SCHEDULER_UNIX_SOCKET_GROUP=<name>`; the entrypoint creates that group, adds the
-`scheduler` user to it, and the scheduler will create the socket as `0660` for
-that group.
-
-For bridge-mode development, bind `SCHEDULER_GRPC_BIND=0.0.0.0:6443`, publish
-`-p 6443:6443`, and set `SCHEDULER_ALLOW_PUBLIC_BIND=1`. Do not use that mode
-for production unless the listener is otherwise private: coold JWTs currently
-travel on this gRPC connection without a TLS layer.
-
 The central host always joins the WireGuard management mesh so scheduler ↔ coold
 traffic stays private. It only runs Podman/coold/Corrosion/firewall when it is
 also listed in `--nodes`.
