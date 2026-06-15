@@ -56,6 +56,10 @@ impl Streams {
         self.0.get(host_id).map(|e| e.value().tx.clone())
     }
 
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub fn has_cap(&self, host_id: &str, cap: &str) -> bool {
         self.0
             .get(host_id)

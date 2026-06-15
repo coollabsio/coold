@@ -1,6 +1,7 @@
 mod auth;
 mod config;
 mod envelope;
+mod registry;
 mod routing;
 mod state;
 mod unix_bridge;
@@ -29,6 +30,7 @@ async fn main() -> Result<()> {
         grpc_server::run(config.clone(), streams.clone(), pending.clone()),
         unix_bridge::run(config.clone(), streams.clone(), pending.clone()),
         pending_sweeper::run(pending.clone()),
+        registry::heartbeat_loop(config.clone(), streams.clone()),
     )?;
 
     Ok(())
@@ -62,6 +64,7 @@ mod grpc_server {
         auth,
         config::Config,
         envelope::{BuildResponseBody, ResponseBody},
+        registry::RegistryClient,
         state::{Pending, PendingKind, ResponseData, StreamHandle, Streams},
     };
 
@@ -102,7 +105,13 @@ mod grpc_server {
             );
         }
 
-        let svc = SchedulerAgent { config, streams, pending };
+        let registry = RegistryClient::from_config(&config);
+        let svc = SchedulerAgent {
+            config,
+            streams,
+            pending,
+            registry,
+        };
 
         info!(%addr, "gRPC server listening");
         Server::builder()
@@ -116,6 +125,7 @@ mod grpc_server {
         config: Config,
         streams: Streams,
         pending: Pending,
+        registry: Option<RegistryClient>,
     }
 
     type ServerMsgStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send + 'static>>;
@@ -141,11 +151,13 @@ mod grpc_server {
                     Status::unauthenticated("invalid credentials")
                 })?;
 
-            let verified = auth::verify_jwt(jwt, &self.config.jwt_public_key)
-                .map_err(|e| {
-                    warn!(error = format!("{e:#}"), "gRPC stream rejected: JWT verification failed");
-                    Status::unauthenticated("invalid credentials")
-                })?;
+            let verified = auth::verify_jwt(jwt, &self.config.jwt_public_key).map_err(|e| {
+                warn!(
+                    error = format!("{e:#}"),
+                    "gRPC stream rejected: JWT verification failed"
+                );
+                Status::unauthenticated("invalid credentials")
+            })?;
 
             let host_id = verified.host_id.clone();
             let jwt_caps = verified.caps;
@@ -164,17 +176,23 @@ mod grpc_server {
 
             let streams = self.streams.clone();
             let pending = self.pending.clone();
+            let registry = self.registry.clone();
             let host_id_clone = host_id.clone();
             let jwt_caps_clone = jwt_caps.clone();
             let mut inbound = request.into_inner();
 
             tokio::spawn(async move {
+                let mut disconnect_reason = "stream_closed";
                 while let Some(msg) = inbound.next().await {
                     match msg {
-                        Ok(ClientMsg { payload: Some(client_msg::Payload::Response(resp)) }) => {
+                        Ok(ClientMsg {
+                            payload: Some(client_msg::Payload::Response(resp)),
+                        }) => {
                             deliver_response(&pending, resp);
                         }
-                        Ok(ClientMsg { payload: Some(client_msg::Payload::Hello(h)) }) => {
+                        Ok(ClientMsg {
+                            payload: Some(client_msg::Payload::Hello(h)),
+                        }) => {
                             info!(
                                 host_id = %host_id_clone,
                                 version = %h.coold_version,
@@ -196,24 +214,58 @@ mod grpc_server {
                                     jwt_caps = ?jwt_caps_clone,
                                     "host advertised a capability not granted in JWT; dropping stream",
                                 );
+                                disconnect_reason = "capability_mismatch";
                                 break;
                             }
 
+                            let capabilities = h.capabilities;
+                            let builder_capacity = h.builder_capacity;
+                            let coold_version = h.coold_version;
                             streams.update_capabilities(
                                 &host_id_clone,
-                                h.capabilities,
-                                h.builder_capacity,
+                                capabilities.clone(),
+                                builder_capacity,
                             );
+                            if let Some(registry) = registry.clone() {
+                                let host_id = host_id_clone.clone();
+                                tokio::spawn(async move {
+                                    if let Err(e) = registry
+                                        .upsert_connection(
+                                            &host_id,
+                                            capabilities,
+                                            builder_capacity,
+                                            Some(coold_version),
+                                        )
+                                        .await
+                                    {
+                                        warn!(
+                                            host_id = %host_id,
+                                            error = format!("{e:#}"),
+                                            "Laravel agent connection upsert failed",
+                                        );
+                                    }
+                                });
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => {
                             warn!(host_id = %host_id_clone, error = %e, "stream recv error");
+                            disconnect_reason = "stream_error";
                             break;
                         }
                     }
                 }
                 info!(host_id = %host_id_clone, "coold stream disconnected");
                 streams.remove(&host_id_clone);
+                if let Some(registry) = registry {
+                    if let Err(e) = registry.disconnect(&host_id_clone, disconnect_reason).await {
+                        warn!(
+                            host_id = %host_id_clone,
+                            error = format!("{e:#}"),
+                            "Laravel agent disconnect report failed",
+                        );
+                    }
+                }
             });
 
             let outbound = ReceiverStream::new(cmd_rx).map(Ok);

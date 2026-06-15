@@ -58,6 +58,39 @@ pub struct Config {
     /// Seconds before a pending dispatch request times out waiting for coold response.
     #[arg(long, env = "SCHEDULER_DISPATCH_TIMEOUT_SECS", default_value = "30")]
     pub dispatch_timeout_secs: u64,
+
+    /// Stable scheduler identity reported to Laravel in cloud mode.
+    #[arg(long, env = "SCHEDULER_ID")]
+    pub scheduler_id: Option<String>,
+
+    /// Public URL returned by Laravel's assignment endpoint for agents to dial.
+    #[arg(long, env = "SCHEDULER_PUBLIC_URL")]
+    pub scheduler_public_url: Option<String>,
+
+    /// Private URL Laravel uses to dispatch to this scheduler in cloud mode.
+    #[arg(long, env = "SCHEDULER_INTERNAL_URL")]
+    pub scheduler_internal_url: Option<String>,
+
+    /// Optional region label reported to Laravel.
+    #[arg(long, env = "SCHEDULER_REGION")]
+    pub scheduler_region: Option<String>,
+
+    /// Laravel base URL for internal scheduler registry calls. When unset,
+    /// registry reporting is disabled.
+    #[arg(long, env = "SCHEDULER_LARAVEL_API_URL")]
+    pub laravel_api_url: Option<String>,
+
+    /// Bearer token for Laravel internal scheduler registry calls.
+    #[arg(long, env = "SCHEDULER_LARAVEL_API_TOKEN")]
+    pub laravel_api_token: Option<String>,
+
+    /// Max long-lived agent streams this scheduler should be assigned.
+    #[arg(long, env = "SCHEDULER_AGENT_CAPACITY", default_value = "10000")]
+    pub agent_capacity: usize,
+
+    /// Heartbeat interval for Laravel scheduler registry reporting.
+    #[arg(long, env = "SCHEDULER_LARAVEL_HEARTBEAT_INTERVAL_SECS", default_value = "10")]
+    pub laravel_heartbeat_interval_secs: u64,
 }
 
 impl Config {

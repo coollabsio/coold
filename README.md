@@ -406,7 +406,8 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 | --- | --- | --- |
 | `COOLD_HOST_MGMT_IP` | required | wg0 mgmt IP |
 | `COOLD_NAMESPACES` | `default:coolify-default-mesh:0.0.0.0` | `<name>:<network>:<gateway-ip>,…` |
-| `COOLD_SCHEDULER_URL` | — | grpcs://scheduler:6443/v1/agent |
+| `COOLD_ASSIGNMENT_URL` | — | Hosted-cloud mode: Laravel endpoint coold calls before each scheduler connection to receive the current scheduler URL. |
+| `COOLD_SCHEDULER_URL` | — | Static scheduler URL for self-hosted/private mode; used when `COOLD_ASSIGNMENT_URL` is unset. |
 | `COOLD_BUILDER_ENABLED` | unset | Advertise `"builder"` cap in Hello |
 | `COOLD_API_BIND` | unset | wg0:8443 firewall REST (unset = disabled) |
 | `COOLD_API_TOKEN_FILE` | unset | Required when API bind set |
@@ -421,6 +422,14 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 | --- | --- | --- |
 | `SCHEDULER_GRPC_BIND` | _required_ | coold dials this. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `SCHEDULER_ALLOW_PUBLIC_BIND=1` (dev only — JWTs cross the wire in cleartext). |
 | `SCHEDULER_ALLOW_PUBLIC_BIND` | unset | Override to allow `0.0.0.0` / `::` bind. Dev/test only. |
+| `SCHEDULER_ID` | unset | Stable scheduler identity reported to Laravel in hosted-cloud mode (e.g. `sched-eu-1`). |
+| `SCHEDULER_PUBLIC_URL` | unset | Public TLS URL Laravel returns from assignment for coold to dial. |
+| `SCHEDULER_INTERNAL_URL` | unset | Private URL Laravel uses when dispatching to this scheduler. |
+| `SCHEDULER_REGION` | unset | Optional scheduler region label reported to Laravel. |
+| `SCHEDULER_LARAVEL_API_URL` | unset | Laravel base URL for scheduler heartbeat and connection registry calls. Unset disables reporting. |
+| `SCHEDULER_LARAVEL_API_TOKEN` | unset | Bearer token for Laravel internal scheduler registry endpoints. |
+| `SCHEDULER_AGENT_CAPACITY` | `10000` | Max long-lived coold streams this scheduler should be assigned. |
+| `SCHEDULER_LARAVEL_HEARTBEAT_INTERVAL_SECS` | `10` | Scheduler heartbeat interval to Laravel. |
 | `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS |
 | `SCHEDULER_UNIX_SOCKET_GROUP` | unset | PHP-FPM group grants `0660` |
 | `SCHEDULER_PENDING_MAX` | `10000` | In-flight + landed cap |

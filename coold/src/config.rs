@@ -149,9 +149,16 @@ pub struct Config {
     #[arg(long, env = "COOLD_SCHEDULER_URL")]
     pub scheduler_url: Option<String>,
 
+    /// Laravel assignment endpoint used by hosted Coolify Cloud. When set,
+    /// coold POSTs its host JWT and capabilities here before each scheduler
+    /// connection attempt and dials the returned scheduler URL. Self-hosted
+    /// installs can leave this unset and use `COOLD_SCHEDULER_URL` directly.
+    #[arg(long, env = "COOLD_ASSIGNMENT_URL")]
+    pub assignment_url: Option<String>,
+
     /// Path to the per-host JWT file used to authenticate the outbound gRPC
     /// stream. Must be readable; coold exits at boot if the file is absent or
-    /// empty and `scheduler_url` is set.
+    /// empty and `scheduler_url` or `assignment_url` is set.
     #[arg(
         long,
         env = "COOLD_HOST_JWT_PATH",

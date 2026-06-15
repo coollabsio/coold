@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
@@ -14,10 +15,21 @@ use tracing::{info, warn};
 use crate::builder::{BuilderCtx, BuilderSettings};
 use crate::config::{Config, VERSION};
 use crate::grpc::handlers::handle;
-use crate::grpc::proto::{
-    agent_client::AgentClient, client_msg, ClientMsg, Hello,
-};
+use crate::grpc::proto::{agent_client::AgentClient, client_msg, ClientMsg, Hello};
 use crate::podman::PodmanClient;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct AssignmentRequest {
+    pub host_id: String,
+    pub coold_version: String,
+    pub capabilities: Vec<String>,
+    pub builder_capacity: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AssignmentResponse {
+    scheduler_url: String,
+}
 
 /// Read and validate the host JWT from disk. Refuses any file with
 /// group/other permission bits set — the bearer must be 0600 or stricter.
@@ -47,13 +59,11 @@ async fn load_host_jwt(path: &Path) -> Result<String> {
 }
 
 pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
-    if config.grpc_disabled || config.scheduler_url.is_none() {
+    if config.grpc_disabled || (config.scheduler_url.is_none() && config.assignment_url.is_none()) {
         info!("grpc transport disabled; skipping");
         std::future::pending::<()>().await;
         return Ok(());
     }
-
-    let url = config.scheduler_url.clone().unwrap();
 
     // Verify the JWT file exists and has correct perms before we set up the
     // builder context — fail-fast on misconfig rather than discovering it
@@ -86,6 +96,7 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
     };
 
     let mut backoff = Duration::from_secs(1);
+    let http = reqwest::Client::new();
     loop {
         // Re-read the JWT file each reconnect so an external rotator can swap
         // it (e.g. before exp) without coold needing a restart.
@@ -96,6 +107,29 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
                     error = format!("{e:#}"),
                     backoff_ms = backoff.as_millis(),
                     "load host JWT failed"
+                );
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            }
+        };
+
+        let assignment_req = assignment_request(&config);
+        let url = match resolve_scheduler_url(
+            &http,
+            config.assignment_url.as_deref(),
+            config.scheduler_url.as_deref(),
+            &jwt,
+            &assignment_req,
+        )
+        .await
+        {
+            Ok(url) => url,
+            Err(e) => {
+                warn!(
+                    error = format!("{e:#}"),
+                    backoff_ms = backoff.as_millis(),
+                    "resolve scheduler URL failed"
                 );
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(Duration::from_secs(60));
@@ -121,6 +155,58 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
     }
 }
 
+fn assignment_request(config: &Config) -> AssignmentRequest {
+    let mut capabilities = vec!["coold".to_string()];
+    let mut builder_capacity = 0u32;
+    if config.builder_enabled {
+        capabilities.push("builder".to_string());
+        builder_capacity = config.builder_capacity;
+    }
+    AssignmentRequest {
+        host_id: config.host_mgmt_ip.clone(),
+        coold_version: VERSION.to_string(),
+        capabilities,
+        builder_capacity,
+    }
+}
+
+async fn resolve_scheduler_url(
+    http: &reqwest::Client,
+    assignment_url: Option<&str>,
+    scheduler_url: Option<&str>,
+    jwt: &str,
+    req: &AssignmentRequest,
+) -> Result<String> {
+    if let Some(url) = assignment_url {
+        let resp = http
+            .post(url)
+            .bearer_auth(jwt)
+            .json(req)
+            .send()
+            .await
+            .with_context(|| format!("POST scheduler assignment {url}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("scheduler assignment {url} returned {status}: {body}");
+        }
+
+        let body: AssignmentResponse = resp
+            .json()
+            .await
+            .with_context(|| format!("decode scheduler assignment response from {url}"))?;
+        if body.scheduler_url.trim().is_empty() {
+            anyhow::bail!("scheduler assignment {url} returned empty scheduler_url");
+        }
+        return Ok(body.scheduler_url);
+    }
+
+    scheduler_url
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("COOLD_ASSIGNMENT_URL or COOLD_SCHEDULER_URL must be set"))
+}
+
 async fn connect_and_serve(
     url: &str,
     jwt: &str,
@@ -139,8 +225,7 @@ async fn connect_and_serve(
         .context("build bearer metadata")?;
 
     let mut client = AgentClient::with_interceptor(channel, move |mut req: Request<()>| {
-        req.metadata_mut()
-            .insert("authorization", bearer.clone());
+        req.metadata_mut().insert("authorization", bearer.clone());
         Ok(req)
     });
 
@@ -206,7 +291,12 @@ mod tests {
     use super::load_host_jwt;
     use std::os::unix::fs::PermissionsExt;
 
-    fn write_jwt(dir: &std::path::Path, name: &str, contents: &str, mode: u32) -> std::path::PathBuf {
+    fn write_jwt(
+        dir: &std::path::Path,
+        name: &str,
+        contents: &str,
+        mode: u32,
+    ) -> std::path::PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
@@ -255,5 +345,109 @@ mod tests {
         let err = load_host_jwt(&p).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("stat host JWT"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn scheduler_resolution_uses_static_url_without_assignment_url() {
+        let req = super::AssignmentRequest {
+            host_id: "100.64.0.5".into(),
+            coold_version: "test".into(),
+            capabilities: vec!["coold".into()],
+            builder_capacity: 0,
+        };
+
+        let got = super::resolve_scheduler_url(
+            &reqwest::Client::new(),
+            None,
+            Some("https://scheduler.example.com"),
+            "jwt",
+            &req,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got, "https://scheduler.example.com");
+    }
+
+    #[tokio::test]
+    async fn scheduler_resolution_requires_some_url() {
+        let req = super::AssignmentRequest {
+            host_id: "100.64.0.5".into(),
+            coold_version: "test".into(),
+            capabilities: vec!["coold".into()],
+            builder_capacity: 0,
+        };
+
+        let err = super::resolve_scheduler_url(&reqwest::Client::new(), None, None, "jwt", &req)
+            .await
+            .unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("COOLD_ASSIGNMENT_URL or COOLD_SCHEDULER_URL"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduler_resolution_posts_assignment_with_bearer_auth() {
+        use axum::{
+            extract::State,
+            http::{HeaderMap, StatusCode},
+            routing::post,
+            Json, Router,
+        };
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Seen(Arc<Mutex<Option<(String, String)>>>);
+
+        async fn assign(
+            State(seen): State<Seen>,
+            headers: HeaderMap,
+            Json(req): Json<super::AssignmentRequest>,
+        ) -> Result<Json<serde_json::Value>, StatusCode> {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .to_owned();
+            *seen.0.lock().unwrap() = Some((auth, req.host_id));
+            Ok(Json(serde_json::json!({
+                "scheduler_url": "https://assigned.example.com"
+            })))
+        }
+
+        let seen = Seen::default();
+        let app = Router::new()
+            .route("/assign", post(assign))
+            .with_state(seen.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let req = super::AssignmentRequest {
+            host_id: "100.64.0.5".into(),
+            coold_version: "test".into(),
+            capabilities: vec!["coold".into(), "builder".into()],
+            builder_capacity: 2,
+        };
+
+        let got = super::resolve_scheduler_url(
+            &reqwest::Client::new(),
+            Some(&format!("http://{addr}/assign")),
+            Some("https://static.example.com"),
+            "host.jwt",
+            &req,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(got, "https://assigned.example.com");
+        let seen = seen.0.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.0, "Bearer host.jwt");
+        assert_eq!(seen.1, "100.64.0.5");
     }
 }

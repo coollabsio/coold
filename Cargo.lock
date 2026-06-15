@@ -1889,6 +1889,7 @@ dependencies = [
  "libc",
  "prost",
  "proto",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

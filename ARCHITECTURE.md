@@ -454,13 +454,40 @@ Single central VM. No load balancer required.
   `/etc/coolify/scheduler.pin`.
 - Firewall: open port `6443` inbound for coold connections.
 
-### Cloud / multi-scheduler
+### Assignment mode / multi-scheduler
 
-Single scheduler per central VM / pod for the current release. Multi-scheduler
-routing (Corrosion `host_routes` fan-out, inter-scheduler command forward)
-is deferred until horizontal central is actually needed — the UDS lane
-is local-only by design, so scaling requires either sidecar pinning
-(Laravel pod → local scheduler) or a new inter-scheduler RPC.
+There are two supported control-plane shapes:
+
+- **Simple self-hosted**: one local scheduler, Laravel talks to its UDS, and
+  coold uses static `COOLD_SCHEDULER_URL`.
+- **Assignment mode**: Laravel owns a scheduler registry and assigns each
+  coold to one healthy scheduler. This is required for hosted Coolify Cloud
+  and is also the path for self-hosted users who want to run more than one
+  scheduler.
+
+In assignment mode, each `coold` calls Laravel's assignment endpoint with its
+host JWT and capabilities, receives a scheduler URL, then opens the long-lived
+gRPC stream to that scheduler. If the stream drops, coold backs off and asks
+assignment again before reconnecting. Hosted Coolify Cloud uses the same flow,
+but cloud central **does not join customer WireGuard meshes**; self-hosted
+assignment can return private/WireGuard scheduler URLs instead.
+
+Schedulers in assignment mode report ownership back to Laravel:
+
+```
+scheduler -> POST /api/v1/internal/schedulers/heartbeat
+scheduler -> POST /api/v1/internal/agent-connections/upsert
+scheduler -> POST /api/v1/internal/agent-connections/disconnect
+```
+
+Laravel stores `host_id -> scheduler_id` and dispatches to the owning
+scheduler's private `SCHEDULER_INTERNAL_URL`. Assignment should use stable
+rendezvous hashing over healthy, non-draining schedulers so adding/removing a
+scheduler moves only a subset of hosts. In hosted Cloud, the scheduler public
+listener must sit behind TLS (typically public :443 LB/ingress → private h2c
+scheduler); the `SCHEDULER_ALLOW_PUBLIC_BIND=1` escape hatch remains dev/test
+only. In scaled self-hosted deployments, `SCHEDULER_PUBLIC_URL` may be a
+private WireGuard/LAN URL as long as coold can dial it.
 
 ### UDS wire surface (Laravel → scheduler)
 
@@ -576,6 +603,14 @@ All sourced from `scheduler/src/config.rs`:
 |---|---|---|
 | `SCHEDULER_GRPC_BIND` | _required_ | coold dials this. Build traffic shares this port — no separate builder listener. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `SCHEDULER_ALLOW_PUBLIC_BIND=1`. |
 | `SCHEDULER_ALLOW_PUBLIC_BIND` | unset | Set to `1` to allow binding `0.0.0.0` / `::`. Dev/test only — JWTs cross the wire unencrypted. |
+| `SCHEDULER_ID` | unset | Stable scheduler identity reported to Laravel in hosted-cloud mode. |
+| `SCHEDULER_PUBLIC_URL` | unset | Public TLS URL returned to coold by Laravel assignment. |
+| `SCHEDULER_INTERNAL_URL` | unset | Private Laravel→scheduler dispatch URL. |
+| `SCHEDULER_REGION` | unset | Optional scheduler region label. |
+| `SCHEDULER_LARAVEL_API_URL` | unset | Laravel base URL for scheduler heartbeat and agent connection ownership calls. |
+| `SCHEDULER_LARAVEL_API_TOKEN` | unset | Bearer token for Laravel internal scheduler registry endpoints. |
+| `SCHEDULER_AGENT_CAPACITY` | `10000` | Max long-lived agent streams this scheduler should be assigned. |
+| `SCHEDULER_LARAVEL_HEARTBEAT_INTERVAL_SECS` | `10` | Heartbeat interval for registry reporting. |
 | `SCHEDULER_UNIX_SOCKET_PATH` | `/run/coolify/scheduler.sock` | Laravel UDS. |
 | `SCHEDULER_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
 | `SCHEDULER_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |
@@ -585,9 +620,10 @@ All sourced from `scheduler/src/config.rs`:
 
 ### coold config rename
 
-`COOLD_CENTRAL_URL` renamed to `COOLD_SCHEDULER_URL`. Update enrollment and
-`coolify init` templates when central enrollment is implemented.
-Semantics identical; only the name changes to reflect the actual target.
+`COOLD_CENTRAL_URL` renamed to `COOLD_SCHEDULER_URL`. Self-hosted installs use
+`COOLD_SCHEDULER_URL` as a static target. Hosted Coolify Cloud sets
+`COOLD_ASSIGNMENT_URL` instead; coold POSTs its host JWT and capabilities to
+Laravel before each connect attempt and dials the returned scheduler URL.
 
 
 ### Repository layout
