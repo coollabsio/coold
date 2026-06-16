@@ -121,8 +121,51 @@ jobs:
           path: dist/*
           retention-days: 7
 
+  build-macos:
+    needs: prep
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+          - runner: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      COOLIFY_COOLD_VERSION: ${{ needs.prep.outputs.tag }}
+      COOLIFY_FLUX_VERSION: ${{ needs.prep.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: darwin-${{ matrix.arch }}
+          cache-all-crates: true
+          cache-on-failure: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build coolify CLI
+        run: cargo build -p coolify-cli --release --locked
+
+      - name: Package coolify CLI
+        run: |
+          mkdir -p dist
+          cp target/release/coolify dist/coolify
+          tar -czf dist/coolify-darwin-${{ matrix.arch }}.tar.gz -C dist coolify
+          rm dist/coolify
+          (cd dist && shasum -a 256 coolify-darwin-${{ matrix.arch }}.tar.gz > coolify-darwin-${{ matrix.arch }}.tar.gz.sha256)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coolify-darwin-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+
   release:
-    needs: [prep, build]
+    needs: [prep, build, build-macos]
     runs-on: ubuntu-24.04
     env:
       TAG: ${{ needs.prep.outputs.tag }}
@@ -194,6 +237,10 @@ jobs:
             dist/coolify-linux-musl-amd64.tar.gz.sha256
             dist/coolify-linux-musl-arm64.tar.gz
             dist/coolify-linux-musl-arm64.tar.gz.sha256
+            dist/coolify-darwin-amd64.tar.gz
+            dist/coolify-darwin-amd64.tar.gz.sha256
+            dist/coolify-darwin-arm64.tar.gz
+            dist/coolify-darwin-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -228,4 +275,8 @@ jobs:
             dist/coolify-linux-musl-amd64.tar.gz \
             dist/coolify-linux-musl-amd64.tar.gz.sha256 \
             dist/coolify-linux-musl-arm64.tar.gz \
-            dist/coolify-linux-musl-arm64.tar.gz.sha256
+            dist/coolify-linux-musl-arm64.tar.gz.sha256 \
+            dist/coolify-darwin-amd64.tar.gz \
+            dist/coolify-darwin-amd64.tar.gz.sha256 \
+            dist/coolify-darwin-arm64.tar.gz \
+            dist/coolify-darwin-arm64.tar.gz.sha256
