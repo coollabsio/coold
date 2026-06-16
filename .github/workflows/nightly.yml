@@ -78,13 +78,14 @@ jobs:
           rm dist/flux
           (cd dist && sha256sum flux-linux-${{ matrix.arch }}.tar.gz > flux-linux-${{ matrix.arch }}.tar.gz.sha256)
 
-      - name: Build Alpine-compatible Flux
+      - name: Build Alpine-compatible Flux and cooldctl
         env:
           MUSL_CC_ENV: ${{ matrix.musl_cc_env }}
         run: |
           echo "${MUSL_CC_ENV}=musl-gcc" >> "$GITHUB_ENV"
           export "${MUSL_CC_ENV}=musl-gcc"
           cargo build -p flux --release --locked --target ${{ matrix.musl_target }}
+          cargo build -p cooldctl --release --locked --target ${{ matrix.musl_target }}
 
       - name: Package Alpine-compatible flux
         run: |
@@ -106,6 +107,13 @@ jobs:
           tar -czf dist/cooldctl-linux-${{ matrix.arch }}.tar.gz -C dist cooldctl
           rm dist/cooldctl
           (cd dist && sha256sum cooldctl-linux-${{ matrix.arch }}.tar.gz > cooldctl-linux-${{ matrix.arch }}.tar.gz.sha256)
+
+      - name: Package Alpine-compatible cooldctl
+        run: |
+          cp target/${{ matrix.musl_target }}/release/cooldctl dist/cooldctl
+          tar -czf dist/cooldctl-linux-musl-${{ matrix.arch }}.tar.gz -C dist cooldctl
+          rm dist/cooldctl
+          (cd dist && sha256sum cooldctl-linux-musl-${{ matrix.arch }}.tar.gz > cooldctl-linux-musl-${{ matrix.arch }}.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -182,6 +190,10 @@ jobs:
             dist/cooldctl-linux-amd64.tar.gz.sha256
             dist/cooldctl-linux-arm64.tar.gz
             dist/cooldctl-linux-arm64.tar.gz.sha256
+            dist/cooldctl-linux-musl-amd64.tar.gz
+            dist/cooldctl-linux-musl-amd64.tar.gz.sha256
+            dist/cooldctl-linux-musl-arm64.tar.gz
+            dist/cooldctl-linux-musl-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -213,3 +225,7 @@ jobs:
             dist/cooldctl-linux-amd64.tar.gz.sha256 \
             dist/cooldctl-linux-arm64.tar.gz \
             dist/cooldctl-linux-arm64.tar.gz.sha256 \
+            dist/cooldctl-linux-musl-amd64.tar.gz \
+            dist/cooldctl-linux-musl-amd64.tar.gz.sha256 \
+            dist/cooldctl-linux-musl-arm64.tar.gz \
+            dist/cooldctl-linux-musl-arm64.tar.gz.sha256
