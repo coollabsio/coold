@@ -17,6 +17,7 @@ pub struct SshMeshFlags {
     #[arg(long, default_value = "root")]
     pub ssh_user: String,
 
+    /// Default SSH port. A node may override it with --nodes host:port.
     #[arg(long, default_value_t = 22)]
     pub ssh_port: u16,
 
@@ -96,12 +97,13 @@ pub trait Runner: Send + Sync {
 #[async_trait]
 impl Runner for SshClient {
     async fn run(&self, host: &str, user: &str, port: u16, cmd: &str) -> Result<RunOutput> {
-        let dest = format!("{user}@{host}");
+        let (ssh_host, ssh_port) = split_host_port(host, port);
+        let dest = format!("{user}@{ssh_host}");
         let mut c = Command::new("ssh");
         c.arg("-i")
             .arg(&self.key)
             .arg("-p")
-            .arg(port.to_string())
+            .arg(ssh_port.to_string())
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
@@ -129,6 +131,19 @@ impl Runner for SshClient {
             );
         }
         Ok(out)
+    }
+}
+
+pub fn split_host_port(host: &str, default_port: u16) -> (String, u16) {
+    let Some((name, raw_port)) = host.rsplit_once(':') else {
+        return (host.to_string(), default_port);
+    };
+    if name.is_empty() || name.contains(':') {
+        return (host.to_string(), default_port);
+    }
+    match raw_port.parse::<u16>() {
+        Ok(port) => (name.to_string(), port),
+        Err(_) => (host.to_string(), default_port),
     }
 }
 
@@ -194,5 +209,17 @@ mod tests {
         assert_eq!(parse_duration("30s"), Some(Duration::from_secs(30)));
         assert_eq!(parse_duration("2m"), Some(Duration::from_secs(120)));
         assert_eq!(parse_duration("500ms"), Some(Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn split_host_port_uses_node_port_override() {
+        assert_eq!(
+            split_host_port("127.0.0.1:51593", 22),
+            ("127.0.0.1".into(), 51593)
+        );
+        assert_eq!(
+            split_host_port("example.com", 22),
+            ("example.com".into(), 22)
+        );
     }
 }

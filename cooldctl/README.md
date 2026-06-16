@@ -1,7 +1,7 @@
 # cooldctl
 
 `cooldctl` is the Rust CLI for **Coolify v5 cluster operations** that live with
-`coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion/flux
+`coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion
 installation, builder capability setup, and SSH-bounced firewall control.
 
 It intentionally does **not** migrate Coolify v4 CLI features such as contexts,
@@ -16,7 +16,7 @@ Included:
 - `init plan` — inspect host state and print the actions needed to converge.
 - `init bootstrap` — first-time v5 mesh install.
 - `init extend` — add new nodes while only peer-refreshing existing mesh hosts.
-- `init upgrade` — bump coold/corrosion/flux/builder binaries without
+- `init upgrade` — bump coold/corrosion/builder binaries without
   changing mesh topology.
 - `firewall containers` — discover Podman containers attached to v5 mesh
   networks.
@@ -47,15 +47,15 @@ rtk cargo test -p e2e-tests --test cooldctl --no-run
 
 ## Shared flags
 
-Most commands need SSH access to every target node. `init` also accepts a
-separate `--central` control-plane host:
+Most commands need SSH access to every target node. Nodes may include an
+SSH port with `host:port`, which is useful for local/dev VMs:
 
 ```bash
---central IP             Flux (control-plane) host.
 --nodes IP1,IP2          Comma-separated deployment node list.
+--nodes 127.0.0.1:51572,127.0.0.1:51593
 --ssh-key ~/.ssh/key      SSH private key.
 --ssh-user root           Defaults to root.
---ssh-port 22             Defaults to 22.
+--ssh-port 22             Default SSH port when a node has no :port suffix.
 --concurrency 10          Parallel SSH fanout limit.
 --ssh-timeout 30s         Supports ms, s, m, or plain seconds.
 ```
@@ -73,6 +73,8 @@ Mesh defaults:
 --wg-mgmt-pool 100.64.0.0/16    WireGuard management IP pool.
 --wg-interface wg0              WireGuard interface.
 --wg-listen-port 51820          WireGuard UDP port.
+--wg-listen-port-overrides node=51821,node2=51822
+--wg-endpoint-overrides node=host.lima.internal:51821,node2=host.lima.internal:51822
 ```
 
 Output formats:
@@ -85,33 +87,25 @@ Output formats:
 
 ## Bootstrap a v5 mesh
 
-Central-only control plane:
+Two deployment nodes:
 
 ```bash
 cooldctl init bootstrap \
-  --central 203.0.113.10 \
-  --ssh-key ~/.ssh/coolify-v5 \
-  --yes
-```
-
-All-in-one: central is also a deployment node:
-
-```bash
-cooldctl init bootstrap \
-  --central 203.0.113.10 \
-  --nodes 203.0.113.10 \
-  --ssh-key ~/.ssh/coolify-v5 \
-  --yes
-```
-
-Separate central plus two deployment nodes:
-
-```bash
-cooldctl init bootstrap \
-  --central 203.0.113.10 \
   --nodes 203.0.113.11,203.0.113.12 \
   --builder-hosts 203.0.113.11 \
   --ssh-key ~/.ssh/coolify-v5 \
+  --yes
+```
+
+Dev/Lima-style nodes with forwarded SSH ports and host-side WireGuard UDP
+endpoints:
+
+```bash
+cooldctl init bootstrap \
+  --nodes 127.0.0.1:51572,127.0.0.1:51593 \
+  --wg-listen-port-overrides 127.0.0.1:51572=51821,127.0.0.1:51593=51822 \
+  --wg-endpoint-overrides 127.0.0.1:51572=host.lima.internal:51821,127.0.0.1:51593=host.lima.internal:51822 \
+  --ssh-key ~/.lima/_config/user \
   --yes
 ```
 
@@ -120,29 +114,20 @@ Useful version pins:
 ```bash
 --coold-version vX.Y.Z
 --corrosion-version vX.Y.Z
---flux-version nightly|latest|vX.Y.Z
 ```
 
 `nightly` is the default for bootstrap. `init upgrade` rejects `nightly`
 unless `--allow-nightly` is passed because a moving target would reinstall on
 every run.
 
-When `--central` is set, `cooldctl` installs `flux` on that central host,
-writes `/etc/systemd/system/flux.service`, and enables it. The Laravel
-control plane runs separately and talks to flux over its Unix socket. Use
-`--flux-version latest` to consume the latest stable release asset, or pin a
-specific tag such as `v0.2.0`.
-
-The central host always joins the WireGuard management mesh so flux ↔ coold
-traffic stays private. It only runs Podman/coold/Corrosion/firewall when it is
-also listed in `--nodes`.
+Flux is not installed by `cooldctl`. It is installed by Coolify itself or by
+the Coolify installation script.
 
 ## Plan before changing hosts
 
 ```bash
 cooldctl init plan \
   --nodes 203.0.113.10,203.0.113.11 \
-  --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 
@@ -153,7 +138,6 @@ cooldctl init plan \
   --intent extend \
   --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
   --new-nodes 203.0.113.12 \
-  --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 
@@ -167,7 +151,6 @@ peer-refresh actions unless `--allow-replace` is explicitly passed.
 cooldctl init extend \
   --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
   --new-nodes 203.0.113.12 \
-  --central 203.0.113.10 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 
@@ -176,10 +159,8 @@ cooldctl init extend \
 ```bash
 cooldctl init upgrade \
   --nodes 203.0.113.10,203.0.113.11 \
-  --central 203.0.113.10 \
   --coold-version v0.2.0 \
   --corrosion-version v0.2.0 \
-  --flux-version v0.2.0 \
   --ssh-key ~/.ssh/coolify-v5
 ```
 

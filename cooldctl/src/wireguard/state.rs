@@ -1,6 +1,9 @@
 use ipnet::Ipv4Net;
 use serde::Serialize;
-use std::{collections::BTreeMap, net::Ipv4Addr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    net::Ipv4Addr,
+};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Peer {
@@ -91,6 +94,8 @@ pub struct DesiredMesh {
     pub container_pool: Ipv4Net,
     pub container_prefix: u8,
     pub listen_port: u16,
+    pub listen_port_overrides: BTreeMap<String, u16>,
+    pub endpoint_overrides: BTreeMap<String, String>,
     pub install_podman: bool,
     pub namespaces: Vec<String>,
     pub default_deny_containers: bool,
@@ -99,8 +104,6 @@ pub struct DesiredMesh {
     pub corrosion_version: String,
     pub corrosion_gossip_port: u16,
     pub corrosion_api_port: u16,
-    pub central_host: String,
-    pub flux_version: String,
     pub enable_builder: bool,
     pub builder_hosts: Vec<String>,
     pub builder_capacity: u32,
@@ -123,7 +126,27 @@ impl DesiredMesh {
         v.sort();
         v
     }
-    pub fn builder_host_set(&self) -> std::collections::BTreeSet<String> {
+
+    pub fn listen_port_for(&self, host: &str) -> u16 {
+        self.listen_port_overrides
+            .get(host)
+            .copied()
+            .unwrap_or(self.listen_port)
+    }
+
+    pub fn endpoint_for(&self, host: &str) -> String {
+        self.endpoint_overrides
+            .get(host)
+            .cloned()
+            .unwrap_or_else(|| {
+                host.split_once(':')
+                    .map(|(h, _)| h)
+                    .unwrap_or(host)
+                    .to_string()
+            })
+    }
+
+    pub fn builder_host_set(&self) -> BTreeSet<String> {
         if !self.builder_hosts.is_empty() {
             self.builder_hosts
                 .iter()

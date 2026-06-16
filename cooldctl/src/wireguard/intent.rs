@@ -37,7 +37,6 @@ fn categorize(a: &PlannedAction) -> Category {
         | EnablePodmanSocket
         | EnableIpForward
         | CreatePodmanNetwork
-        | GenerateJwtKeypair
         | AddPeer
         | RemovePeer => Category::SafeAlways,
         WriteConfig
@@ -45,12 +44,9 @@ fn categorize(a: &PlannedAction) -> Category {
         | InstallFirewall
         | WriteCorrosionConfig
         | InstallCorrosionService
-        | InstallCooldService
-        | InstallFluxService
-        | WriteHostJwt
-        | UpdateCooldFluxEnv => Category::PeerRefresh,
+        | InstallCooldService => Category::PeerRefresh,
         RecreatePodmanNetwork => Category::DestructiveReplace,
-        InstallCorrosion | InstallCoold | InstallFlux | InstallBuilder => Category::VersionBump,
+        InstallCorrosion | InstallCoold | InstallBuilder => Category::VersionBump,
         WriteCorrosionSchema if a.detail.contains("DB will be reset") => Category::WipeDb,
         WriteCorrosionSchema => Category::SchemaFirstWrite,
     }
@@ -76,9 +72,6 @@ pub fn validate_intent(d: &DesiredMesh) -> Result<()> {
                 if !d.nodes.is_empty() {
                     versions.push(("--coold-version", &d.coold_version));
                     versions.push(("--corrosion-version", &d.corrosion_version));
-                }
-                if !d.central_host.is_empty() {
-                    versions.push(("--flux-version", &d.flux_version));
                 }
                 for (flag, v) in versions {
                     if v == "nightly" {
@@ -124,7 +117,7 @@ fn decide(a: &PlannedAction, d: &DesiredMesh, new_nodes: &BTreeSet<String>) -> O
         },
         Intent::Upgrade => match categorize(a) {
             Category::VersionBump => None,
-            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService|ActionType::InstallFluxService) => None,
+            Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService) => None,
             Category::PeerRefresh => Some("upgrade: peer-refresh skipped; use `cooldctl init extend` for mesh topology changes".into()),
             _ => Some("upgrade: non-version-bump action skipped".into()),
         }
@@ -147,6 +140,8 @@ mod tests {
             container_pool: "10.210.0.0/16".parse::<Ipv4Net>().unwrap(),
             container_prefix: 24,
             listen_port: 51820,
+            listen_port_overrides: Default::default(),
+            endpoint_overrides: Default::default(),
             install_podman: true,
             namespaces: vec!["default".into()],
             default_deny_containers: true,
@@ -155,8 +150,6 @@ mod tests {
             corrosion_version: "v1".into(),
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
-            central_host: String::new(),
-            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -216,12 +209,6 @@ mod tests {
             ("corrosion", {
                 let mut d = desired(Intent::Upgrade);
                 d.corrosion_version = "nightly".into();
-                d
-            }),
-            ("flux", {
-                let mut d = desired(Intent::Upgrade);
-                d.central_host = "A".into();
-                d.flux_version = "nightly".into();
                 d
             }),
         ] {
@@ -292,7 +279,6 @@ mod tests {
         let mut p = plan(vec![
             action("A", ActionType::InstallCoold),
             action("A", ActionType::InstallCorrosion),
-            action("A", ActionType::InstallFlux),
             action("A", ActionType::InstallCooldService),
             action("A", ActionType::WriteConfig),
             action("A", ActionType::CreatePodmanNetwork),
@@ -304,7 +290,6 @@ mod tests {
             vec![
                 ActionType::InstallCoold,
                 ActionType::InstallCorrosion,
-                ActionType::InstallFlux,
                 ActionType::InstallCooldService,
             ]
         );

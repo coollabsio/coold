@@ -141,69 +141,6 @@ pub async fn apply_mesh<R: Runner>(
             }
         }
     }
-    if !desired.central_host.is_empty() && err.is_none() {
-        all.extend(
-            phase4(
-                runner,
-                &desired.central_host,
-                user,
-                port,
-                desired,
-                mgmt[&desired.central_host],
-                &planned,
-            )
-            .await?,
-        );
-        let priv_pem = runner
-            .run(
-                &desired.central_host,
-                user,
-                port,
-                &format!("cat {}", services::flux::COOLIFY_FLUX_JWT_PRIV_PATH),
-            )
-            .await?
-            .stdout;
-        let flux_url = format!(
-            "http://{}:{}",
-            mgmt[&desired.central_host],
-            services::flux::COOLIFY_FLUX_GRPC_PORT
-        );
-        let p5 = for_each_server(&desired.nodes, concurrency, |host| {
-            let mgmt = mgmt.clone();
-            let subnets = subnets.clone();
-            let pem = priv_pem.clone();
-            let url = flux_url.clone();
-            let planned = planned.clone();
-            async move {
-                phase5(
-                    runner,
-                    &host,
-                    user,
-                    port,
-                    desired,
-                    &mgmt,
-                    &subnets,
-                    pem.as_bytes(),
-                    &url,
-                    &planned,
-                )
-                .await
-            }
-        })
-        .await;
-        for r in p5 {
-            if let Some(v) = r.result {
-                all.extend(v);
-            } else {
-                err = Some(anyhow!("phase 5 failed"));
-                all.push(err_result(
-                    &r.host,
-                    ActionType::WriteHostJwt,
-                    r.error.unwrap_or_default(),
-                ));
-            }
-        }
-    }
     if let Some(e) = err {
         Err(e)
     } else {
@@ -355,7 +292,7 @@ async fn phase2<R: Runner>(
                 .get(p)
                 .filter(|s| !s.public_key.is_empty())
                 .map(|s| PeerConfig {
-                    endpoint: p.clone(),
+                    endpoint: desired.endpoint_for(p),
                     public_key: s.public_key.clone(),
                     mgmt_ip: mgmt[p],
                     container_subnets: if desired.is_node(p) {
@@ -380,7 +317,12 @@ async fn phase2<R: Runner>(
             &mut out,
             ActionType::WriteConfig,
             "",
-            write_config_command(&desired.interface, mgmt[host], desired.listen_port, &peers),
+            write_config_command(
+                &desired.interface,
+                mgmt[host],
+                desired.listen_port_for(host),
+                &peers,
+            ),
         )
         .await?;
     }
@@ -573,135 +515,6 @@ async fn phase3<R: Runner>(
         )
         .await?;
     }
-    if should_run(planned, host, ActionType::InstallCooldService, "") {
-        let ns = desired
-            .sorted_namespaces()
-            .iter()
-            .map(|n| services::coold::CooldNamespace {
-                name: n.clone(),
-                network: podman_network_for(n),
-                bridge_gateway: machine_ip(subnets[n][host]),
-            })
-            .collect::<Vec<_>>();
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallCooldService,
-            "",
-            format!(
-                "{} && {} && systemctl daemon-reload && systemctl enable --now coold",
-                services::coold::ensure_api_token_command(),
-                heredoc(
-                    "/etc/systemd/system/coold.service",
-                    &services::coold::service_unit(mgmt[host], &ns, None, None),
-                    "0644"
-                )
-            ),
-        )
-        .await?;
-    }
-    Ok(out)
-}
-
-async fn phase4<R: Runner>(
-    runner: &R,
-    host: &str,
-    user: &str,
-    port: u16,
-    desired: &DesiredMesh,
-    central_ip: Ipv4Addr,
-    planned: &Plan,
-) -> Result<Vec<ActionResult>> {
-    let mut out = vec![];
-    if should_run(planned, host, ActionType::InstallFlux, "") {
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallFlux,
-            "",
-            services::flux::install_command(&desired.flux_version),
-        )
-        .await?;
-    }
-    if should_run(planned, host, ActionType::GenerateJwtKeypair, "") {
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::GenerateJwtKeypair,
-            "",
-            services::flux::ensure_jwt_keypair_command(),
-        )
-        .await?;
-    }
-    if should_run(planned, host, ActionType::InstallFluxService, "") {
-        let unit = services::flux::service_unit(
-            &format!("{central_ip}:{}", services::flux::COOLIFY_FLUX_GRPC_PORT),
-            services::flux::COOLIFY_FLUX_JWT_PUB_PATH,
-            &desired.interface,
-        );
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallFluxService,
-            "",
-            format!(
-                "{} && systemctl daemon-reload && systemctl enable --now flux",
-                heredoc("/etc/systemd/system/flux.service", &unit, "0644")
-            ),
-        )
-        .await?;
-    }
-    Ok(out)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn phase5<R: Runner>(
-    runner: &R,
-    host: &str,
-    user: &str,
-    port: u16,
-    desired: &DesiredMesh,
-    mgmt: &std::collections::BTreeMap<String, Ipv4Addr>,
-    subnets: &std::collections::BTreeMap<String, std::collections::BTreeMap<String, Ipv4Net>>,
-    priv_pem: &[u8],
-    flux_url: &str,
-    planned: &Plan,
-) -> Result<Vec<ActionResult>> {
-    let mut out = vec![];
-    if should_run(planned, host, ActionType::WriteHostJwt, "") {
-        let caps = if desired.has_builder_cap(host) {
-            vec!["coold".into(), "builder".into()]
-        } else {
-            vec!["coold".into()]
-        };
-        let jwt = services::jwt::mint_host_jwt(priv_pem, host, &caps)?;
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::WriteHostJwt,
-            "",
-            format!(
-                "mkdir -p /etc/coolify && {}",
-                heredoc(services::flux::HOST_JWT_PATH, &jwt, "0600")
-            ),
-        )
-        .await?;
-    }
     if should_run(planned, host, ActionType::InstallBuilder, "") {
         step(
             runner,
@@ -715,7 +528,7 @@ async fn phase5<R: Runner>(
         )
         .await?;
     }
-    if should_run(planned, host, ActionType::UpdateCooldFluxEnv, "") {
+    if should_run(planned, host, ActionType::InstallCooldService, "") {
         let ns = desired
             .sorted_namespaces()
             .iter()
@@ -739,23 +552,20 @@ async fn phase5<R: Runner>(
         } else {
             None
         };
-        let flux = services::coold::FluxConfig {
-            url: flux_url.into(),
-            jwt_path: services::flux::HOST_JWT_PATH.into(),
-        };
         step(
             runner,
             host,
             user,
             port,
             &mut out,
-            ActionType::UpdateCooldFluxEnv,
+            ActionType::InstallCooldService,
             "",
             format!(
-                "{} && systemctl daemon-reload && systemctl restart coold",
+                "{} && {} && systemctl daemon-reload && systemctl enable --now coold",
+                services::coold::ensure_api_token_command(),
                 heredoc(
                     "/etc/systemd/system/coold.service",
-                    &services::coold::service_unit(mgmt[host], &ns, Some(&flux), builder.as_ref()),
+                    &services::coold::service_unit(mgmt[host], &ns, None, builder.as_ref()),
                     "0644"
                 )
             ),

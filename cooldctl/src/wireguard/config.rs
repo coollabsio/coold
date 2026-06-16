@@ -15,11 +15,23 @@ pub fn allowed_ips_line(p: &PeerConfig) -> String {
     parts.join(", ")
 }
 
+fn endpoint_addr(endpoint: &str, listen_port: u16) -> String {
+    if endpoint
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+    {
+        endpoint.to_string()
+    } else {
+        format!("{endpoint}:{listen_port}")
+    }
+}
+
 #[allow(dead_code)]
 pub fn render_config(mgmt_ip: Ipv4Addr, listen_port: u16, peers: &[PeerConfig]) -> String {
     let mut s = format!("[Interface]\nAddress = {mgmt_ip}/32\nListenPort = {listen_port}\nPrivateKey = __PRIVKEY__\n");
     for p in peers {
-        s.push_str(&format!("\n[Peer]\n# {}\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}:{listen_port}\nPersistentKeepalive = 25\n", p.endpoint, p.public_key, allowed_ips_line(p), p.endpoint));
+        let endpoint = endpoint_addr(&p.endpoint, listen_port);
+        s.push_str(&format!("\n[Peer]\n# {}\nPublicKey = {}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = 25\n", p.endpoint, p.public_key, allowed_ips_line(p), endpoint));
     }
     s
 }
@@ -32,7 +44,8 @@ pub fn write_config_command(
 ) -> String {
     let mut cmd = format!("PRIVKEY=$(cat /etc/wireguard/privatekey) && mkdir -p /etc/wireguard && {{ echo \"[Interface]\"; echo \"Address = {mgmt_ip}/32\"; echo \"ListenPort = {listen_port}\"; echo \"PrivateKey = $PRIVKEY\"; ");
     for p in peers {
-        cmd.push_str(&format!("echo \"\"; echo \"[Peer]\"; echo \"# {}\"; echo \"PublicKey = {}\"; echo \"AllowedIPs = {}\"; echo \"Endpoint = {}:{listen_port}\"; echo \"PersistentKeepalive = 25\"; ", p.endpoint, p.public_key, allowed_ips_line(p), p.endpoint));
+        let endpoint = endpoint_addr(&p.endpoint, listen_port);
+        cmd.push_str(&format!("echo \"\"; echo \"[Peer]\"; echo \"# {}\"; echo \"PublicKey = {}\"; echo \"AllowedIPs = {}\"; echo \"Endpoint = {}\"; echo \"PersistentKeepalive = 25\"; ", p.endpoint, p.public_key, allowed_ips_line(p), endpoint));
     }
     cmd.push_str(&format!("}} > /etc/wireguard/{iface}.conf.tmp && chmod 600 /etc/wireguard/{iface}.conf.tmp && mv /etc/wireguard/{iface}.conf.tmp /etc/wireguard/{iface}.conf"));
     cmd
@@ -87,6 +100,19 @@ mod tests {
         assert!(got.contains("AllowedIPs = 100.64.0.1/32, 10.210.1.0/24"));
         assert!(got.contains("PersistentKeepalive = 25"));
         assert!(got.contains("AllowedIPs = 100.64.0.2/32, 10.210.2.0/24, 10.220.2.0/24"));
+    }
+
+    #[test]
+    fn render_config_keeps_explicit_endpoint_port() {
+        let peers = vec![PeerConfig {
+            endpoint: "host.lima.internal:51822".into(),
+            public_key: "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=".into(),
+            mgmt_ip: "100.64.0.2".parse().unwrap(),
+            container_subnets: vec![],
+        }];
+        let got = render_config("100.64.0.1".parse().unwrap(), 51820, &peers);
+        assert!(got.contains("Endpoint = host.lima.internal:51822"));
+        assert!(!got.contains("host.lima.internal:51822:51820"));
     }
 
     #[test]

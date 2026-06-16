@@ -2,7 +2,7 @@ use anyhow::{bail, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     cli::OutputFormat,
@@ -40,6 +40,12 @@ pub struct BaseInitFlags {
     pub wg_interface: String,
     #[arg(long, default_value_t = 51820)]
     pub wg_listen_port: u16,
+    /// Per-node WireGuard listen ports, for dev/NAT cases. Format: node=port,node2=port.
+    #[arg(long, value_delimiter = ',')]
+    pub wg_listen_port_overrides: Vec<String>,
+    /// Per-node WireGuard peer endpoints, for dev/NAT cases. Format: node=host:port,node2=host:port.
+    #[arg(long, value_delimiter = ',')]
+    pub wg_endpoint_overrides: Vec<String>,
     #[arg(long)]
     pub skip_default_deny: bool,
     #[arg(long, default_value = "nightly")]
@@ -52,10 +58,6 @@ pub struct BaseInitFlags {
     pub corrosion_api_port: u16,
     #[arg(short = 'y', long)]
     pub yes: bool,
-    #[arg(long, default_value = "")]
-    pub central: String,
-    #[arg(long, default_value = "nightly")]
-    pub flux_version: String,
     #[arg(long, default_value_t = true)]
     pub enable_builder: bool,
     #[arg(long, value_delimiter = ',')]
@@ -210,7 +212,7 @@ async fn run_apply(
         && std::env::var("COOLIFY_NON_INTERACTIVE").unwrap_or_default() != "1"
     {
         eprintln!(
-            "This command will modify network configuration on the listed nodes/central host. Use --yes to skip this prompt in automation."
+            "This command will modify network configuration on the listed nodes. Use --yes to skip this prompt in automation."
         );
     }
     let desired = build_desired(&base, intent, new_nodes, allow_replace, allow_nightly)?;
@@ -301,15 +303,17 @@ fn build_desired(
     validate_namespaces(&base.mesh.namespaces)?;
     let nodes = clean_hosts(&base.ssh.nodes);
     let new_nodes = clean_hosts(&new_nodes);
-    if base.central.is_empty() && nodes.is_empty() {
-        bail!("at least one of --central or --nodes is required");
+    if nodes.is_empty() {
+        bail!("--nodes is required");
     }
     for h in &base.builder_hosts {
         if !nodes.contains(h) {
             bail!("--builder-hosts entry {h:?} is not in --nodes");
         }
     }
-    let hosts = mesh_hosts(&base.central, &nodes)?;
+    let hosts = mesh_hosts(&nodes)?;
+    let listen_port_overrides = parse_port_overrides(&base.wg_listen_port_overrides)?;
+    let endpoint_overrides = parse_endpoint_overrides(&base.wg_endpoint_overrides)?;
     Ok(DesiredMesh {
         hosts,
         nodes,
@@ -318,6 +322,8 @@ fn build_desired(
         container_pool: base.mesh.container_pool.parse::<Ipv4Net>()?,
         container_prefix: base.mesh.container_prefix,
         listen_port: base.wg_listen_port,
+        listen_port_overrides,
+        endpoint_overrides,
         install_podman: true,
         namespaces: base.mesh.namespaces.clone(),
         default_deny_containers: !base.skip_default_deny,
@@ -326,8 +332,6 @@ fn build_desired(
         corrosion_version: base.corrosion_version.clone(),
         corrosion_gossip_port: base.corrosion_gossip_port,
         corrosion_api_port: base.corrosion_api_port,
-        central_host: base.central.clone(),
-        flux_version: base.flux_version.clone(),
         enable_builder: base.enable_builder,
         builder_hosts: base.builder_hosts.clone(),
         builder_capacity: base.builder_capacity,
@@ -341,25 +345,40 @@ fn build_desired(
     })
 }
 
-fn mesh_hosts(central: &str, nodes: &[String]) -> Result<Vec<String>> {
+fn mesh_hosts(nodes: &[String]) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut seen_nodes = BTreeSet::new();
-    if !central.is_empty() {
-        out.push(central.to_string());
-        seen.insert(central.to_string());
-    }
     for node in nodes {
         if node.is_empty() {
             continue;
         }
-        if !seen_nodes.insert(node.clone()) {
+        if !seen.insert(node.clone()) {
             bail!("duplicate node in --nodes: {node}");
         }
-        if !seen.insert(node.clone()) {
-            continue;
-        }
         out.push(node.clone());
+    }
+    Ok(out)
+}
+
+fn parse_port_overrides(values: &[String]) -> Result<BTreeMap<String, u16>> {
+    let mut out = BTreeMap::new();
+    for value in values {
+        let Some((host, raw_port)) = value.split_once('=') else {
+            bail!("invalid --wg-listen-port-overrides entry {value:?}; expected node=port");
+        };
+        let port = raw_port.parse::<u16>()?;
+        out.insert(host.trim().to_string(), port);
+    }
+    Ok(out)
+}
+
+fn parse_endpoint_overrides(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut out = BTreeMap::new();
+    for value in values {
+        let Some((host, endpoint)) = value.split_once('=') else {
+            bail!("invalid --wg-endpoint-overrides entry {value:?}; expected node=host:port");
+        };
+        out.insert(host.trim().to_string(), endpoint.trim().to_string());
     }
     Ok(out)
 }
@@ -423,15 +442,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mesh_hosts_allows_all_in_one_central_node() {
-        let got = mesh_hosts("1.2.3.4", &["1.2.3.4".into()]).unwrap();
-        assert_eq!(got, vec!["1.2.3.4"]);
+    fn mesh_hosts_keeps_node_order() {
+        let got = mesh_hosts(&["1.2.3.4:51572".into(), "5.6.7.8:51593".into()]).unwrap();
+        assert_eq!(got, vec!["1.2.3.4:51572", "5.6.7.8:51593"]);
     }
 
     #[test]
-    fn mesh_hosts_keeps_central_before_nodes() {
-        let got = mesh_hosts("1.2.3.4", &["5.6.7.8".into(), "9.9.9.9".into()]).unwrap();
-        assert_eq!(got, vec!["1.2.3.4", "5.6.7.8", "9.9.9.9"]);
+    fn parse_dev_wireguard_overrides() {
+        let ports = parse_port_overrides(&["node-a=51821".into(), "node-b=51822".into()]).unwrap();
+        assert_eq!(ports["node-a"], 51821);
+        let endpoints = parse_endpoint_overrides(&[
+            "node-a=host.lima.internal:51821".into(),
+            "node-b=host.lima.internal:51822".into(),
+        ])
+        .unwrap();
+        assert_eq!(endpoints["node-b"], "host.lima.internal:51822");
     }
 }
 

@@ -37,11 +37,6 @@ pub enum ActionType {
     WriteCorrosionSchema,
     InstallCorrosionService,
     InstallCooldService,
-    InstallFlux,
-    GenerateJwtKeypair,
-    InstallFluxService,
-    WriteHostJwt,
-    UpdateCooldFluxEnv,
     InstallBuilder,
 }
 impl std::fmt::Display for ActionType {
@@ -185,7 +180,7 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
             || peer_key_pending
             || !state.keys_exist
             || !state.installed
-            || (desired.hosts.len() > 1 && state.listen_port != desired.listen_port);
+            || (desired.hosts.len() > 1 && state.listen_port != desired.listen_port_for(host));
         if needs_config {
             push(
                 &mut plan,
@@ -376,7 +371,22 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                     bridge_gateway: machine_ip(subnets[ns][host]),
                 })
                 .collect::<Vec<_>>();
-            let coold_unit = services::coold::service_unit(mgmt_ip, &ns_configs, None, None);
+            let builder = if desired.has_builder_cap(host) {
+                Some(services::coold::BuilderConfig {
+                    capacity: desired.builder_capacity,
+                    cpu_quota: desired.builder_cpu_quota.clone(),
+                    memory_max: desired.builder_memory_max.clone(),
+                    timeout_secs: desired.builder_timeout_secs,
+                    deny_nets: vec![
+                        desired.mgmt_pool.to_string(),
+                        desired.container_pool.to_string(),
+                    ],
+                })
+            } else {
+                None
+            };
+            let coold_unit =
+                services::coold::service_unit(mgmt_ip, &ns_configs, None, builder.as_ref());
             let coold_unit_drift = state.coold_unit_sha256 != sha256_hex(coold_unit.as_bytes());
             if !state.corrosion_active || cfg_drift || corrosion_drift || schema_drift {
                 push(
@@ -387,62 +397,6 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                     "systemctl enable --now corrosion",
                 );
             }
-            if !state.coold_active || cfg_drift || coold_drift || coold_unit_drift {
-                push(
-                    &mut plan,
-                    host,
-                    "",
-                    ActionType::InstallCooldService,
-                    &format!(
-                        "systemctl enable --now coold (mgmt={mgmt_ip}, namespaces={})",
-                        ns_configs.len()
-                    ),
-                );
-            }
-        }
-    }
-    if !desired.central_host.is_empty() {
-        push(
-            &mut plan,
-            &desired.central_host,
-            "",
-            ActionType::InstallFlux,
-            &format!("flux {} → /usr/local/bin/flux", desired.flux_version),
-        );
-        push(
-            &mut plan,
-            &desired.central_host,
-            "",
-            ActionType::GenerateJwtKeypair,
-            "ES256 EC P-256 keypair at /etc/coolify/jwt.{priv,pub}",
-        );
-        push(
-            &mut plan,
-            &desired.central_host,
-            "",
-            ActionType::InstallFluxService,
-            &format!(
-                "flux.service (:{} )",
-                services::flux::COOLIFY_FLUX_GRPC_PORT
-            ),
-        );
-        for host in &desired.nodes {
-            push(
-                &mut plan,
-                host,
-                "",
-                ActionType::WriteHostJwt,
-                services::flux::HOST_JWT_PATH,
-            );
-            push(
-                &mut plan,
-                host,
-                "",
-                ActionType::UpdateCooldFluxEnv,
-                "coold.service += COOLIFY_COOLD_FLUX_URL + COOLIFY_COOLD_HOST_JWT_PATH",
-            );
-        }
-        for host in &desired.nodes {
             if desired.has_builder_cap(host) {
                 push(
                     &mut plan,
@@ -454,6 +408,18 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                         desired.coold_version,
                         services::builder::BUILDER_BINARY_PATH,
                         desired.builder_capacity.max(2)
+                    ),
+                );
+            }
+            if !state.coold_active || cfg_drift || coold_drift || coold_unit_drift {
+                push(
+                    &mut plan,
+                    host,
+                    "",
+                    ActionType::InstallCooldService,
+                    &format!(
+                        "systemctl enable --now coold (mgmt={mgmt_ip}, namespaces={})",
+                        ns_configs.len()
                     ),
                 );
             }
@@ -482,10 +448,7 @@ fn truncate_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wireguard::{
-        intent::Intent,
-        state::{DesiredMesh, ServerState},
-    };
+    use crate::wireguard::{intent::Intent, state::DesiredMesh};
     #[test]
     fn upgrade_rejects_nightly() {
         let d = DesiredMesh {
@@ -496,6 +459,8 @@ mod tests {
             container_pool: "10.210.0.0/16".parse().unwrap(),
             container_prefix: 24,
             listen_port: 51820,
+            listen_port_overrides: Default::default(),
+            endpoint_overrides: Default::default(),
             install_podman: true,
             namespaces: vec!["default".into()],
             default_deny_containers: false,
@@ -504,8 +469,6 @@ mod tests {
             corrosion_version: "v1".into(),
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
-            central_host: "".into(),
-            flux_version: "v1".into(),
             enable_builder: true,
             builder_hosts: vec![],
             builder_capacity: 2,
@@ -525,247 +488,5 @@ mod tests {
         assert!(binary_version_drift("latest", true, "latest"));
         assert!(binary_version_drift("nightly", true, "nightly"));
         assert!(!binary_version_drift("v1.2.3", true, "v1.2.3"));
-    }
-
-    #[test]
-    fn central_only_upgrade_does_not_require_node_versions() {
-        let d = DesiredMesh {
-            hosts: vec!["central".into()],
-            nodes: vec![],
-            interface: "wg0".into(),
-            mgmt_pool: "100.64.0.0/16".parse().unwrap(),
-            container_pool: "10.210.0.0/16".parse().unwrap(),
-            container_prefix: 24,
-            listen_port: 51820,
-            install_podman: true,
-            namespaces: vec!["default".into()],
-            default_deny_containers: false,
-            install_coold: true,
-            coold_version: "nightly".into(),
-            corrosion_version: "nightly".into(),
-            corrosion_gossip_port: 8787,
-            corrosion_api_port: 8080,
-            central_host: "central".into(),
-            flux_version: "v1".into(),
-            enable_builder: true,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
-            intent: Intent::Upgrade,
-            new_nodes: vec![],
-            allow_replace: false,
-            allow_nightly: false,
-        };
-        assert!(build_plan(&d, &MeshState::default()).is_ok());
-    }
-
-    #[test]
-    fn central_host_installs_flux_not_coold() {
-        let d = DesiredMesh {
-            hosts: vec!["central".into(), "worker".into()],
-            nodes: vec!["worker".into()],
-            interface: "wg0".into(),
-            mgmt_pool: "100.64.0.0/16".parse().unwrap(),
-            container_pool: "10.210.0.0/16".parse().unwrap(),
-            container_prefix: 24,
-            listen_port: 51820,
-            install_podman: true,
-            namespaces: vec!["default".into()],
-            default_deny_containers: false,
-            install_coold: true,
-            coold_version: "v1".into(),
-            corrosion_version: "v1".into(),
-            corrosion_gossip_port: 8787,
-            corrosion_api_port: 8080,
-            central_host: "central".into(),
-            flux_version: "v1".into(),
-            enable_builder: false,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
-            intent: Intent::Bootstrap,
-            new_nodes: vec![],
-            allow_replace: false,
-            allow_nightly: false,
-        };
-        let plan = build_plan(&d, &MeshState::default()).unwrap();
-        assert!(plan
-            .actions
-            .iter()
-            .any(|a| a.host == "central" && a.action_type == ActionType::InstallFlux));
-        assert!(!plan
-            .actions
-            .iter()
-            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallFlux));
-        assert!(!plan
-            .actions
-            .iter()
-            .any(|a| a.host == "central" && a.action_type == ActionType::InstallCoold));
-        assert!(plan
-            .actions
-            .iter()
-            .any(|a| a.host == "worker" && a.action_type == ActionType::InstallCoold));
-    }
-
-    #[test]
-    fn all_in_one_central_node_gets_control_plane_and_node_actions() {
-        let d = DesiredMesh {
-            hosts: vec!["one".into()],
-            nodes: vec!["one".into()],
-            interface: "wg0".into(),
-            mgmt_pool: "100.64.0.0/16".parse().unwrap(),
-            container_pool: "10.210.0.0/16".parse().unwrap(),
-            container_prefix: 24,
-            listen_port: 51820,
-            install_podman: true,
-            namespaces: vec!["default".into()],
-            default_deny_containers: false,
-            install_coold: true,
-            coold_version: "v1".into(),
-            corrosion_version: "v1".into(),
-            corrosion_gossip_port: 8787,
-            corrosion_api_port: 8080,
-            central_host: "one".into(),
-            flux_version: "v1".into(),
-            enable_builder: false,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
-            intent: Intent::Bootstrap,
-            new_nodes: vec![],
-            allow_replace: false,
-            allow_nightly: false,
-        };
-        let plan = build_plan(&d, &MeshState::default()).unwrap();
-        for action in [
-            ActionType::InstallFlux,
-            ActionType::InstallCoold,
-            ActionType::InstallPodman,
-        ] {
-            assert!(
-                plan.actions
-                    .iter()
-                    .any(|a| a.host == "one" && a.action_type == action),
-                "missing {action:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn central_only_plan_installs_control_plane_without_node_stack() {
-        let d = DesiredMesh {
-            hosts: vec!["central".into()],
-            nodes: vec![],
-            interface: "wg0".into(),
-            mgmt_pool: "100.64.0.0/16".parse().unwrap(),
-            container_pool: "10.210.0.0/16".parse().unwrap(),
-            container_prefix: 24,
-            listen_port: 51820,
-            install_podman: true,
-            namespaces: vec!["default".into()],
-            default_deny_containers: true,
-            install_coold: true,
-            coold_version: "v1".into(),
-            corrosion_version: "v1".into(),
-            corrosion_gossip_port: 8787,
-            corrosion_api_port: 8080,
-            central_host: "central".into(),
-            flux_version: "v1".into(),
-            enable_builder: true,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
-            intent: Intent::Bootstrap,
-            new_nodes: vec![],
-            allow_replace: false,
-            allow_nightly: false,
-        };
-        let plan = build_plan(&d, &MeshState::default()).unwrap();
-        for action in [ActionType::InstallWg, ActionType::InstallFlux] {
-            assert!(
-                plan.actions
-                    .iter()
-                    .any(|a| a.host == "central" && a.action_type == action),
-                "missing {action:?}"
-            );
-        }
-        for action in [
-            ActionType::InstallPodman,
-            ActionType::InstallCoold,
-            ActionType::InstallCorrosion,
-            ActionType::InstallFirewall,
-            ActionType::WriteHostJwt,
-            ActionType::UpdateCooldFluxEnv,
-        ] {
-            assert!(
-                !plan
-                    .actions
-                    .iter()
-                    .any(|a| a.host == "central" && a.action_type == action),
-                "unexpected {action:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn extend_plans_central_wireguard_refresh_for_new_node_key_after_phase1() {
-        let d = DesiredMesh {
-            hosts: vec!["central".into(), "node-a".into()],
-            nodes: vec!["node-a".into()],
-            interface: "wg0".into(),
-            mgmt_pool: "100.64.0.0/16".parse().unwrap(),
-            container_pool: "10.210.0.0/16".parse().unwrap(),
-            container_prefix: 24,
-            listen_port: 51820,
-            install_podman: true,
-            namespaces: vec!["default".into()],
-            default_deny_containers: false,
-            install_coold: true,
-            coold_version: "v1".into(),
-            corrosion_version: "v1".into(),
-            corrosion_gossip_port: 8787,
-            corrosion_api_port: 8080,
-            central_host: "central".into(),
-            flux_version: "v1".into(),
-            enable_builder: false,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
-            intent: Intent::Extend,
-            new_nodes: vec!["node-a".into()],
-            allow_replace: false,
-            allow_nightly: false,
-        };
-        let mut current = MeshState::default();
-        current.servers.insert(
-            "central".into(),
-            ServerState {
-                host: "central".into(),
-                installed: true,
-                keys_exist: true,
-                public_key: "central-pub".into(),
-                wireguard_mgmt_ip: Some("100.64.0.1".parse().unwrap()),
-                active: true,
-                ..Default::default()
-            },
-        );
-        let plan = build_plan(&d, &current).unwrap();
-        assert!(plan
-            .actions
-            .iter()
-            .any(|a| { a.host == "central" && matches!(a.action_type, ActionType::WriteConfig) }));
-        assert!(plan.actions.iter().any(|a| {
-            a.host == "central" && matches!(a.action_type, ActionType::ReloadService)
-        }));
     }
 }
