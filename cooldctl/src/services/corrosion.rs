@@ -21,6 +21,8 @@ pub fn config_bytes(
 pub fn install_command(version: &str) -> String {
     format!(
         r#"set -e
+DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null
+DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::="--force-confold" ca-certificates curl tar 2>&1 >/dev/null
 ARCH_RAW=$(uname -m)
 case "$ARCH_RAW" in
   x86_64)  ARCH=x86_64-unknown-linux-gnu ;;
