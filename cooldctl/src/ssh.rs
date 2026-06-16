@@ -99,6 +99,11 @@ impl Runner for SshClient {
     async fn run(&self, host: &str, user: &str, port: u16, cmd: &str) -> Result<RunOutput> {
         let (ssh_host, ssh_port) = split_host_port(host, port);
         let dest = format!("{user}@{ssh_host}");
+        let remote_cmd = if user == "root" {
+            cmd.to_string()
+        } else {
+            format!("sudo -n bash -lc {}", shell_escape::escape(cmd.into()))
+        };
         let mut c = Command::new("ssh");
         c.arg("-i")
             .arg(&self.key)
@@ -111,7 +116,7 @@ impl Runner for SshClient {
             .arg("-o")
             .arg(format!("ConnectTimeout={}", self.timeout.as_secs().max(1)))
             .arg(dest)
-            .arg(cmd);
+            .arg(remote_cmd);
         let output = timeout(self.timeout + Duration::from_secs(5), c.output())
             .await
             .context("ssh command timed out")?
