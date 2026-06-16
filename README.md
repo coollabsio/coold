@@ -47,7 +47,7 @@ coold/          Per-host agent.
 flux/      gRPC server coold dials + UDS lane for Laravel.
 builder/        One-shot OCI build CLI, spawned by coold per build.
 builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
-cooldctl/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
+coolify-cli/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
                 Does not include v4 Coolify API/context/project commands.
 e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
                 default workspace build.
@@ -118,25 +118,25 @@ bun run dev
 
 ---
 
-## cooldctl — v5 cluster CLI
+## coolify — v5 cluster CLI
 
-`cooldctl` is the Rust CLI for Coolify v5 cluster operations that belong next
+`coolify` is the Rust CLI for Coolify v5 cluster operations that belong next
 to coold. It intentionally excludes v4 Coolify API commands (contexts, projects,
-resources, deployments, private keys, etc.) so it cannot interfere with the
-existing v4 `coolify` CLI.
+resources, deployments, private keys, etc.); the existing Go `coolify` CLI
+continues to own those v4/current API commands during the migration window.
 
 Current command surface:
 
 ```bash
-cooldctl init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
-cooldctl init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
-cooldctl init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
-cooldctl init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --flux-version latest
+coolify init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
+coolify init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
+coolify init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
+coolify init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --flux-version latest
 
-cooldctl firewall containers --nodes IP1,IP2 --ssh-key KEY
-cooldctl firewall list --nodes IP1,IP2 --ssh-key KEY
-cooldctl firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ssh-key KEY
-cooldctl firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
+coolify firewall containers --nodes IP1,IP2 --ssh-key KEY
+coolify firewall list --nodes IP1,IP2 --ssh-key KEY
+coolify firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ssh-key KEY
+coolify firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
 ```
 
 The CLI shares the v5 mesh model: bootstrap over SSH, central `flux`
@@ -166,7 +166,7 @@ HTTPS on wg0 mgmt IP (e.g. `100.64.0.5:8443`), bearer-token auth. Every mutation
 | Cross-host | iptables `COOLIFY-ALLOW` (filter) | wg0 ↔ bridge |
 | Intra-host same-bridge | nft `coolify_bridge::coolify_allow` (bridge family) | Same-bridge traffic bypassing FORWARD |
 
-Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule ID = `sha256("namespace|src|dst|proto|port")[:12]` — byte-compatible with `cooldctl firewall` and the retired Go v5 cluster CLI surface. Tuples only; audit / RBAC / owners live in Laravel.
+Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule ID = `sha256("namespace|src|dst|proto|port")[:12]` — byte-compatible with `coolify firewall` and the retired Go v5 cluster CLI surface. Tuples only; audit / RBAC / owners live in Laravel.
 
 ---
 
@@ -174,7 +174,7 @@ Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on bo
 
 **Outbound gRPC stream.** coold dials `grpcs://flux:6443/v1/agent` at startup with per-host JWT. Flux routes command frames down the open stream. Works through NAT and corporate firewalls — flux never opens inbound to a host.
 
-**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `cooldctl firewall` (SSH-bounced), peer coolds, optional per-customer gateways.
+**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `coolify firewall` (SSH-bounced), peer coolds, optional per-customer gateways.
 
 ---
 
@@ -445,7 +445,7 @@ Live infra, all `#[ignore]`. Run with `--ignored --nocapture --test-threads=1`. 
 - **`builder.rs`** — Hetzner-provisioned. 2 VMs (A = central + builder, B = coold-only). Runs `coolify init apply`, exercises dispatch / cancel / restart / artifact-perm on shared cluster. Single `builder_lifecycle` test.
 - **`install.rs`** — Hetzner-provisioned. Networking assertions post `coolify init apply`. VMs destroyed on drop.
 
-Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_BIN`, optional location/image/server-type.
+Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_CLI_BIN`, optional location/image/server-type.
 
 ---
 

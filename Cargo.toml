@@ -1,9 +1,9 @@
 [workspace]
-members = ["coold", "flux", "builder", "builder-core", "cooldctl", "e2e-tests", "proto"]
+members = ["coold", "flux", "builder", "builder-core", "coolify-cli", "e2e-tests", "proto"]
 # e2e-tests is a live-server test harness; exclude it from default builds
 # so nightly + local `cargo build --workspace` stay fast. Run explicitly
 # with `cargo test -p e2e-tests -- --ignored --test-threads=1`.
-default-members = ["coold", "flux", "builder", "builder-core", "cooldctl", "proto"]
+default-members = ["coold", "flux", "builder", "builder-core", "coolify-cli", "proto"]
 resolver = "2"
 
 [workspace.package]

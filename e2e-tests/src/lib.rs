@@ -12,7 +12,7 @@
 //! ```text
 //! HETZNER_TOKEN=... HETZNER_PROJECT=... \
 //! SSH_KEY=~/.ssh/<key> \
-//! COOLIFY_BIN=$(which coolify) \
+//! COOLIFY_CLI_BIN=$(which coolify) \
 //! cargo test -p e2e-tests -- --ignored --nocapture --test-threads=1
 //! ```
 //!

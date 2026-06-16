@@ -1,13 +1,13 @@
-# cooldctl
+# coolify
 
-`cooldctl` is the Rust CLI for **Coolify v5 cluster operations** that live with
+`coolify` is the Rust CLI for **Coolify v5 cluster operations** that live with
 `coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion
 installation, builder capability setup, and SSH-bounced firewall control.
 
 It intentionally does **not** migrate Coolify v4 CLI features such as contexts,
-projects, resources, deployments, private keys, or v4 API helpers. The binary is
-named `cooldctl` for now so it cannot interfere with the existing v4 `coolify`
-CLI.
+projects, resources, deployments, private keys, or v4 API helpers. The shipped binary is named `coolify` because this is the user-facing
+Coolify v5 CLI. The existing Go `coolify` CLI remains the v4/current API CLI
+until migration/packaging decides which binary is installed for a given channel.
 
 ## Scope
 
@@ -34,15 +34,15 @@ Excluded:
 From the workspace root:
 
 ```bash
-rtk cargo build -p cooldctl
-rtk cargo test -p cooldctl
-rtk cargo clippy -p cooldctl --all-targets -- -D warnings
+rtk cargo build -p coolify-cli
+rtk cargo test -p coolify-cli
+rtk cargo clippy -p coolify-cli --all-targets -- -D warnings
 ```
 
 Compile the ignored live e2e test target without provisioning anything:
 
 ```bash
-rtk cargo test -p e2e-tests --test cooldctl --no-run
+rtk cargo test -p e2e-tests --test coolify --no-run
 ```
 
 ## Shared flags
@@ -90,7 +90,7 @@ Output formats:
 Two deployment nodes:
 
 ```bash
-cooldctl init bootstrap \
+coolify init bootstrap \
   --nodes 203.0.113.11,203.0.113.12 \
   --builder-hosts 203.0.113.11 \
   --ssh-key ~/.ssh/coolify-v5 \
@@ -101,7 +101,7 @@ Dev/Lima-style nodes with forwarded SSH ports and host-side WireGuard UDP
 endpoints:
 
 ```bash
-cooldctl init bootstrap \
+coolify init bootstrap \
   --nodes 127.0.0.1:51572,127.0.0.1:51593 \
   --wg-listen-port-overrides 127.0.0.1:51572=51821,127.0.0.1:51593=51822 \
   --wg-endpoint-overrides 127.0.0.1:51572=host.lima.internal:51821,127.0.0.1:51593=host.lima.internal:51822 \
@@ -120,13 +120,13 @@ Useful version pins:
 unless `--allow-nightly` is passed because a moving target would reinstall on
 every run.
 
-Flux is not installed by `cooldctl`. It is installed by Coolify itself or by
+Flux is not installed by `coolify`. It is installed by Coolify itself or by
 the Coolify installation script.
 
 ## Plan before changing hosts
 
 ```bash
-cooldctl init plan \
+coolify init plan \
   --nodes 203.0.113.10,203.0.113.11 \
   --ssh-key ~/.ssh/coolify-v5
 ```
@@ -134,7 +134,7 @@ cooldctl init plan \
 Preview another intent:
 
 ```bash
-cooldctl init plan \
+coolify init plan \
   --intent extend \
   --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
   --new-nodes 203.0.113.12 \
@@ -148,7 +148,7 @@ the subset that should receive first-time node installation. Existing hosts get 
 peer-refresh actions unless `--allow-replace` is explicitly passed.
 
 ```bash
-cooldctl init extend \
+coolify init extend \
   --nodes 203.0.113.10,203.0.113.11,203.0.113.12 \
   --new-nodes 203.0.113.12 \
   --ssh-key ~/.ssh/coolify-v5
@@ -157,7 +157,7 @@ cooldctl init extend \
 ## Upgrade agents
 
 ```bash
-cooldctl init upgrade \
+coolify init upgrade \
   --nodes 203.0.113.10,203.0.113.11 \
   --coold-version v0.2.0 \
   --corrosion-version v0.2.0 \
@@ -184,7 +184,7 @@ COOLIFY_COOLD_TOKEN=...   Environment bearer token override.
 List mesh containers:
 
 ```bash
-cooldctl firewall containers \
+coolify firewall containers \
   --nodes 203.0.113.10,203.0.113.11 \
   --namespace default \
   --ssh-key ~/.ssh/coolify-v5
@@ -193,7 +193,7 @@ cooldctl firewall containers \
 List allow rules:
 
 ```bash
-cooldctl firewall list \
+coolify firewall list \
   --nodes 203.0.113.10,203.0.113.11 \
   --namespace default \
   --ssh-key ~/.ssh/coolify-v5
@@ -202,7 +202,7 @@ cooldctl firewall list \
 Allow traffic from one container IP to another:
 
 ```bash
-cooldctl firewall allow \
+coolify firewall allow \
   --nodes 203.0.113.11 \
   --namespace default \
   --from 10.210.0.10 \
@@ -215,7 +215,7 @@ cooldctl firewall allow \
 Allow all protocols between two container IPs by omitting `--port`:
 
 ```bash
-cooldctl firewall allow \
+coolify firewall allow \
   --nodes 203.0.113.11 \
   --from 10.210.0.10 \
   --to 10.210.1.20 \
@@ -225,7 +225,7 @@ cooldctl firewall allow \
 Revoke by ID:
 
 ```bash
-cooldctl firewall revoke \
+coolify firewall revoke \
   --nodes 203.0.113.11 \
   --id abc123def456 \
   --ssh-key ~/.ssh/coolify-v5
@@ -234,7 +234,7 @@ cooldctl firewall revoke \
 Or revoke by the same tuple used for allow:
 
 ```bash
-cooldctl firewall revoke \
+coolify firewall revoke \
   --nodes 203.0.113.11 \
   --from 10.210.0.10 \
   --to 10.210.1.20 \
@@ -253,7 +253,7 @@ The live e2e tests are ignored by default because they create paid Hetzner VMs.
 Build the binary first:
 
 ```bash
-rtk cargo build -p cooldctl
+rtk cargo build -p coolify-cli
 ```
 
 Run manually only when you want live provisioning:
@@ -261,8 +261,8 @@ Run manually only when you want live provisioning:
 ```bash
 HETZNER_TOKEN=... \
 SSH_KEY=~/.ssh/coolify-v5 \
-COOLDCTL_BIN=target/debug/cooldctl \
-rtk cargo test -p e2e-tests --test cooldctl -- --ignored --nocapture --test-threads=1
+COOLIFY_CLI_BIN=target/debug/coolify \
+rtk cargo test -p e2e-tests --test coolify -- --ignored --nocapture --test-threads=1
 ```
 
 Optional environment:

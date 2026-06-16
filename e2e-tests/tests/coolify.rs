@@ -1,22 +1,22 @@
-//! Ignored Hetzner e2e coverage for the Rust `cooldctl` v5 cluster CLI.
+//! Ignored Hetzner e2e coverage for the Rust `coolify` v5 cluster CLI.
 //!
 //! These tests mirror the Go CLI's live provisioning coverage but invoke
-//! `cooldctl` only. They are intentionally `#[ignore]`; do not run them in
+//! `coolify` only. They are intentionally `#[ignore]`; do not run them in
 //! normal CI/local verification because they create paid Hetzner VMs.
 //!
 //! Run manually with:
 //!
 //! ```text
 //! HETZNER_TOKEN=... HETZNER_PROJECT=... SSH_KEY=~/.ssh/test \
-//! COOLDCTL_BIN=target/debug/cooldctl \
-//! cargo test -p e2e-tests --test cooldctl -- --ignored --nocapture --test-threads=1
+//! COOLIFY_CLI_BIN=target/debug/coolify \
+//! cargo test -p e2e-tests --test coolify -- --ignored --nocapture --test-threads=1
 //! ```
 
 use std::time::Duration;
 
 use e2e_tests::hetzner::EphemeralCluster;
 use e2e_tests::install::{
-    coold_token, local_cooldctl, podman_ping, podman_pull, run_container, ssh_ping, unit_active,
+    coold_token, local_coolify, podman_ping, podman_pull, run_container, ssh_ping, unit_active,
     wait_for, wg0_ip, wg_peers_handshaken, InstallEnv, NET, TEST_IMAGE,
 };
 
@@ -92,18 +92,18 @@ fn assert_default_deny_scaffold(ssh_key: &str, host: &str) {
 
 #[test]
 #[ignore = "requires HETZNER_TOKEN; provisions + destroys a Hetzner VM"]
-fn cooldctl_bootstrap_single_host() {
+fn coolify_bootstrap_single_host() {
     e2e_tests::set_tag("ctl-1 ");
     let cfg = InstallEnv::from_env();
     let cluster = EphemeralCluster::provision(1, "ctl-one");
     let host = cluster.hosts()[0].ipv4.clone();
 
-    step("1/5 cooldctl init bootstrap single host");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    step("1/5 coolify init bootstrap single host");
+    local_coolify(
+        &cfg.coolify_bin,
         &bootstrap_args(&host, &host, &cfg.ssh_key),
     )
-    .expect("cooldctl init bootstrap");
+    .expect("coolify init bootstrap");
 
     step("2/5 verify wg0 mgmt IP");
     let mgmt = wg0_ip(&cfg.ssh_key, &host);
@@ -117,9 +117,9 @@ fn cooldctl_bootstrap_single_host() {
     step("4/5 verify default-deny scaffold");
     assert_default_deny_scaffold(&cfg.ssh_key, &host);
 
-    step("5/5 verify cooldctl init plan is converged");
-    let out = local_cooldctl(
-        &cfg.cooldctl_bin,
+    step("5/5 verify coolify init plan is converged");
+    let out = local_coolify(
+        &cfg.coolify_bin,
         &[
             "init",
             "plan",
@@ -137,7 +137,7 @@ fn cooldctl_bootstrap_single_host() {
             CONTAINER_POOL,
         ],
     )
-    .expect("cooldctl init plan");
+    .expect("coolify init plan");
     assert!(
         out.contains("No changes needed") || out.trim().is_empty(),
         "plan not converged: {out}"
@@ -146,7 +146,7 @@ fn cooldctl_bootstrap_single_host() {
 
 #[test]
 #[ignore = "requires HETZNER_TOKEN; provisions + destroys 2 Hetzner VMs"]
-fn cooldctl_bootstrap_two_hosts() {
+fn coolify_bootstrap_two_hosts() {
     e2e_tests::set_tag("ctl-2 ");
     let cfg = InstallEnv::from_env();
     let cluster = EphemeralCluster::provision(2, "ctl-two");
@@ -154,10 +154,10 @@ fn cooldctl_bootstrap_two_hosts() {
     let host_b = cluster.hosts()[1].ipv4.clone();
     let servers = format!("{host_a},{host_b}");
 
-    step("1/6 cooldctl init bootstrap two hosts");
+    step("1/6 coolify init bootstrap two hosts");
     let mut args = bootstrap_args(&servers, &host_a, &cfg.ssh_key);
     args.extend(["--builder-hosts", &host_a]);
-    local_cooldctl(&cfg.cooldctl_bin, &args).expect("cooldctl init bootstrap two hosts");
+    local_coolify(&cfg.coolify_bin, &args).expect("coolify init bootstrap two hosts");
 
     step("2/6 verify wg0 IPs distinct");
     let mgmt_a = wg0_ip(&cfg.ssh_key, &host_a);
@@ -198,7 +198,7 @@ fn cooldctl_bootstrap_two_hosts() {
 
 #[test]
 #[ignore = "requires HETZNER_TOKEN; provisions + destroys 3 Hetzner VMs"]
-fn cooldctl_extend_adds_third_host() {
+fn coolify_extend_adds_third_host() {
     e2e_tests::set_tag("ctl-x ");
     let cfg = InstallEnv::from_env();
     let cluster = EphemeralCluster::provision(3, "ctl-ext");
@@ -209,15 +209,15 @@ fn cooldctl_extend_adds_third_host() {
     let full = format!("{host_a},{host_b},{host_c}");
 
     step("1/4 bootstrap initial two-host mesh");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &bootstrap_args(&initial, &host_a, &cfg.ssh_key),
     )
     .expect("initial bootstrap");
 
     step("2/4 extend with third host");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &[
             "init",
             "extend",
@@ -256,15 +256,15 @@ fn cooldctl_extend_adds_third_host() {
 
 #[test]
 #[ignore = "requires HETZNER_TOKEN; provisions + destroys a Hetzner VM"]
-fn cooldctl_firewall_allow_list_revoke() {
+fn coolify_firewall_allow_list_revoke() {
     e2e_tests::set_tag("ctl-fw");
     let cfg = InstallEnv::from_env();
     let cluster = EphemeralCluster::provision(1, "ctl-fw");
     let host = cluster.hosts()[0].ipv4.clone();
 
     step("1/5 bootstrap single host");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &bootstrap_args(&host, &host, &cfg.ssh_key),
     )
     .expect("bootstrap");
@@ -275,7 +275,7 @@ fn cooldctl_firewall_allow_list_revoke() {
     let ip_b = run_container(&cfg.ssh_key, &host, "fw-b", NET, TEST_IMAGE);
     assert!(!podman_ping(&cfg.ssh_key, &host, "fw-a", &ip_b));
 
-    step("3/5 allow both directions through cooldctl firewall");
+    step("3/5 allow both directions through coolify firewall");
     let common = [
         "--nodes",
         &host,
@@ -284,16 +284,16 @@ fn cooldctl_firewall_allow_list_revoke() {
         "--ssh-key",
         &cfg.ssh_key,
     ];
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &[
             "firewall", "allow", "--from", &ip_a, "--to", &ip_b, common[0], common[1], common[2],
             common[3], common[4], common[5],
         ],
     )
     .expect("allow a->b");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &[
             "firewall", "allow", "--from", &ip_b, "--to", &ip_a, common[0], common[1], common[2],
             common[3], common[4], common[5],
@@ -305,9 +305,9 @@ fn cooldctl_firewall_allow_list_revoke() {
         Duration::from_secs(5)
     ));
 
-    step("4/5 list rules through cooldctl firewall");
-    let listed = local_cooldctl(
-        &cfg.cooldctl_bin,
+    step("4/5 list rules through coolify firewall");
+    let listed = local_coolify(
+        &cfg.coolify_bin,
         &[
             "firewall", "list", common[0], common[1], common[2], common[3], common[4], common[5],
         ],
@@ -325,16 +325,16 @@ fn cooldctl_firewall_allow_list_revoke() {
         "coold token should exist after bootstrap"
     );
     // Revoke through tuple form so the CLI computes the same namespace-scoped rule id.
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &[
             "firewall", "revoke", "--from", &ip_a, "--to", &ip_b, common[0], common[1], common[2],
             common[3], common[4], common[5],
         ],
     )
     .expect("revoke a->b");
-    local_cooldctl(
-        &cfg.cooldctl_bin,
+    local_coolify(
+        &cfg.coolify_bin,
         &[
             "firewall", "revoke", "--from", &ip_b, "--to", &ip_a, common[0], common[1], common[2],
             common[3], common[4], common[5],

@@ -9,7 +9,7 @@
 //! ```text
 //! HETZNER_TOKEN=... HETZNER_PROJECT=... \
 //! SSH_KEY=~/.ssh/test \
-//! COOLIFY_BIN=$(which coolify) \
+//! COOLIFY_CLI_BIN=$(which coolify) \
 //! cargo test -p e2e-tests --test builder -- --ignored --nocapture --test-threads=1
 //! ```
 

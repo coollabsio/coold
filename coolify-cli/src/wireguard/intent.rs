@@ -112,13 +112,13 @@ fn decide(a: &PlannedAction, d: &DesiredMesh, new_nodes: &BTreeSet<String>) -> O
             Category::SafeAlways|Category::PeerRefresh|Category::SchemaFirstWrite => None,
             Category::DestructiveReplace if d.allow_replace => None,
             Category::DestructiveReplace => Some("extend: destructive-replace on existing host blocked; pass --allow-replace to override".into()),
-            Category::VersionBump => Some("extend: version-bump on existing host skipped; use `cooldctl init upgrade` to bump versions".into()),
-            Category::WipeDb => Some("extend: corrosion DB wipe on existing host is never allowed; resolve schema drift with `cooldctl init upgrade` on a fresh schema".into()),
+            Category::VersionBump => Some("extend: version-bump on existing host skipped; use `coolify init upgrade` to bump versions".into()),
+            Category::WipeDb => Some("extend: corrosion DB wipe on existing host is never allowed; resolve schema drift with `coolify init upgrade` on a fresh schema".into()),
         },
         Intent::Upgrade => match categorize(a) {
             Category::VersionBump => None,
             Category::PeerRefresh if matches!(a.action_type, ActionType::InstallCorrosionService|ActionType::InstallCooldService) => None,
-            Category::PeerRefresh => Some("upgrade: peer-refresh skipped; use `cooldctl init extend` for mesh topology changes".into()),
+            Category::PeerRefresh => Some("upgrade: peer-refresh skipped; use `coolify init extend` for mesh topology changes".into()),
             _ => Some("upgrade: non-version-bump action skipped".into()),
         }
     }

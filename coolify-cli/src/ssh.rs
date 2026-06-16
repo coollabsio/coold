@@ -53,7 +53,7 @@ impl SshMeshFlags {
     pub fn client(&self) -> SshClient {
         if self.ssh_passphrase_prompt {
             eprintln!(
-                "warning: --ssh-passphrase-prompt is delegated to ssh/ssh-agent in cooldctl; ensure your key is unlocked"
+                "warning: --ssh-passphrase-prompt is delegated to ssh/ssh-agent in coolify; ensure your key is unlocked"
             );
         }
         SshClient {
@@ -195,7 +195,7 @@ pub struct ServerResult<T> {
 
 pub fn heredoc(path: &str, body: &str, mode: &str) -> String {
     format!(
-        "cat > {path}.tmp <<'COOLDCTL_EOF'\n{body}COOLDCTL_EOF\nchmod {mode} {path}.tmp && mv {path}.tmp {path}"
+        "cat > {path}.tmp <<'COOLIFY_CLI_EOF'\n{body}COOLIFY_CLI_EOF\nchmod {mode} {path}.tmp && mv {path}.tmp {path}"
     )
 }
 

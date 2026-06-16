@@ -78,14 +78,14 @@ jobs:
           rm dist/flux
           (cd dist && sha256sum flux-linux-${{ matrix.arch }}.tar.gz > flux-linux-${{ matrix.arch }}.tar.gz.sha256)
 
-      - name: Build Alpine-compatible Flux and cooldctl
+      - name: Build Alpine-compatible Flux and coolify
         env:
           MUSL_CC_ENV: ${{ matrix.musl_cc_env }}
         run: |
           echo "${MUSL_CC_ENV}=musl-gcc" >> "$GITHUB_ENV"
           export "${MUSL_CC_ENV}=musl-gcc"
           cargo build -p flux --release --locked --target ${{ matrix.musl_target }}
-          cargo build -p cooldctl --release --locked --target ${{ matrix.musl_target }}
+          cargo build -p coolify-cli --release --locked --target ${{ matrix.musl_target }}
 
       - name: Package Alpine-compatible flux
         run: |
@@ -101,19 +101,19 @@ jobs:
           rm dist/builder
           (cd dist && sha256sum builder-linux-${{ matrix.arch }}.tar.gz > builder-linux-${{ matrix.arch }}.tar.gz.sha256)
 
-      - name: Package cooldctl
+      - name: Package coolify
         run: |
-          cp target/${{ matrix.target }}/release/cooldctl dist/cooldctl
-          tar -czf dist/cooldctl-linux-${{ matrix.arch }}.tar.gz -C dist cooldctl
-          rm dist/cooldctl
-          (cd dist && sha256sum cooldctl-linux-${{ matrix.arch }}.tar.gz > cooldctl-linux-${{ matrix.arch }}.tar.gz.sha256)
+          cp target/${{ matrix.target }}/release/coolify dist/coolify
+          tar -czf dist/coolify-linux-${{ matrix.arch }}.tar.gz -C dist coolify
+          rm dist/coolify
+          (cd dist && sha256sum coolify-linux-${{ matrix.arch }}.tar.gz > coolify-linux-${{ matrix.arch }}.tar.gz.sha256)
 
-      - name: Package Alpine-compatible cooldctl
+      - name: Package Alpine-compatible coolify
         run: |
-          cp target/${{ matrix.musl_target }}/release/cooldctl dist/cooldctl
-          tar -czf dist/cooldctl-linux-musl-${{ matrix.arch }}.tar.gz -C dist cooldctl
-          rm dist/cooldctl
-          (cd dist && sha256sum cooldctl-linux-musl-${{ matrix.arch }}.tar.gz > cooldctl-linux-musl-${{ matrix.arch }}.tar.gz.sha256)
+          cp target/${{ matrix.musl_target }}/release/coolify dist/coolify
+          tar -czf dist/coolify-linux-musl-${{ matrix.arch }}.tar.gz -C dist coolify
+          rm dist/coolify
+          (cd dist && sha256sum coolify-linux-musl-${{ matrix.arch }}.tar.gz > coolify-linux-musl-${{ matrix.arch }}.tar.gz.sha256)
 
       - uses: actions/upload-artifact@v4
         with:
@@ -151,7 +151,7 @@ jobs:
             echo "- \`coold\` — per-host agent (holds the single gRPC stream to flux; spawns builder subprocess per BuildRequest when COOLIFY_COOLD_BUILDER_ENABLED=1)"
             echo "- \`flux\` — central-side gRPC stream router (single listener on :6443; capability-aware routing; musl artifacts are Alpine-compatible)"
             echo "- \`builder\` — short-lived build subprocess invoked by coold under a \`systemd-run --scope\` transient unit"
-            echo "- \`cooldctl\` — provisioning CLI for WireGuard, Podman mesh networks, Corrosion, coold, builder, and firewall rules"
+            echo "- \`coolify\` — provisioning CLI for WireGuard, Podman mesh networks, Corrosion, coold, builder, and firewall rules"
             echo
             if [ -n "$PREV" ]; then
               echo "### Changes since $PREV"
@@ -186,14 +186,14 @@ jobs:
             dist/builder-linux-amd64.tar.gz.sha256
             dist/builder-linux-arm64.tar.gz
             dist/builder-linux-arm64.tar.gz.sha256
-            dist/cooldctl-linux-amd64.tar.gz
-            dist/cooldctl-linux-amd64.tar.gz.sha256
-            dist/cooldctl-linux-arm64.tar.gz
-            dist/cooldctl-linux-arm64.tar.gz.sha256
-            dist/cooldctl-linux-musl-amd64.tar.gz
-            dist/cooldctl-linux-musl-amd64.tar.gz.sha256
-            dist/cooldctl-linux-musl-arm64.tar.gz
-            dist/cooldctl-linux-musl-arm64.tar.gz.sha256
+            dist/coolify-linux-amd64.tar.gz
+            dist/coolify-linux-amd64.tar.gz.sha256
+            dist/coolify-linux-arm64.tar.gz
+            dist/coolify-linux-arm64.tar.gz.sha256
+            dist/coolify-linux-musl-amd64.tar.gz
+            dist/coolify-linux-musl-amd64.tar.gz.sha256
+            dist/coolify-linux-musl-arm64.tar.gz
+            dist/coolify-linux-musl-arm64.tar.gz.sha256
 
       - name: Refresh rolling nightly release
         env:
@@ -221,11 +221,11 @@ jobs:
             dist/builder-linux-amd64.tar.gz.sha256 \
             dist/builder-linux-arm64.tar.gz \
             dist/builder-linux-arm64.tar.gz.sha256 \
-            dist/cooldctl-linux-amd64.tar.gz \
-            dist/cooldctl-linux-amd64.tar.gz.sha256 \
-            dist/cooldctl-linux-arm64.tar.gz \
-            dist/cooldctl-linux-arm64.tar.gz.sha256 \
-            dist/cooldctl-linux-musl-amd64.tar.gz \
-            dist/cooldctl-linux-musl-amd64.tar.gz.sha256 \
-            dist/cooldctl-linux-musl-arm64.tar.gz \
-            dist/cooldctl-linux-musl-arm64.tar.gz.sha256
+            dist/coolify-linux-amd64.tar.gz \
+            dist/coolify-linux-amd64.tar.gz.sha256 \
+            dist/coolify-linux-arm64.tar.gz \
+            dist/coolify-linux-arm64.tar.gz.sha256 \
+            dist/coolify-linux-musl-amd64.tar.gz \
+            dist/coolify-linux-musl-amd64.tar.gz.sha256 \
+            dist/coolify-linux-musl-arm64.tar.gz \
+            dist/coolify-linux-musl-arm64.tar.gz.sha256

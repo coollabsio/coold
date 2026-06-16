@@ -1,8 +1,8 @@
 # coold architecture
 
-> CLI-side counterpart: `cooldctl` in this workspace. Historical v5 notes lived
+> CLI-side counterpart: `coolify` in this workspace. Historical v5 notes lived
 > in `coolify-cli/CONTROL_PLANE.md`; new v5 cluster CLI changes belong here and
-> in `cooldctl/`, not in the v4 Coolify CLI.
+> in `coolify-cli/`, not in the v4 Coolify CLI.
 
 ## 1. Role of coold
 
@@ -99,8 +99,8 @@ GET    /api/v1/host/stats            (podman stats snapshot)
 ```
 
 This list must stay byte-identical to the wire-surface block in
-`cooldctl` docs and command handlers. If you add or change a verb here, update
-the v5 CLI code in `cooldctl/` too.
+`coolify` docs and command handlers. If you add or change a verb here, update
+the v5 CLI code in `coolify-cli/` too.
 
 ## 4. Transports
 
@@ -113,7 +113,7 @@ coold speaks two transports, **same endpoint set on both**:
   logs/exec. WSS over :443 remains the documented fallback if gRPC-through-
   proxy issues surface. Same code path for self-hosted and cloud SaaS.
 - **Local REST on wg0 mgmt IP (`100.64.0.X:8443`)**: intra-mesh callers only
-  (`cooldctl firewall` via SSH-bounce, peer coolds, optional
+  (`coolify firewall` via SSH-bounce, peer coolds, optional
   per-customer gateway). Bearer-token authn on every request.
 - **No inbound from central**: central never dials coold. All mutations from
   central arrive over the coold-initiated stream; no `COOLIFY-ALLOW` rule for
@@ -182,7 +182,7 @@ For completeness on the other side of the split:
 ## 8. Deploy flow (T0–T10)
 
 Walkthrough of a single deploy, showing every primitive op. Mirrors
-`cooldctl` init/apply docs.
+`coolify` init/apply docs.
 
 ```
 T0  Central builder clones source, invokes BuildKit / buildpack / nixpacks.
@@ -754,9 +754,9 @@ exit or by coold's `resume_or_reap` on next start).
 
 ## 18. Cross-references
 
-- Bootstrap + CLI: `cooldctl/` in this workspace.
-- `cooldctl firewall`: SSH-bounced REST client of local coold.
-- Wire surface + transport: §3 and §4 here are the source of truth for `cooldctl` command behavior.
+- Bootstrap + CLI: `coolify-cli/` in this workspace.
+- `coolify firewall`: SSH-bounced REST client of local coold.
+- Wire surface + transport: §3 and §4 here are the source of truth for `coolify` command behavior.
 
 
 ## Central control plane
@@ -766,7 +766,7 @@ Rust workspace. It owns all app-aware logic (compose, Dockerfiles, buildpacks,
 scheduling, rollback, ingress templating, RBAC, audit) and its own persistent
 state. This workspace ships only the data-plane pieces: host agent (`coold`),
 stream router (`flux`), build agent (`builder`), and cluster bootstrap
-(`cooldctl`) — each independently testable.
+(`coolify`) — each independently testable.
 
 
 ### Laravel to coold request path

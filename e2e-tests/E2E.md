@@ -42,7 +42,7 @@ Provisions VMs via Hetzner Cloud API, runs `coolify init bootstrap`, asserts net
 export HETZNER_TOKEN=<project-scoped-token>
 export HETZNER_PROJECT=<label-value-for-cleanup-filter>
 export SSH_KEY=~/.ssh/<key>              # privkey path; .pub derived or read
-export COOLIFY_BIN=$(which coolify)      # local Go CLI path (default "coolify")
+export COOLIFY_CLI_BIN=$(which coolify)      # local Rust v5 CLI path (default "coolify")
 # optional:
 export HETZNER_LOCATION=nbg1
 export HETZNER_IMAGE=ubuntu-24.04

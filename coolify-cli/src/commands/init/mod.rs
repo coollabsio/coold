@@ -18,7 +18,7 @@ use crate::{
     },
 };
 
-const ALPHA_BANNER: &str = "\n[ALPHA] cooldctl init targets Coolify v5 and is experimental.\n[ALPHA] WireGuard mesh bootstrap requires root/sudo and modifies network configuration.\n[ALPHA] Test in non-production environments first. Stability is not guaranteed.\n";
+const ALPHA_BANNER: &str = "\n[ALPHA] coolify init targets Coolify v5 and is experimental.\n[ALPHA] WireGuard mesh bootstrap requires root/sudo and modifies network configuration.\n[ALPHA] Test in non-production environments first. Stability is not guaranteed.\n";
 
 #[derive(Debug, Subcommand)]
 pub enum InitCommand {

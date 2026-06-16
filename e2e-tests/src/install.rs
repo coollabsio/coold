@@ -22,7 +22,6 @@ pub const NET: &str = "coolify-default-mesh";
 pub struct InstallEnv {
     pub ssh_key: String,
     pub coolify_bin: String,
-    pub cooldctl_bin: String,
 }
 
 impl InstallEnv {
@@ -30,8 +29,7 @@ impl InstallEnv {
         crate::load_dotenv();
         Self {
             ssh_key: must("SSH_KEY"),
-            coolify_bin: std::env::var("COOLIFY_BIN").unwrap_or_else(|_| "coolify".into()),
-            cooldctl_bin: std::env::var("COOLDCTL_BIN").unwrap_or_else(|_| "cooldctl".into()),
+            coolify_bin: std::env::var("COOLIFY_CLI_BIN").unwrap_or_else(|_| "coolify".into()),
         }
     }
 }
@@ -59,27 +57,9 @@ pub fn ssh(ssh_key: &str, host: &str, cmd: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Run the local `coolify` binary. Inherits stderr so the CLI's progress
-/// output is visible with `--nocapture`; captures stdout in case callers
-/// want to parse JSON/table output later.
-/// Run the local `cooldctl` binary. Used by ignored Hetzner tests for the Rust
+/// Run the local `coolify` binary. Used by ignored Hetzner tests for the Rust
 /// v5 cluster CLI. Inherits stderr for progress output and forces noninteractive
 /// mode so bootstrap never waits for stdin.
-pub fn local_cooldctl(cooldctl_bin: &str, args: &[&str]) -> Result<String, String> {
-    eprintln!("[local] {cooldctl_bin} {}", args.join(" "));
-    let out = Command::new(cooldctl_bin)
-        .args(args)
-        .env("COOLIFY_NON_INTERACTIVE", "1")
-        .stdin(Stdio::null())
-        .stderr(Stdio::inherit())
-        .output()
-        .map_err(|e| format!("spawn {cooldctl_bin}: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("cooldctl {:?} exit {:?}", args, out.status.code()));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 pub fn local_coolify(coolify_bin: &str, args: &[&str]) -> Result<String, String> {
     eprintln!("[local] {coolify_bin} {}", args.join(" "));
     let out = Command::new(coolify_bin)

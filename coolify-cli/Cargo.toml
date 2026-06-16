@@ -1,5 +1,5 @@
 [package]
-name = "cooldctl"
+name = "coolify-cli"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,7 +7,7 @@ description = "Coolify v5 cluster provisioning CLI for coold meshes."
 license.workspace = true
 
 [[bin]]
-name = "cooldctl"
+name = "coolify"
 path = "src/main.rs"
 
 [dependencies]
