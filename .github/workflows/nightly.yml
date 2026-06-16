@@ -127,8 +127,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-13
-            arch: amd64
           - runner: macos-14
             arch: arm64
     runs-on: ${{ matrix.runner }}
@@ -237,8 +235,6 @@ jobs:
             dist/coolify-linux-musl-amd64.tar.gz.sha256
             dist/coolify-linux-musl-arm64.tar.gz
             dist/coolify-linux-musl-arm64.tar.gz.sha256
-            dist/coolify-darwin-amd64.tar.gz
-            dist/coolify-darwin-amd64.tar.gz.sha256
             dist/coolify-darwin-arm64.tar.gz
             dist/coolify-darwin-arm64.tar.gz.sha256
 
@@ -276,7 +272,5 @@ jobs:
             dist/coolify-linux-musl-amd64.tar.gz.sha256 \
             dist/coolify-linux-musl-arm64.tar.gz \
             dist/coolify-linux-musl-arm64.tar.gz.sha256 \
-            dist/coolify-darwin-amd64.tar.gz \
-            dist/coolify-darwin-amd64.tar.gz.sha256 \
             dist/coolify-darwin-arm64.tar.gz \
             dist/coolify-darwin-arm64.tar.gz.sha256
