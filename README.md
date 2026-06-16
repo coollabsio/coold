@@ -1,8 +1,8 @@
 ## What is coold?
 
-Per-host agent of Coolify v5. Kubelet-analogue for a WireGuard mesh of Podman hosts. One `coold` process per node. Narrow by design: executes primitives locally, never reasons about apps, builds, or deploys.
+Per-host agent of Coolify v5. Kubelet-analogue for a WireGuard mesh of Podman hosts. One `coold` process per node. Narrow by design: executes local runtime primitives, never reasons about apps, builds, or deploys.
 
-coold is the only process on a host with access to the Podman socket, the iptables/nft kernel interface, and the Corrosion gossip layer.
+Today, coold owns service-discovery sync, embedded DNS, firewall mutations, the outbound flux stream, and optional builder subprocess supervision. It is the only process on a node with access to the Podman socket, the iptables/nft kernel interface, and the local Corrosion agent.
 
 ---
 
@@ -10,22 +10,22 @@ coold is the only process on a host with access to the Podman socket, the iptabl
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│ Laravel (Coolify brain — app model, flux, deploy ctrl)│
+│ Laravel (Coolify brain — app model, deploy ctrl, state)    │
 └──────────────────────────┬─────────────────────────────────┘
                            │ HTTP over /run/coolify/flux.sock
                            ▼
 ┌────────────────────────────────────────────────────────────┐
-│ flux                                                  │
+│ flux                                                       │
 │  • gRPC :6443 (coold dials in; HTTP/2 bidi, JWT bearer)    │
-│  • UDS /run/coolify/flux.sock (Laravel; fs-perm auth) │
+│  • UDS /run/coolify/flux.sock (Laravel; fs-perm auth)      │
 │  • Streams map (host_id) + Pending map (request_id)        │
 └──────────────────────────┬─────────────────────────────────┘
-                           │ grpcs://flux:6443/v1/agent
+                           │ http(s)://flux:6443 Agent.Stream
                            ▼
 ┌────────────────────────────────────────────────────────────┐
-│ coold (per host)                                           │
-│  Podman proxy · Firewall dual-writer · DNS · Corrosion sync│
-│  Advertises "builder" cap → spawns builder subprocess      │
+│ coold (per node)                                           │
+│  Firewall dual-writer · DNS · Corrosion sync · gRPC client │
+│  Optional "builder" cap → spawns builder subprocess        │
 └────────┬───────────────┬────────────────┬──────────────────┘
          │ UDS           │ HTTP           │ systemd-run --pipe --scope
          ▼               ▼                ▼
@@ -33,7 +33,7 @@ coold is the only process on a host with access to the Podman socket, the iptabl
                         │                 │
                         │ SWIM gossip     │ builder binary
                         ▼                 ▼
-                   other hosts       buildah → containers-storage
+                   other nodes       buildah → containers-storage
 ```
 
 ---
@@ -44,11 +44,12 @@ coold is the only process on a host with access to the Podman socket, the iptabl
 proto/          Shared Protobuf: Agent.Stream, Hello, ServerMsg, ClientMsg,
                 Response, BuildRequest, CancelBuild, capabilities.
 coold/          Per-host agent.
-flux/      gRPC server coold dials + UDS lane for Laravel.
-builder/        One-shot OCI build CLI, spawned by coold per build.
-builder-core/   Reusable git + buildah pipeline (static_build.rs, …).
-coolify-cli/       Rust v5 cluster CLI: WireGuard/Podman/coold init + SSH-bounced firewall.
-                Does not include v4 Coolify API/context/project commands.
+flux/          gRPC server coold dials + UDS lane for Laravel.
+builder/       One-shot OCI build CLI, spawned by coold per build.
+builder-core/  Reusable git + buildah pipeline (static_build.rs, …).
+coolify-cli/   Rust v5 cluster CLI: WireGuard/Podman/coold/Corrosion init
+               + SSH-bounced firewall. Does not include v4 Coolify
+               API/context/project commands.
 e2e-tests/      Live-server harness (Hetzner-provisioned). Excluded from
                 default workspace build.
 ```
@@ -128,10 +129,19 @@ continues to own those v4/current API commands during the migration window.
 Current command surface:
 
 ```bash
-coolify init plan --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY
-coolify init bootstrap --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --yes
-coolify init extend --central CENTRAL --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
-coolify init upgrade --central CENTRAL --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --flux-version latest
+coolify init plan --nodes NODE1,NODE2 --ssh-key KEY
+coolify init bootstrap --nodes NODE1,NODE2 --ssh-key KEY --yes
+coolify init extend --nodes NODE1,NODE2,NODE3 --new-nodes NODE3 --ssh-key KEY
+coolify init upgrade --nodes NODE1,NODE2 --ssh-key KEY --coold-version vX.Y.Z --corrosion-version v1.0.0
+
+# Optional builder placement. If --builder-hosts is omitted and
+# --enable-builder=true (default), every node receives the builder binary/cap.
+coolify init bootstrap --nodes NODE1,NODE2 --builder-hosts NODE1 --ssh-key KEY --yes
+
+# Dev/NAT cases can override per-node WireGuard listen ports and peer endpoints.
+coolify init bootstrap --nodes node-a,node-b --ssh-key KEY \
+  --wg-listen-port-overrides node-a=51821,node-b=51822 \
+  --wg-endpoint-overrides node-a=host.lima.internal:51821,node-b=host.lima.internal:51822
 
 coolify firewall containers --nodes IP1,IP2 --ssh-key KEY
 coolify firewall list --nodes IP1,IP2 --ssh-key KEY
@@ -139,11 +149,13 @@ coolify firewall allow --from 10.0.0.1 --to 10.0.0.2 --port 80 --nodes IP1 --ssh
 coolify firewall revoke --id <rule-id> --nodes IP1 --ssh-key KEY
 ```
 
-The CLI shares the v5 mesh model: bootstrap over SSH, central `flux`
-installation on `--central`, deployment nodes via `--nodes`, and day-to-day
-firewall mutation through coold's wg0-local REST API via SSH bounce. The central
-host joins WireGuard for private flux/coold streams but only runs
-Podman/coold/Corrosion when also listed in `--nodes`.
+The CLI shares the v5 mesh model: bootstrap over SSH, deployment nodes via
+`--nodes` (alias `--servers`), and day-to-day firewall mutation through coold's
+wg0-local REST API via SSH bounce. `coolify init` converges node runtime only:
+WireGuard, Podman, namespace bridges, the firewall scaffold, Corrosion, coold,
+and optionally the builder binary/capability. It no longer installs or
+configures central `flux`; connect a node to flux separately with
+`COOLIFY_COOLD_FLUX_URL` or `COOLIFY_COOLD_ASSIGNMENT_URL` plus a host JWT.
 
 ---
 
@@ -172,9 +184,9 @@ Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on bo
 
 ## Transport
 
-**Outbound gRPC stream.** coold dials `grpcs://flux:6443/v1/agent` at startup with per-host JWT. Flux routes command frames down the open stream. Works through NAT and corporate firewalls — flux never opens inbound to a host.
+**Outbound gRPC stream.** coold can dial `http(s)://flux:6443` at startup with a per-host JWT and open `Agent.Stream`. The stream starts only when `COOLIFY_COOLD_FLUX_URL` or `COOLIFY_COOLD_ASSIGNMENT_URL` is configured and `COOLIFY_COOLD_GRPC_DISABLED=false`. Flux routes command frames down the open stream. Works through NAT and corporate firewalls — flux never opens inbound to a host.
 
-**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Used by `coolify firewall` (SSH-bounced), peer coolds, optional per-customer gateways.
+**Local REST on wg0 mgmt IP.** `100.64.X.X:8443` — reachable only inside the mesh. Today this REST server is firewall-only and is used by `coolify firewall` via SSH bounce.
 
 ---
 
@@ -182,7 +194,7 @@ Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on bo
 
 Central connection-holder. Laravel (PHP-FPM request/response model) can't hold thousands of long-lived HTTP/2 streams; flux does.
 
-- `:6443` gRPC — single listener. coold dispatch + build dispatch share it.
+- `:6443` gRPC — single listener. coold dispatch + build dispatch share it. The bind must be a specific interface IP unless `COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1` is set for dev/test.
 - `/run/coolify/flux.sock` UDS — Laravel's sync + async lane. Mode `0660` when `COOLIFY_FLUX_UNIX_SOCKET_GROUP` set, else `0600`. No TLS, no bearer — filesystem perms replace auth.
 - `Streams`: DashMap<host_id, StreamHandle{tx, caps, builder_capacity}>.
 - `Pending`: DashMap<request_id, Waiting | Landed>. Cap `COOLIFY_FLUX_PENDING_MAX=10_000`. Landed entries hold 30 s TTL so late pollers still claim results.
@@ -205,58 +217,38 @@ Laravel POST → flux checks `Streams::get(host_id)` (miss → 404) → `Pending
 
 ---
 
-## coold wire surface (closed set, same on both transports)
+## coold wire surface (implemented)
 
+The implemented control surface is intentionally small. Future Podman lifecycle
+verbs should be added explicitly; there is no raw Podman passthrough.
+
+### gRPC via flux (`Agent.Stream`)
+
+```protobuf
+ServerMsg.list_containers  -> Response.list_containers
+ServerMsg.build            -> Response.build
+ServerMsg.cancel_build     -> no immediate response; cancels a running build
 ```
-# Images
-POST   /api/v1/images/pull           {ref, auth?}  -> {digest}
-GET    /api/v1/images
-DELETE /api/v1/images/{ref}
 
-# Containers (filtered podman surface)
-POST   /api/v1/containers
-POST   /api/v1/containers/{id}/start
-POST   /api/v1/containers/{id}/stop           {timeout?}
-POST   /api/v1/containers/{id}/restart
-DELETE /api/v1/containers/{id}                {force?}
-GET    /api/v1/containers/{id}
-GET    /api/v1/containers/{id}/logs?follow=true
-POST   /api/v1/containers/{id}/exec           {cmd, tty?}
-POST   /api/v1/containers/{id}/healthcheck/run
+`list_containers` returns Podman container summaries plus inspected network
+attachments. Build messages are capability-routed by flux to a connected host
+that advertised `builder` in `Hello.capabilities`.
 
-# Volumes
-POST   /api/v1/volumes
-DELETE /api/v1/volumes/{name}
-GET    /api/v1/volumes/{name}
+### Local REST on coold (firewall only)
 
-# Networks
-POST   /api/v1/networks
-DELETE /api/v1/networks/{name}
-GET    /api/v1/networks
-
-# Firewall (sole writer; dual-plane)
-POST   /api/v1/firewall/allow            -> {id}
-DELETE /api/v1/firewall/allow/{id}
+```http
+GET    /healthz
 GET    /api/v1/firewall/allow[?namespace=X]
+POST   /api/v1/firewall/allow             -> {id}
+DELETE /api/v1/firewall/allow/:id
 POST   /api/v1/firewall/allow/bulk
 POST   /api/v1/firewall/reconcile
-
-# Service endpoints (Corrosion writer)
-POST   /api/v1/services/register
-DELETE /api/v1/services/{id}/endpoints/{container_id}
-GET    /api/v1/services/{id}/endpoints
-
-# DNS (diagnostics)
-GET    /api/v1/dns/lookup/{name}
-GET    /api/v1/dns/stats
-
-# Host facts
-GET    /api/v1/host/info
-GET    /api/v1/host/containers
-GET    /api/v1/host/stats
 ```
 
-No raw podman passthrough. New verbs require a coold release.
+Not implemented yet in this codebase: image pull/list/delete, container
+create/start/stop/restart/logs/exec/healthcheck, volume CRUD, network CRUD,
+service endpoint CRUD over REST, DNS diagnostics, host facts, or a deny filter
+on `POST /containers`. Those remain architecture goals, not current API.
 
 ---
 
@@ -300,7 +292,7 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 ## Network model
 
 - **Namespace = tenancy unit.** Each namespace gets a podman bridge `coolify-<ns>-mesh` with its own per-host `/24`. `coolify init --namespaces default,alpha,…` provisions every namespace on every host. coold receives full list via `COOLIFY_COOLD_NAMESPACES=<name>:<network>:<gateway-ip>,…`.
-- **Per-app sub-networks.** Inside a namespace, additional podman networks via `POST /networks`.
+- **Per-app sub-networks.** Additional per-app Podman networks are an architecture goal; the current coold REST server does not expose network CRUD yet.
 - **Egress.** Bridge-NAT to host default route. Cross-host container traffic rides wg0 via peer `AllowedIPs`.
 - **Two enforcement planes, both coold-written.** iptables FORWARD (cross-host) + nft `coolify_bridge` (intra-host same-bridge, fills a Linux gap where bridge L2 forwarding bypasses iptables FORWARD).
 - **Bind discipline.** DNS binds per-namespace bridge gateway only. REST API binds wg0 mgmt IP only. Never `0.0.0.0`.
@@ -311,12 +303,13 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 
 | Concern | Owner |
 | --- | --- |
-| Podman API proxy | **coold** |
+| Podman reads used by implemented primitives | **coold** (`list_containers`, inspect for discovery) |
+| Podman lifecycle API proxy | **future coold surface** |
 | iptables + nft dual-write | **coold** (sole kernel writer) |
 | Corrosion row writes (own host only) | **coold** |
 | Embedded DNS | **coold** |
-| Host facts (`podman info`, load, wg state) | **coold** |
-| Deny filter on container create | **coold** |
+| Host facts (`podman info`, load, wg state) | **future coold surface** |
+| Deny filter on container create | **future coold surface** |
 | Compose parsing, Dockerfile/Buildpacks/Nixpacks | **builder / central** |
 | App model, service graph, deployment history | **central** |
 | Flux (host placement) | **central** |
@@ -329,45 +322,36 @@ Key modules: `coold/src/firewall/store.rs` (Arc<Mutex> serializes iptables), `co
 
 ---
 
-## Deploy flow (single app, abbreviated)
+## Deploy flow status
+
+The target architecture is still: central owns the app/deploy state machine and
+coold only receives primitive frames. The current implemented primitives support
+parts of that path, not the full deploy lifecycle.
+
+Implemented today:
 
 ```
-T0  Central builder clones source, invokes buildah / buildpack / nixpacks.
-    Output: OCI image in containers-storage (single-node) or registry (multi-node).
-
-T1  Central flux picks target host H.
-
-T2  POST /images/pull  {ref: "localhost/tenant/web:v2"}      (skipped on single-node)
-
-T3  POST /volumes      {name: "web-data"}
-
-T4  POST /containers   (central templates from compose + resolved secrets)
-
-T5  POST /containers/{id}/start
-
-T6  Central polls GET /containers/{id} until healthy.
-
-T7  POST /services/register   → Corrosion row → gossip → DNS answers new IP.
-
-T8  POST /firewall/allow  {src: proxy-ip, dst: container-ip, port: 80}
-
-T9  Central regenerates proxy config; POST /containers/{proxy}/exec reload.
-
-T10 Retire old container:
-      POST /containers/{old}/stop → DELETE /containers/{old}
-      DELETE /services/web/endpoints/{old}
-      DELETE /firewall/allow/{old-rule-id}
+T0  Laravel asks flux to dispatch a static build.
+T1  Flux picks a connected host with the `builder` capability (or uses host_id).
+T2  coold spawns `builder` under a transient systemd scope.
+T3  builder writes an OCI image to containers-storage and durable result files.
+T4  coold reports the build result over the same gRPC stream.
+T5  coold independently syncs running/stopped container endpoints into Corrosion.
+T6  Central/Laravel can list live containers through flux → coold → Podman.
+T7  Central/Laravel or `coolify firewall` can mutate allow rules through coold.
 ```
 
-coold never sees "deploy app X". Only primitive frames.
+Not implemented in coold yet: image pull, volume creation, container
+create/start/stop, service registration REST calls, proxy reload exec, and
+retire/delete container primitives.
 
 ---
 
 ## Security boundary
 
 - **Authn**: static bearer token (local REST, `/etc/coolify/api-token` mode 0600); per-host JWT (outbound stream, issued at enrollment); filesystem perms (flux UDS).
-- **Deny filter on `POST /containers`**: rejects `-privileged`, `-cap-add=SYS_ADMIN/NET_ADMIN`, host-path bind mounts outside an allowlist, `-net=host` (unless coold itself). Returns 403 with offending field.
-- **No secret storage.** Central resolves secrets into `POST /containers` env/mounts; coold passes through and forgets.
+- **Container-create deny filter**: planned for the future Podman lifecycle surface; no `POST /containers` endpoint exists today.
+- **No secret storage.** Central resolves secrets at deploy time; coold does not persist them.
 - **No business audit.** coold keeps ops/debug request log only (endpoint, status, duration). Who-why lives in central.
 - **Privilege boundary**: coold is the only process with podman socket access. No TCP podman API exposed anywhere.
 
@@ -375,7 +359,7 @@ coold never sees "deploy app X". Only primitive frames.
 
 ## Persistence
 
-coold keeps **no database**. Kernel chain is source of truth on restart; central reconciles drift via `POST /reconcile` or replays `POST /allow`.
+coold keeps **no database**. Kernel chain and snapshot files are the local firewall source of truth on restart; central can reconcile drift via `POST /api/v1/firewall/reconcile` or by replaying allow rules.
 
 - `/etc/coolify/allow.rules` — iptables-save fragment for `COOLIFY-ALLOW`.
 - `/etc/coolify/allow.nft` — nft fragment for `coolify_bridge::coolify_allow`.
@@ -389,9 +373,11 @@ Builder-side persistence: `<work_dir>/events.ndjson` + `result.json` / `error.js
 ## Systemd layout (single-node)
 
 ```
-coold.service    Dials flux :6443, advertises "builder" cap when enabled,
-                 spawns builder subprocesses in transient units per build.
-flux.service :6443 (coold gRPC) + /run/coolify/flux.sock (Laravel UDS).
+coold.service    Runs discovery/DNS/firewall locally. Dials flux only when
+                 COOLIFY_COOLD_FLUX_URL or COOLIFY_COOLD_ASSIGNMENT_URL is set;
+                 advertises "builder" cap when enabled and spawns builder
+                 subprocesses in transient units per build.
+flux.service     :6443 (coold gRPC) + /run/coolify/flux.sock (Laravel UDS).
 ```
 
 Builder has no long-lived unit; each build runs under `coolify-build-<request_id>.service` (transient, cleaned by systemd on exit or by `resume_or_reap` on next start).
@@ -404,17 +390,32 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 
 | Var | Default | Role |
 | --- | --- | --- |
-| `COOLIFY_COOLD_HOST_MGMT_IP` | required | wg0 mgmt IP |
-| `COOLIFY_COOLD_NAMESPACES` | `default:coolify-default-mesh:0.0.0.0` | `<name>:<network>:<gateway-ip>,…` |
-| `COOLIFY_COOLD_ASSIGNMENT_URL` | — | Hosted-cloud mode: Laravel endpoint coold calls before each flux connection to receive the current flux URL. |
-| `COOLIFY_COOLD_FLUX_URL` | — | Static flux URL for self-hosted/private mode; used when `COOLIFY_COOLD_ASSIGNMENT_URL` is unset. |
-| `COOLIFY_COOLD_BUILDER_ENABLED` | unset | Advertise `"builder"` cap in Hello |
-| `COOLIFY_COOLD_API_BIND` | unset | wg0:8443 firewall REST (unset = disabled) |
-| `COOLIFY_COOLD_API_TOKEN_FILE` | unset | Required when API bind set |
-| `COOLIFY_COOLD_TLS_CERT` / `COOLIFY_COOLD_TLS_KEY` | unset | Enables HTTPS on firewall API |
-| `COOLIFY_COOLD_RULES_PATH` / `COOLIFY_COOLD_BRIDGE_RULES_PATH` | `/etc/coolify/allow.rules` / `.nft` | Snapshot paths |
-| `COOLIFY_COOLD_RECONCILE_INTERVAL` | `2s` | Reconcile cadence |
-| `COOLIFY_COOLD_DNS_ZONE` / `COOLIFY_COOLD_DNS_UPSTREAM` | `coolify.internal` / `1.1.1.1:53` | DNS |
+| `COOLIFY_COOLD_HOST_MGMT_IP` | required | wg0 mgmt IP / host identity used in local state |
+| `COOLIFY_COOLD_PODMAN_SOCKET` | `/run/podman/podman.sock` | Local Podman Unix socket |
+| `COOLIFY_COOLD_CORROSION_URL` | `http://127.0.0.1:8080` | Local Corrosion HTTP API |
+| `COOLIFY_COOLD_NAMESPACES` | empty | `<name>:<network>:<gateway-ip>,…`; empty = no managed namespaces/DNS skipped |
+| `COOLIFY_COOLD_RECONCILE_INTERVAL` | `2s` | Service endpoint reconcile cadence |
+| `COOLIFY_COOLD_LOG_LEVEL` | `info` | tracing EnvFilter |
+| `COOLIFY_COOLD_DNS_ZONE` | `coolify.internal` | Authoritative cluster DNS zone |
+| `COOLIFY_COOLD_DNS_UPSTREAM` | `1.1.1.1:53` | Resolver for out-of-zone queries |
+| `COOLIFY_COOLD_API_BIND` | unset | Firewall REST bind address; unset disables local REST |
+| `COOLIFY_COOLD_API_TOKEN_FILE` | unset | Required when API bind is set |
+| `COOLIFY_COOLD_TLS_CERT` / `COOLIFY_COOLD_TLS_KEY` | unset | Enables HTTPS on firewall API when both are set |
+| `COOLIFY_COOLD_RULES_PATH` | `/etc/coolify/allow.rules` | iptables allow snapshot |
+| `COOLIFY_COOLD_BRIDGE_RULES_PATH` | `/etc/coolify/allow.nft` | nft bridge-family allow snapshot |
+| `COOLIFY_COOLD_CHAIN_NAME` | `COOLIFY-ALLOW` | iptables chain coold owns |
+| `COOLIFY_COOLD_FLUX_URL` | unset | Static flux URL for self-hosted/private mode |
+| `COOLIFY_COOLD_ASSIGNMENT_URL` | unset | Hosted-cloud assignment endpoint; returns current flux URL |
+| `COOLIFY_COOLD_HOST_JWT_PATH` | `/etc/coolify/host-jwt` | Per-host JWT for outbound gRPC |
+| `COOLIFY_COOLD_GRPC_DISABLED` | `false` | Disable outbound gRPC even when flux URL/assignment is set |
+| `COOLIFY_COOLD_BUILDER_ENABLED` | `false` | Advertise `"builder"` cap in Hello |
+| `COOLIFY_COOLD_BUILDER_WORK_DIR` | `/var/lib/coolify-builder/work` | Per-build scratch/result root |
+| `COOLIFY_COOLD_BUILDER_CAPACITY` | `2` | Concurrent builds accepted by this host |
+| `COOLIFY_COOLD_BUILDER_BIN` | `/usr/local/bin/builder` | Builder binary coold spawns |
+| `COOLIFY_COOLD_BUILDER_TIMEOUT_SECS` | `1800` | RuntimeMaxSec per build scope |
+| `COOLIFY_COOLD_BUILDER_MEMORY_MAX` | `2G` | MemoryMax per build scope |
+| `COOLIFY_COOLD_BUILDER_CPU_QUOTA` | `200%` | CPUQuota per build scope |
+| `COOLIFY_COOLD_BUILDER_DENY_NETS` | empty | Extra comma-separated CIDRs denied to builder scopes |
 
 ### flux env vars
 
@@ -435,6 +436,7 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 | `COOLIFY_FLUX_PENDING_MAX` | `10000` | In-flight + landed cap |
 | `COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | Verifies coold stream JWT |
 | `COOLIFY_FLUX_LOG_LEVEL` | `info` | tracing EnvFilter |
+| `COOLIFY_FLUX_DISPATCH_TIMEOUT_SECS` | `30` | Config field for dispatch timeout; current coold-lane timeout constant is 10 s |
 
 ---
 
@@ -442,8 +444,8 @@ Builder has no long-lived unit; each build runs under `coolify-build-<request_id
 
 Live infra, all `#[ignore]`. Run with `--ignored --nocapture --test-threads=1`. `.env` auto-loaded.
 
-- **`builder.rs`** — Hetzner-provisioned. 2 VMs (A = central + builder, B = coold-only). Runs `coolify init apply`, exercises dispatch / cancel / restart / artifact-perm on shared cluster. Single `builder_lifecycle` test.
-- **`install.rs`** — Hetzner-provisioned. Networking assertions post `coolify init apply`. VMs destroyed on drop.
+- **`builder.rs`** — Hetzner-provisioned. 2 VMs (A = builder-capable, B = coold-only). Exercises dispatch / cancel / restart / artifact-perm on a shared cluster. Single `builder_lifecycle` test.
+- **`install.rs`** — Hetzner-provisioned. Networking assertions after `coolify init bootstrap`. VMs destroyed on drop.
 
 Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_CLI_BIN`, optional location/image/server-type.
 
@@ -454,19 +456,21 @@ Env: `HETZNER_TOKEN`, `HETZNER_PROJECT`, `SSH_KEY`, `COOLIFY_CLI_BIN`, optional 
 - No Compose parser in coold (Laravel-side).
 - No Dockerfile / Buildpacks / Nixpacks in coold (builder + builder-core own these).
 - No flux, no deploy state machine, no ingress templating, no RBAC, no audit, no secret storage.
-- No raw podman passthrough. Enumerated verbs only.
+- No raw podman passthrough. Enumerated verbs only; current implemented verbs are deliberately minimal.
 - No IPv6 (AAAA → NODATA).
 - No WireGuard peer management.
 
 
-### Flux stream sync
+### Flux stream registry
 
-Connected agents become visible through this flow:
+When registry reporting is configured, connected agents become visible through
+this flow:
 
 ```txt
-coold connects → flux streams → POST /api/v1/servers/sync-streams → SQLite servers → live container endpoint
+coold connects → flux Streams map → POST /api/v1/internal/agent-connections/upsert
+flux heartbeat → POST /api/v1/internal/fluxs/heartbeat
+disconnect → POST /api/v1/internal/agent-connections/disconnect
 ```
 
-The sync endpoint creates or updates servers by flux `host_id`, stores
-capabilities, sets `last_seen_at`, marks the server online, and records an
-event.
+Flux reports host `capabilities`, `builder_capacity`, optional `coold_version`,
+connection/disconnection reasons, and aggregate stream counts to Laravel.
