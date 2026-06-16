@@ -496,7 +496,8 @@ mod tests {
         FirewallFlags {
             ssh: SshMeshFlags {
                 nodes: vec!["h1".into()],
-                ssh_key: "test-key".into(),
+                ssh_key: Some("test-key".into()),
+                ssh_config: None,
                 ssh_user: "root".into(),
                 ssh_port: 22,
                 ssh_passphrase_prompt: false,

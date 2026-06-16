@@ -299,7 +299,7 @@ fn build_desired(
     allow_replace: bool,
     allow_nightly: bool,
 ) -> Result<DesiredMesh> {
-    base.ssh.validate_ssh_key()?;
+    base.ssh.validate_ssh_access()?;
     validate_namespaces(&base.mesh.namespaces)?;
     let nodes = clean_hosts(&base.ssh.nodes);
     let new_nodes = clean_hosts(&new_nodes);

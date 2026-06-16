@@ -12,7 +12,10 @@ pub struct SshMeshFlags {
     pub nodes: Vec<String>,
 
     #[arg(long)]
-    pub ssh_key: PathBuf,
+    pub ssh_key: Option<PathBuf>,
+
+    #[arg(long)]
+    pub ssh_config: Option<PathBuf>,
 
     #[arg(long, default_value = "root")]
     pub ssh_user: String,
@@ -36,12 +39,12 @@ impl SshMeshFlags {
         if self.nodes.is_empty() {
             bail!("--nodes is required");
         }
-        self.validate_ssh_key()
+        self.validate_ssh_access()
     }
 
-    pub fn validate_ssh_key(&self) -> Result<()> {
-        if self.ssh_key.as_os_str().is_empty() {
-            bail!("--ssh-key is required");
+    pub fn validate_ssh_access(&self) -> Result<()> {
+        if self.ssh_key.is_none() && self.ssh_config.is_none() {
+            bail!("--ssh-key or --ssh-config is required");
         }
         Ok(())
     }
@@ -58,6 +61,7 @@ impl SshMeshFlags {
         }
         SshClient {
             key: self.ssh_key.clone(),
+            config: self.ssh_config.clone(),
             timeout: self.timeout(),
         }
     }
@@ -77,7 +81,8 @@ fn parse_duration(s: &str) -> Option<Duration> {
 
 #[derive(Debug, Clone)]
 pub struct SshClient {
-    key: PathBuf,
+    key: Option<PathBuf>,
+    config: Option<PathBuf>,
     timeout: Duration,
 }
 
@@ -105,18 +110,14 @@ impl Runner for SshClient {
             format!("sudo -n bash -lc {}", shell_escape::escape(cmd.into()))
         };
         let mut c = Command::new("ssh");
-        c.arg("-i")
-            .arg(&self.key)
-            .arg("-p")
-            .arg(ssh_port.to_string())
-            .arg("-o")
-            .arg("StrictHostKeyChecking=no")
-            .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
-            .arg("-o")
-            .arg(format!("ConnectTimeout={}", self.timeout.as_secs().max(1)))
-            .arg(dest)
-            .arg(remote_cmd);
+        c.args(ssh_command_args(
+            self.config.as_ref(),
+            self.key.as_ref(),
+            self.timeout,
+            ssh_port,
+            &dest,
+            &remote_cmd,
+        ));
         let output = timeout(self.timeout + Duration::from_secs(5), c.output())
             .await
             .context("ssh command timed out")?
@@ -137,6 +138,53 @@ impl Runner for SshClient {
         }
         Ok(out)
     }
+}
+
+fn ssh_command_args(
+    config: Option<&PathBuf>,
+    key: Option<&PathBuf>,
+    timeout: Duration,
+    port: u16,
+    dest: &str,
+    remote_cmd: &str,
+) -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(config) = config {
+        args.extend(["-F".into(), config.display().to_string()]);
+    } else {
+        let key = key.expect("ssh key is required when ssh config is not provided");
+        args.extend([
+            "-i".into(),
+            key.display().to_string(),
+            "-p".into(),
+            port.to_string(),
+        ]);
+    }
+
+    args.extend([
+        "-o".into(),
+        "StrictHostKeyChecking=no".into(),
+        "-o".into(),
+        "UserKnownHostsFile=/dev/null".into(),
+        "-o".into(),
+        format!("ConnectTimeout={}", timeout.as_secs().max(1)),
+    ]);
+
+    if config.is_none() {
+        args.extend([
+            "-o".into(),
+            "ControlMaster=auto".into(),
+            "-o".into(),
+            "ControlPath=/tmp/coolify-ssh-%C".into(),
+            "-o".into(),
+            "ControlPersist=60s".into(),
+        ]);
+    }
+
+    args.extend([dest.into(), remote_cmd.into()]);
+
+    args
 }
 
 pub fn split_host_port(host: &str, default_port: u16) -> (String, u16) {
@@ -225,6 +273,50 @@ mod tests {
         assert_eq!(
             split_host_port("example.com", 22),
             ("example.com".into(), 22)
+        );
+    }
+
+    #[test]
+    fn ssh_args_use_short_lived_control_master() {
+        let args = ssh_command_args(
+            None,
+            Some(&PathBuf::from("/tmp/key")),
+            Duration::from_secs(30),
+            2222,
+            "user@example.com",
+            "true",
+        );
+
+        expect_args_contains(&args, "ControlMaster=auto");
+        expect_args_contains(&args, "ControlPath=/tmp/coolify-ssh-%C");
+        expect_args_contains(&args, "ControlPersist=60s");
+        expect_args_contains(&args, "ConnectTimeout=30");
+    }
+
+    #[test]
+    fn ssh_args_can_use_config_file() {
+        let args = ssh_command_args(
+            Some(&PathBuf::from("/tmp/ssh.config")),
+            None,
+            Duration::from_secs(30),
+            2222,
+            "lima-coold-dev",
+            "true",
+        );
+
+        expect_args_contains(&args, "-F");
+        expect_args_contains(&args, "/tmp/ssh.config");
+        assert!(!args.iter().any(|arg| arg == "-i"));
+        assert!(!args.iter().any(|arg| arg == "-p"));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "ControlPath=/tmp/coolify-ssh-%C"));
+    }
+
+    fn expect_args_contains(args: &[String], expected: &str) {
+        assert!(
+            args.iter().any(|arg| arg == expected),
+            "missing {expected} in {args:?}"
         );
     }
 }
