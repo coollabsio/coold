@@ -3,6 +3,9 @@ use std::net::Ipv4Addr;
 pub const DEFAULT_COOLD_DNS_ZONE: &str = "coolify.internal";
 pub const COOLIFY_COOLD_API_PORT: u16 = 8443;
 pub const COOLIFY_COOLD_API_TOKEN_PATH: &str = "/etc/coolify/api-token";
+pub const MESH_DNS_ANCHOR_SERVICE: &str = "coolify-mesh-dns-anchor.service";
+pub const MESH_DNS_RESOLVER_SERVICE: &str = "coolify-mesh-dns-resolver.service";
+pub const MESH_DNS_ANCHOR_IMAGE: &str = "docker.io/library/alpine:3.20";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CooldNamespace {
@@ -91,9 +94,63 @@ pub fn service_unit(
     } else {
         (String::new(), String::new())
     };
+    let mesh_dns_units = if namespaces.is_empty() {
+        String::new()
+    } else {
+        format!(" {MESH_DNS_ANCHOR_SERVICE} {MESH_DNS_RESOLVER_SERVICE}")
+    };
     format!(
-        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{api_env}{flux_env}{builder_env}{builder_pre}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service{mesh_dns_units}\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service{mesh_dns_units}\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{api_env}{flux_env}{builder_env}{builder_pre}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
     )
+}
+
+pub fn mesh_dns_anchor_unit(namespaces: &[CooldNamespace]) -> String {
+    let starts = namespaces
+        .iter()
+        .map(|namespace| {
+            let name = mesh_dns_anchor_container_name(&namespace.name);
+            format!(
+                "podman run -d --replace --name {name} --network {} --label io.coolify.managed=true --label io.coolify.role=mesh-dns-anchor --label io.coolify.namespace={} {MESH_DNS_ANCHOR_IMAGE} sleep infinity >/dev/null",
+                namespace.network, namespace.name
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let stops = namespaces
+        .iter()
+        .map(|namespace| {
+            format!(
+                "podman rm -f {} >/dev/null 2>&1 || true",
+                mesh_dns_anchor_container_name(&namespace.name)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    format!(
+        "[Unit]\nDescription=Coolify mesh DNS anchor containers\nAfter=network-online.target podman.socket\nRequires=podman.socket\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -eu -c '{starts}'\nExecStop=/bin/sh -c '{stops}'\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+pub fn mesh_dns_resolver_unit(namespaces: &[CooldNamespace]) -> String {
+    let commands = namespaces
+        .iter()
+        .map(|namespace| {
+            format!(
+                "iface=$(podman network inspect {} --format '{{{{.NetworkInterface}}}}' 2>/dev/null || true); if [ -n \"$iface\" ]; then resolvectl dns \"$iface\" {} || true; resolvectl domain \"$iface\" '~{}' || true; resolvectl default-route \"$iface\" false || true; fi",
+                namespace.network, namespace.bridge_gateway, DEFAULT_COOLD_DNS_ZONE
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    format!(
+        "[Unit]\nDescription=Configure Coolify mesh DNS resolver\nAfter=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\nWants=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -eu -c 'command -v resolvectl >/dev/null 2>&1 || exit 0; {commands}'\n\n[Install]\nWantedBy=multi-user.target\n"
+    )
+}
+
+fn mesh_dns_anchor_container_name(namespace: &str) -> String {
+    format!("coolify-mesh-dns-anchor-{namespace}")
 }
 
 pub fn install_command(version: &str) -> String {
@@ -183,9 +240,51 @@ mod tests {
             "Environment=COOLIFY_COOLD_API_BIND=100.64.0.5:8443",
             "Environment=COOLIFY_COOLD_API_TOKEN_FILE=/etc/coolify/api-token",
             "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW",
-            "Wants=corrosion.service",
-            "After=corrosion.service network-online.target podman.socket",
+            "Wants=corrosion.service coolify-mesh-dns-anchor.service coolify-mesh-dns-resolver.service",
+            "After=corrosion.service network-online.target podman.socket coolify-mesh-fw.service coolify-mesh-dns-anchor.service coolify-mesh-dns-resolver.service",
             "ExecStart=/usr/local/bin/coold",
+        ] {
+            assert!(got.contains(want), "missing {want} in:\n{got}");
+        }
+    }
+
+    #[test]
+    fn mesh_dns_anchor_unit_keeps_network_gateway_present() {
+        let got = mesh_dns_anchor_unit(&[CooldNamespace {
+            name: "default".into(),
+            network: "coolify-default-mesh".into(),
+            bridge_gateway: "10.210.0.1".parse().unwrap(),
+        }]);
+
+        for want in [
+            "Description=Coolify mesh DNS anchor containers",
+            "Requires=podman.socket",
+            "podman run -d --replace --name coolify-mesh-dns-anchor-default",
+            "--network coolify-default-mesh",
+            "--label io.coolify.role=mesh-dns-anchor",
+            "docker.io/library/alpine:3.20 sleep infinity",
+            "podman rm -f coolify-mesh-dns-anchor-default",
+        ] {
+            assert!(got.contains(want), "missing {want} in:\n{got}");
+        }
+    }
+
+    #[test]
+    fn mesh_dns_resolver_unit_routes_coolify_internal_to_mesh_gateway() {
+        let got = mesh_dns_resolver_unit(&[CooldNamespace {
+            name: "default".into(),
+            network: "coolify-default-mesh".into(),
+            bridge_gateway: "10.210.0.1".parse().unwrap(),
+        }]);
+
+        for want in [
+            "Description=Configure Coolify mesh DNS resolver",
+            "After=systemd-resolved.service coolify-mesh-dns-anchor.service",
+            "command -v resolvectl >/dev/null 2>&1 || exit 0",
+            "podman network inspect coolify-default-mesh --format '{{.NetworkInterface}}'",
+            "resolvectl dns \"$iface\" 10.210.0.1 || true",
+            "resolvectl domain \"$iface\" '~coolify.internal' || true",
+            "resolvectl default-route \"$iface\" false || true",
         ] {
             assert!(got.contains(want), "missing {want} in:\n{got}");
         }

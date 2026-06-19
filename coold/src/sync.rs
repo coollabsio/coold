@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinError;
 use tokio::time::{sleep, MissedTickBehavior};
 use tracing::{debug, info, warn};
@@ -14,6 +14,7 @@ use tracing::{debug, info, warn};
 use crate::{
     config::Config,
     corrosion::{CorrosionClient, Statement},
+    grpc::proto::ResourceStatusUpdate,
     model::{diff, Delta, Endpoint},
     podman::{
         events::{self, EventMessage},
@@ -24,13 +25,14 @@ use crate::{
 pub async fn run(config: Config) -> Result<()> {
     let podman = PodmanClient::new(config.podman_socket.clone());
     let corrosion = CorrosionClient::new(&config.corrosion_url)?;
+    let (tx, rx) = mpsc::channel::<EventMessage>(256);
+    let (resource_status_tx, _) = broadcast::channel(256);
     let ctx = Arc::new(SyncContext {
         config,
         podman,
         corrosion,
+        resource_status_tx,
     });
-
-    let (tx, rx) = mpsc::channel::<EventMessage>(256);
 
     let events_handle = {
         let ctx = ctx.clone();
@@ -65,7 +67,8 @@ pub async fn run(config: Config) -> Result<()> {
     let grpc_handle = {
         let config = ctx.config.clone();
         let podman = ctx.podman.clone();
-        tokio::spawn(async move { crate::grpc::run(config, podman).await })
+        let resource_status_tx = ctx.resource_status_tx.clone();
+        tokio::spawn(async move { crate::grpc::run(config, podman, resource_status_tx).await })
     };
 
     drop(tx);
@@ -108,6 +111,7 @@ struct SyncContext {
     config: Config,
     podman: PodmanClient,
     corrosion: CorrosionClient,
+    resource_status_tx: broadcast::Sender<ResourceStatusUpdate>,
 }
 
 async fn run_event_trigger(
@@ -158,6 +162,13 @@ async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
         .transaction(&statements)
         .await
         .context("apply corrosion transaction")?;
+
+    for update in resource_status_updates_from_deltas(&ctx.config.host_mgmt_ip, &deltas) {
+        if ctx.resource_status_tx.send(update).is_err() {
+            debug!("no flux status subscribers; resource status update dropped");
+        }
+    }
+
     Ok(deltas.len())
 }
 
@@ -250,6 +261,33 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
     Ok(out)
 }
 
+fn resource_status_updates_from_deltas(
+    host_mgmt_ip: &str,
+    deltas: &[Delta],
+) -> Vec<ResourceStatusUpdate> {
+    deltas
+        .iter()
+        .map(|delta| match delta {
+            Delta::Upsert(endpoint) => ResourceStatusUpdate {
+                resource_type: "application".into(),
+                host_id: host_mgmt_ip.into(),
+                container_id: endpoint.container_id.clone(),
+                container_name: endpoint.container_name.clone(),
+                status: endpoint.state.clone(),
+                status_message: "Status received from coold through flux.".into(),
+            },
+            Delta::Delete { container_id } => ResourceStatusUpdate {
+                resource_type: "application".into(),
+                host_id: host_mgmt_ip.into(),
+                container_id: container_id.clone(),
+                container_name: String::new(),
+                status: "removed".into(),
+                status_message: "Container removed from coold host.".into(),
+            },
+        })
+        .collect()
+}
+
 fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -289,4 +327,57 @@ fn build_statements(deltas: &[Delta]) -> Vec<Statement> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod resource_status_tests {
+    use super::*;
+    use crate::grpc::proto::ResourceStatusUpdate;
+
+    fn endpoint(id: &str, name: &str, state: &str) -> Endpoint {
+        Endpoint {
+            container_id: id.into(),
+            container_name: name.into(),
+            namespace: "default".into(),
+            host_mgmt_ip: "100.64.0.5".into(),
+            container_ip: "10.210.0.2".into(),
+            state: state.into(),
+            health: "unknown".into(),
+        }
+    }
+
+    #[test]
+    fn resource_status_updates_include_upserts_and_deletes() {
+        let updates = resource_status_updates_from_deltas(
+            "100.64.0.5",
+            &[
+                Delta::Upsert(endpoint("abc", "web", "running")),
+                Delta::Delete {
+                    container_id: "gone".into(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            updates,
+            vec![
+                ResourceStatusUpdate {
+                    resource_type: "application".into(),
+                    host_id: "100.64.0.5".into(),
+                    container_id: "abc".into(),
+                    container_name: "web".into(),
+                    status: "running".into(),
+                    status_message: "Status received from coold through flux.".into(),
+                },
+                ResourceStatusUpdate {
+                    resource_type: "application".into(),
+                    host_id: "100.64.0.5".into(),
+                    container_id: "gone".into(),
+                    container_name: String::new(),
+                    status: "removed".into(),
+                    status_message: "Container removed from coold host.".into(),
+                },
+            ]
+        );
+    }
 }

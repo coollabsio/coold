@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod envelope;
 mod registry;
+mod resource_status;
 mod routing;
 mod state;
 mod unix_bridge;
@@ -65,6 +66,7 @@ mod grpc_server {
         config::Config,
         envelope::{BuildResponseBody, ResponseBody},
         registry::RegistryClient,
+        resource_status::ResourceStatusPublisher,
         state::{Pending, PendingKind, ResponseData, StreamHandle, Streams},
     };
 
@@ -109,11 +111,16 @@ mod grpc_server {
         }
 
         let registry = RegistryClient::from_config(&config);
+        let resource_status = ResourceStatusPublisher::new(
+            config.laravel_api_url.clone(),
+            config.laravel_api_token.clone(),
+        );
         let svc = FluxAgent {
             config,
             streams,
             pending,
             registry,
+            resource_status,
         };
 
         info!(%addr, "gRPC server listening");
@@ -129,6 +136,7 @@ mod grpc_server {
         streams: Streams,
         pending: Pending,
         registry: Option<RegistryClient>,
+        resource_status: ResourceStatusPublisher,
     }
 
     type ServerMsgStream = Pin<Box<dyn Stream<Item = Result<ServerMsg, Status>> + Send + 'static>>;
@@ -180,6 +188,7 @@ mod grpc_server {
             let streams = self.streams.clone();
             let pending = self.pending.clone();
             let registry = self.registry.clone();
+            let resource_status = self.resource_status.clone();
             let host_id_clone = host_id.clone();
             let jwt_caps_clone = jwt_caps.clone();
             let mut inbound = request.into_inner();
@@ -192,6 +201,14 @@ mod grpc_server {
                             payload: Some(client_msg::Payload::Response(resp)),
                         }) => {
                             deliver_response(&pending, resp);
+                        }
+                        Ok(ClientMsg {
+                            payload: Some(client_msg::Payload::ResourceStatusUpdate(update)),
+                        }) => {
+                            let publisher = resource_status.clone();
+                            tokio::spawn(async move {
+                                publisher.publish(update).await;
+                            });
                         }
                         Ok(ClientMsg {
                             payload: Some(client_msg::Payload::Hello(h)),

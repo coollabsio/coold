@@ -12,6 +12,7 @@ message ClientMsg {
     oneof payload {
         Hello hello = 1;
         Response response = 2;
+        ResourceStatusUpdate resource_status_update = 3;
     }
 }
 
@@ -50,6 +51,15 @@ message Response {
         BuildResponseBody  build           = 20;
         Error              error           = 100;
     }
+}
+
+message ResourceStatusUpdate {
+    string resource_type = 1;
+    string host_id = 2;
+    string container_id = 3;
+    string container_name = 4;
+    string status = 5;
+    string status_message = 6;
 }
 
 message Error {

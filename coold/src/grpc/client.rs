@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
 use tonic::transport::Channel;
@@ -15,7 +15,9 @@ use tracing::{info, warn};
 use crate::builder::{BuilderCtx, BuilderSettings};
 use crate::config::{Config, VERSION};
 use crate::grpc::handlers::handle;
-use crate::grpc::proto::{agent_client::AgentClient, client_msg, ClientMsg, Hello};
+use crate::grpc::proto::{
+    agent_client::AgentClient, client_msg, ClientMsg, Hello, ResourceStatusUpdate,
+};
 use crate::podman::PodmanClient;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +60,11 @@ async fn load_host_jwt(path: &Path) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
-pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
+pub async fn run(
+    config: Config,
+    podman: PodmanClient,
+    resource_status_tx: broadcast::Sender<ResourceStatusUpdate>,
+) -> Result<()> {
     if config.grpc_disabled || (config.flux_url.is_none() && config.assignment_url.is_none()) {
         info!("grpc transport disabled; skipping");
         std::future::pending::<()>().await;
@@ -137,7 +143,16 @@ pub async fn run(config: Config, podman: PodmanClient) -> Result<()> {
             }
         };
 
-        match connect_and_serve(&url, &jwt, &config, &podman, builder_ctx.clone()).await {
+        match connect_and_serve(
+            &url,
+            &jwt,
+            &config,
+            &podman,
+            builder_ctx.clone(),
+            resource_status_tx.subscribe(),
+        )
+        .await
+        {
             Ok(()) => {
                 warn!("grpc stream closed cleanly; reconnecting");
                 backoff = Duration::from_secs(1);
@@ -207,12 +222,14 @@ async fn resolve_flux_url(
     })
 }
 
+#[allow(clippy::result_large_err)]
 async fn connect_and_serve(
     url: &str,
     jwt: &str,
     config: &Config,
     podman: &PodmanClient,
     builder_ctx: Option<Arc<BuilderCtx>>,
+    mut resource_status_rx: broadcast::Receiver<ResourceStatusUpdate>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
         .context("invalid flux URL")?
@@ -259,6 +276,32 @@ async fn connect_and_serve(
     .await
     .context("send Hello")?;
 
+    let status_tx = tx.clone();
+    let status_forwarder = tokio::spawn(async move {
+        loop {
+            match resource_status_rx.recv().await {
+                Ok(update) => {
+                    if status_tx
+                        .send(ClientMsg {
+                            payload: Some(client_msg::Payload::ResourceStatusUpdate(update)),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    warn!(
+                        skipped,
+                        "lagged while forwarding resource status updates to flux"
+                    );
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
     let outbound = ReceiverStream::new(rx);
     let mut inbound = client
         .stream(outbound)
@@ -282,6 +325,8 @@ async fn connect_and_serve(
             handle(request_id, command, &podman, builder_ctx, tx).await;
         });
     }
+
+    status_forwarder.abort();
 
     Ok(())
 }
