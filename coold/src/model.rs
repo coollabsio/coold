@@ -1,6 +1,20 @@
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerStatus {
+    pub container_id: String,
+    pub container_name: String,
+    pub image: String,
+    pub state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainerStatusDelta {
+    Upsert(ContainerStatus),
+    Delete { container_id: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub container_id: String,
     pub container_name: String,
@@ -41,6 +55,33 @@ pub fn diff(
     for id in current.keys() {
         if !desired.contains_key(id) {
             out.push(Delta::Delete {
+                container_id: id.clone(),
+            });
+        }
+    }
+
+    out
+}
+
+/// Diff all Podman containers for host-level status reporting. Unlike
+/// `diff`, this intentionally includes containers outside managed mesh
+/// networks so Coolify can track ingress and future non-managed containers.
+pub fn diff_container_statuses(
+    desired: &HashMap<String, ContainerStatus>,
+    current: &HashMap<String, ContainerStatus>,
+) -> Vec<ContainerStatusDelta> {
+    let mut out = Vec::new();
+
+    for (id, status) in desired {
+        match current.get(id) {
+            Some(existing) if existing == status => {}
+            _ => out.push(ContainerStatusDelta::Upsert(status.clone())),
+        }
+    }
+
+    for id in current.keys() {
+        if !desired.contains_key(id) {
+            out.push(ContainerStatusDelta::Delete {
                 container_id: id.clone(),
             });
         }
@@ -118,5 +159,32 @@ mod tests {
         let deltas = diff(&desired, &current);
         assert_eq!(deltas.len(), 1);
         assert!(matches!(deltas[0], Delta::Upsert(_)));
+    }
+
+    fn container_status(id: &str, state: &str) -> ContainerStatus {
+        ContainerStatus {
+            container_id: id.into(),
+            container_name: format!("container-{id}"),
+            image: "docker.io/library/nginx:alpine".into(),
+            state: state.into(),
+        }
+    }
+
+    #[test]
+    fn diff_container_statuses_reports_all_container_changes() {
+        let mut desired = HashMap::new();
+        desired.insert("a".into(), container_status("a", "running"));
+        desired.insert("b".into(), container_status("b", "exited"));
+
+        let mut current = HashMap::new();
+        current.insert("a".into(), container_status("a", "created"));
+        current.insert("c".into(), container_status("c", "running"));
+
+        let deltas = diff_container_statuses(&desired, &current);
+
+        assert_eq!(deltas.len(), 3);
+        assert!(deltas.iter().any(|delta| matches!(delta, ContainerStatusDelta::Upsert(status) if status.container_id == "a" && status.state == "running")));
+        assert!(deltas.iter().any(|delta| matches!(delta, ContainerStatusDelta::Upsert(status) if status.container_id == "b" && status.state == "exited")));
+        assert!(deltas.iter().any(|delta| matches!(delta, ContainerStatusDelta::Delete { container_id } if container_id == "c")));
     }
 }

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinError;
 use tokio::time::{sleep, MissedTickBehavior};
 use tracing::{debug, info, warn};
@@ -15,7 +15,9 @@ use crate::{
     config::Config,
     corrosion::{CorrosionClient, Statement},
     grpc::proto::ResourceStatusUpdate,
-    model::{diff, Delta, Endpoint},
+    model::{
+        diff, diff_container_statuses, ContainerStatus, ContainerStatusDelta, Delta, Endpoint,
+    },
     podman::{
         events::{self, EventMessage},
         PodmanClient,
@@ -31,6 +33,7 @@ pub async fn run(config: Config) -> Result<()> {
         config,
         podman,
         corrosion,
+        container_status_snapshot: Mutex::new(HashMap::new()),
         resource_status_tx,
     });
 
@@ -111,6 +114,7 @@ struct SyncContext {
     config: Config,
     podman: PodmanClient,
     corrosion: CorrosionClient,
+    container_status_snapshot: Mutex<HashMap<String, ContainerStatus>>,
     resource_status_tx: broadcast::Sender<ResourceStatusUpdate>,
 }
 
@@ -145,6 +149,27 @@ async fn run_reconcile_loop(ctx: Arc<SyncContext>) -> Result<()> {
 }
 
 async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
+    let all_containers = desired_container_statuses(ctx)
+        .await
+        .context("fetch all podman container statuses")?;
+    let container_status_deltas = {
+        let mut current = ctx.container_status_snapshot.lock().await;
+        let deltas = diff_container_statuses(&all_containers, &current);
+        if !deltas.is_empty() {
+            *current = all_containers;
+        }
+        deltas
+    };
+
+    for update in container_resource_status_updates_from_deltas(
+        &ctx.config.host_mgmt_ip,
+        &container_status_deltas,
+    ) {
+        if ctx.resource_status_tx.send(update).is_err() {
+            debug!("no flux status subscribers; container status update dropped");
+        }
+    }
+
     let desired = desired_endpoints(ctx).await.context("fetch podman state")?;
     let current = ctx
         .corrosion
@@ -153,23 +178,59 @@ async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
         .context("fetch corrosion snapshot")?;
 
     let deltas = diff(&desired, &current);
-    if deltas.is_empty() {
-        return Ok(0);
+    if !deltas.is_empty() {
+        let statements = build_statements(&deltas);
+        ctx.corrosion
+            .transaction(&statements)
+            .await
+            .context("apply corrosion transaction")?;
     }
 
-    let statements = build_statements(&deltas);
-    ctx.corrosion
-        .transaction(&statements)
-        .await
-        .context("apply corrosion transaction")?;
+    Ok(deltas.len() + container_status_deltas.len())
+}
 
-    for update in resource_status_updates_from_deltas(&ctx.config.host_mgmt_ip, &deltas) {
-        if ctx.resource_status_tx.send(update).is_err() {
-            debug!("no flux status subscribers; resource status update dropped");
-        }
+/// Enumerate every container on the host, not just mesh-managed containers, so
+/// Coolify can receive status updates for ingress and future non-managed views.
+async fn desired_container_statuses(ctx: &SyncContext) -> Result<HashMap<String, ContainerStatus>> {
+    let containers = ctx.podman.list_containers().await?;
+    let mut out = HashMap::new();
+
+    for c in containers {
+        let inspect = ctx.podman.inspect_container(&c.id).await.ok();
+        let name = inspect
+            .as_ref()
+            .map(|inspect| inspect.name.trim_start_matches('/').to_string())
+            .filter(|name| !name.is_empty())
+            .or_else(|| {
+                c.names
+                    .first()
+                    .map(|name| name.trim_start_matches('/').to_string())
+                    .filter(|name| !name.is_empty())
+            })
+            .unwrap_or_else(|| c.id.clone());
+        let state = inspect
+            .as_ref()
+            .and_then(|inspect| inspect.state.as_ref())
+            .map(|state| state.status.to_lowercase())
+            .filter(|state| !state.is_empty())
+            .unwrap_or_else(|| c.state.to_lowercase());
+
+        out.insert(
+            c.id.clone(),
+            ContainerStatus {
+                container_id: c.id,
+                container_name: name,
+                image: c.image,
+                state: if state.is_empty() {
+                    "unknown".into()
+                } else {
+                    state
+                },
+            },
+        );
     }
 
-    Ok(deltas.len())
+    Ok(out)
 }
 
 /// Enumerate every container on every managed namespace's bridge network on
@@ -261,23 +322,23 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
     Ok(out)
 }
 
-fn resource_status_updates_from_deltas(
+fn container_resource_status_updates_from_deltas(
     host_mgmt_ip: &str,
-    deltas: &[Delta],
+    deltas: &[ContainerStatusDelta],
 ) -> Vec<ResourceStatusUpdate> {
     deltas
         .iter()
         .map(|delta| match delta {
-            Delta::Upsert(endpoint) => ResourceStatusUpdate {
-                resource_type: "application".into(),
+            ContainerStatusDelta::Upsert(status) => ResourceStatusUpdate {
+                resource_type: "container".into(),
                 host_id: host_mgmt_ip.into(),
-                container_id: endpoint.container_id.clone(),
-                container_name: endpoint.container_name.clone(),
-                status: endpoint.state.clone(),
-                status_message: "Status received from coold through flux.".into(),
+                container_id: status.container_id.clone(),
+                container_name: status.container_name.clone(),
+                status: status.state.clone(),
+                status_message: "Container state received from coold.".into(),
             },
-            Delta::Delete { container_id } => ResourceStatusUpdate {
-                resource_type: "application".into(),
+            ContainerStatusDelta::Delete { container_id } => ResourceStatusUpdate {
+                resource_type: "container".into(),
                 host_id: host_mgmt_ip.into(),
                 container_id: container_id.clone(),
                 container_name: String::new(),
@@ -334,50 +395,31 @@ mod resource_status_tests {
     use super::*;
     use crate::grpc::proto::ResourceStatusUpdate;
 
-    fn endpoint(id: &str, name: &str, state: &str) -> Endpoint {
-        Endpoint {
+    fn container_status(id: &str, name: &str, state: &str) -> ContainerStatus {
+        ContainerStatus {
             container_id: id.into(),
             container_name: name.into(),
-            namespace: "default".into(),
-            host_mgmt_ip: "100.64.0.5".into(),
-            container_ip: "10.210.0.2".into(),
+            image: "docker.io/library/nginx:alpine".into(),
             state: state.into(),
-            health: "unknown".into(),
         }
     }
 
     #[test]
-    fn resource_status_updates_include_upserts_and_deletes() {
-        let updates = resource_status_updates_from_deltas(
+    fn container_status_updates_are_generic_container_resources() {
+        let updates = container_resource_status_updates_from_deltas(
             "100.64.0.5",
             &[
-                Delta::Upsert(endpoint("abc", "web", "running")),
-                Delta::Delete {
+                ContainerStatusDelta::Upsert(container_status("abc", "coolify-v5-caddy", "exited")),
+                ContainerStatusDelta::Delete {
                     container_id: "gone".into(),
                 },
             ],
         );
 
-        assert_eq!(
-            updates,
-            vec![
-                ResourceStatusUpdate {
-                    resource_type: "application".into(),
-                    host_id: "100.64.0.5".into(),
-                    container_id: "abc".into(),
-                    container_name: "web".into(),
-                    status: "running".into(),
-                    status_message: "Status received from coold through flux.".into(),
-                },
-                ResourceStatusUpdate {
-                    resource_type: "application".into(),
-                    host_id: "100.64.0.5".into(),
-                    container_id: "gone".into(),
-                    container_name: String::new(),
-                    status: "removed".into(),
-                    status_message: "Container removed from coold host.".into(),
-                },
-            ]
-        );
+        assert_eq!(updates[0].resource_type, "container");
+        assert_eq!(updates[0].container_name, "coolify-v5-caddy");
+        assert_eq!(updates[0].status, "exited");
+        assert_eq!(updates[1].resource_type, "container");
+        assert_eq!(updates[1].status, "removed");
     }
 }

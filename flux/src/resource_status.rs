@@ -119,4 +119,28 @@ mod tests {
             "Status received from coold through flux."
         );
     }
+
+    #[test]
+    fn serializes_generic_container_status_payload_for_laravel_http() {
+        let payload = serde_json::to_string(&resource_status_payload(&ResourceStatusUpdate {
+            resource_type: "container".into(),
+            host_id: "100.64.0.5".into(),
+            container_id: "abc".into(),
+            container_name: "coolify-v5-caddy".into(),
+            status: "exited".into(),
+            status_message: "Container state received from coold.".into(),
+        }))
+        .unwrap();
+        let json: Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(json["resource_type"], "container");
+        assert_eq!(json["host_id"], "100.64.0.5");
+        assert_eq!(json["container_id"], "abc");
+        assert_eq!(json["container_name"], "coolify-v5-caddy");
+        assert_eq!(json["status"], "exited");
+        assert_eq!(
+            json["status_message"],
+            "Container state received from coold."
+        );
+    }
 }
