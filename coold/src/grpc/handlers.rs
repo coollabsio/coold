@@ -243,6 +243,10 @@ async fn apply_caddy_ingress(
 }
 
 async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) -> Result<String> {
+    let mesh_dns = mesh_network_gateway(mesh_network)
+        .await
+        .context("get mesh network DNS")?;
+
     if run_logged_command(
         "check existing Caddy ingress container",
         Command::new("podman").args(["container", "exists", "coolify-v5-caddy"]),
@@ -250,35 +254,25 @@ async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) 
     .await
     .is_ok()
     {
-        return run_logged_command(
-            "reload Caddy ingress",
-            Command::new("podman").args([
-                "exec",
-                "coolify-v5-caddy",
-                "caddy",
-                "reload",
-                "--config",
-                "/etc/caddy/Caddyfile",
-            ]),
+        run_logged_command(
+            "recreate Caddy ingress",
+            Command::new("podman").args(["rm", "-f", "coolify-v5-caddy"]),
         )
         .await
-        .map(|output| {
-            if output.trim().is_empty() {
-                "Caddy ingress applied.".into()
-            } else {
-                output
-            }
-        })
-        .context("reload Caddy ingress");
+        .context("recreate Caddy ingress")?;
     }
 
-    let args = start_caddy_args(base_path, mesh_network);
+    let args = start_caddy_args(base_path, mesh_network, &mesh_dns);
     let output = run_logged_command(
         "start Caddy ingress",
         Command::new("podman").args(args.iter().map(String::as_str)),
     )
     .await
     .context("start Caddy ingress")?;
+
+    ensure_caddy_mesh_firewall(mesh_network)
+        .await
+        .context("allow Caddy ingress to reach mesh containers")?;
 
     Ok(if output.trim().is_empty() {
         "Caddy ingress applied.".into()
@@ -287,7 +281,111 @@ async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) 
     })
 }
 
-fn start_caddy_args(base_path: &std::path::Path, mesh_network: &str) -> Vec<String> {
+async fn mesh_network_gateway(mesh_network: &str) -> Result<String> {
+    inspect_mesh_network_value(
+        mesh_network,
+        "{{(index .Subnets 0).Gateway}}",
+        "mesh network gateway",
+    )
+    .await
+}
+
+async fn mesh_network_subnet(mesh_network: &str) -> Result<String> {
+    inspect_mesh_network_value(
+        mesh_network,
+        "{{(index .Subnets 0).Subnet}}",
+        "mesh network subnet",
+    )
+    .await
+}
+
+async fn inspect_mesh_network_value(
+    mesh_network: &str,
+    format: &str,
+    value_name: &str,
+) -> Result<String> {
+    let value = run_logged_command(
+        value_name,
+        Command::new("podman").args(["network", "inspect", mesh_network, "--format", format]),
+    )
+    .await
+    .with_context(|| format!("inspect Caddy {value_name}"))?;
+
+    if value.trim().is_empty() {
+        return Err(anyhow!("{value_name} is empty"));
+    }
+
+    Ok(value.trim().to_string())
+}
+
+async fn container_ip(container: &str, network: &str) -> Result<String> {
+    let value = run_logged_command(
+        "inspect Caddy ingress container IP",
+        Command::new("podman").args([
+            "inspect",
+            container,
+            "--format",
+            &format!("{{{{(index .NetworkSettings.Networks \"{network}\").IPAddress}}}}"),
+        ]),
+    )
+    .await
+    .context("inspect Caddy ingress container IP")?;
+
+    if value.trim().is_empty() {
+        return Err(anyhow!("Caddy ingress container IP is empty"));
+    }
+
+    Ok(value.trim().to_string())
+}
+
+async fn ensure_caddy_mesh_firewall(mesh_network: &str) -> Result<()> {
+    let caddy_ip = container_ip("coolify-v5-caddy", mesh_network).await?;
+    let mesh_subnet = mesh_network_subnet(mesh_network).await?;
+    let source = format!("{caddy_ip}/32");
+    let iptables_args = caddy_iptables_allow_args(&source, &mesh_subnet);
+
+    if run_logged_command(
+        "check Caddy ingress iptables allow",
+        Command::new("iptables").args(iptables_args.iter().map(String::as_str)),
+    )
+    .await
+    .is_err()
+    {
+        let insert_args = caddy_iptables_insert_args(&source, &mesh_subnet);
+        run_logged_command(
+            "allow Caddy ingress through iptables",
+            Command::new("iptables").args(insert_args.iter().map(String::as_str)),
+        )
+        .await
+        .context("allow Caddy ingress through iptables")?;
+    }
+
+    let nft_rule = caddy_nft_allow_rule(&caddy_ip, &mesh_subnet);
+    let existing_rules = run_logged_command(
+        "list Caddy ingress bridge firewall rules",
+        Command::new("nft").args(["list", "chain", "bridge", "coolify_bridge", "coolify_allow"]),
+    )
+    .await
+    .unwrap_or_default();
+
+    if !existing_rules.contains(&nft_rule) {
+        let nft_args = caddy_nft_add_args(&caddy_ip, &mesh_subnet);
+        run_logged_command(
+            "allow Caddy ingress through bridge firewall",
+            Command::new("nft").args(nft_args.iter().map(String::as_str)),
+        )
+        .await
+        .context("allow Caddy ingress through bridge firewall")?;
+    }
+
+    Ok(())
+}
+
+fn start_caddy_args(
+    base_path: &std::path::Path,
+    mesh_network: &str,
+    mesh_dns: &str,
+) -> Vec<String> {
     vec![
         "run".into(),
         "-d".into(),
@@ -300,6 +398,8 @@ fn start_caddy_args(base_path: &std::path::Path, mesh_network: &str) -> Vec<Stri
         "unless-stopped".into(),
         "-p".into(),
         "80:80".into(),
+        "--dns".into(),
+        mesh_dns.into(),
         "-v".into(),
         format!(
             "{}:/etc/caddy/Caddyfile:ro",
@@ -312,6 +412,57 @@ fn start_caddy_args(base_path: &std::path::Path, mesh_network: &str) -> Vec<Stri
         "-v".into(),
         format!("{}:/config", base_path.join("config").display()),
         "docker.io/library/caddy:2-alpine".into(),
+    ]
+}
+
+fn caddy_iptables_allow_args(source: &str, mesh_subnet: &str) -> Vec<String> {
+    vec![
+        "-C".into(),
+        "COOLIFY-ALLOW".into(),
+        "-s".into(),
+        source.into(),
+        "-d".into(),
+        mesh_subnet.into(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]
+}
+
+fn caddy_iptables_insert_args(source: &str, mesh_subnet: &str) -> Vec<String> {
+    vec![
+        "-I".into(),
+        "COOLIFY-ALLOW".into(),
+        "1".into(),
+        "-s".into(),
+        source.into(),
+        "-d".into(),
+        mesh_subnet.into(),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]
+}
+
+fn caddy_nft_allow_rule(caddy_ip: &str, mesh_subnet: &str) -> String {
+    format!("ip saddr {caddy_ip} ip daddr {mesh_subnet} accept")
+}
+
+fn caddy_nft_add_args(caddy_ip: &str, mesh_subnet: &str) -> Vec<String> {
+    vec![
+        "add".into(),
+        "rule".into(),
+        "bridge".into(),
+        "coolify_bridge".into(),
+        "coolify_allow".into(),
+        "meta".into(),
+        "protocol".into(),
+        "ip".into(),
+        "ip".into(),
+        "saddr".into(),
+        caddy_ip.into(),
+        "ip".into(),
+        "daddr".into(),
+        mesh_subnet.into(),
+        "accept".into(),
     ]
 }
 
@@ -446,12 +597,70 @@ mod tests {
 
     #[test]
     fn caddy_start_args_publish_http_only() {
-        let args = start_caddy_args(std::path::Path::new("/tmp/caddy"), "coolify-default-mesh");
+        let args = start_caddy_args(
+            std::path::Path::new("/tmp/caddy"),
+            "coolify-default-mesh",
+            "10.210.0.1",
+        );
 
         assert!(args.windows(2).any(|window| window == ["-p", "80:80"]));
         assert!(!args.windows(2).any(|window| window == ["-p", "443:443"]));
         assert!(!args
             .windows(2)
             .any(|window| window == ["-p", "443:443/udp"]));
+    }
+
+    #[test]
+    fn caddy_start_args_use_mesh_dns() {
+        let args = start_caddy_args(
+            std::path::Path::new("/tmp/caddy"),
+            "coolify-default-mesh",
+            "10.210.0.1",
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|window| window == ["--dns", "10.210.0.1"]));
+    }
+
+    #[test]
+    fn caddy_firewall_args_allow_ingress_to_mesh_subnet() {
+        let iptables_args = caddy_iptables_insert_args("10.210.0.40/32", "10.210.0.0/24");
+        let nft_args = caddy_nft_add_args("10.210.0.40", "10.210.0.0/24");
+
+        assert_eq!(
+            iptables_args,
+            [
+                "-I",
+                "COOLIFY-ALLOW",
+                "1",
+                "-s",
+                "10.210.0.40/32",
+                "-d",
+                "10.210.0.0/24",
+                "-j",
+                "ACCEPT",
+            ]
+        );
+        assert_eq!(
+            nft_args,
+            [
+                "add",
+                "rule",
+                "bridge",
+                "coolify_bridge",
+                "coolify_allow",
+                "meta",
+                "protocol",
+                "ip",
+                "ip",
+                "saddr",
+                "10.210.0.40",
+                "ip",
+                "daddr",
+                "10.210.0.0/24",
+                "accept",
+            ]
+        );
     }
 }
