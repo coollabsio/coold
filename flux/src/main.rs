@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
     tokio::try_join!(
         grpc_server::run(config.clone(), streams.clone(), pending.clone()),
         unix_bridge::run(config.clone(), streams.clone(), pending.clone()),
-        pending_sweeper::run(pending.clone()),
+        pending_sweeper::run(config.clone(), pending.clone()),
         registry::heartbeat_loop(config.clone(), streams.clone()),
     )?;
 
@@ -387,18 +387,22 @@ mod pending_sweeper {
     use anyhow::Result;
     use tracing::warn;
 
-    use crate::state::{Pending, PendingKind, DISPATCH_TIMEOUT_SECS};
+    use crate::{
+        config::Config,
+        state::{Pending, PendingKind},
+    };
 
-    pub async fn run(pending: Pending) -> Result<()> {
+    pub async fn run(config: Config, pending: Pending) -> Result<()> {
         let interval = std::time::Duration::from_secs(1);
+        let dispatch_timeout = std::time::Duration::from_secs(config.dispatch_timeout_secs);
         loop {
             tokio::time::sleep(interval).await;
-            let expired = pending.drain_expired();
+            let expired = pending.drain_expired(dispatch_timeout);
             for (request_id, entry) in expired {
                 if matches!(entry.kind, PendingKind::Coold) {
                     warn!(
                         %request_id,
-                        timeout_secs = DISPATCH_TIMEOUT_SECS,
+                        timeout_secs = config.dispatch_timeout_secs,
                         "coold dispatch timed out; handler will return 504"
                     );
                 }

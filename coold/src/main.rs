@@ -4,6 +4,8 @@ mod corrosion;
 mod dns;
 mod firewall;
 mod grpc;
+mod host_infra;
+mod mesh_dns_anchor;
 mod model;
 mod podman;
 mod sync;
@@ -31,6 +33,7 @@ async fn main() -> Result<()> {
         podman_socket = %config.podman_socket.display(),
         corrosion_url = %config.corrosion_url,
         reconcile_interval = ?config.reconcile_interval,
+        host_infra_reconcile_interval = ?config.host_infra_reconcile_interval,
         "coold starting",
     );
 

@@ -98,6 +98,16 @@ pub struct Config {
     )]
     pub reconcile_interval: Duration,
 
+    /// Cadence for repairing host-level infrastructure managed by coold, such
+    /// as mesh DNS anchor containers.
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_HOST_INFRA_RECONCILE_INTERVAL",
+        default_value = "60s",
+        value_parser = parse_duration,
+    )]
+    pub host_infra_reconcile_interval: Duration,
+
     /// `tracing_subscriber` env filter (e.g. `info`, `coold=debug`).
     #[arg(long, env = "COOLIFY_COOLD_LOG_LEVEL", default_value = "info")]
     pub log_level: String,
@@ -349,5 +359,31 @@ mod tests {
         assert!(parse_namespaces("default:coolify-default-mesh").is_err());
         assert!(parse_namespaces("default::10.0.0.1").is_err());
         assert!(parse_namespaces("default:net:not-an-ip").is_err());
+    }
+
+    #[test]
+    fn host_infra_reconcile_interval_defaults_to_sixty_seconds() {
+        let config = Config::parse_from(["coold", "--host-mgmt-ip", "100.64.0.5"]);
+
+        assert_eq!(
+            config.host_infra_reconcile_interval,
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn host_infra_reconcile_interval_is_configurable() {
+        let config = Config::parse_from([
+            "coold",
+            "--host-mgmt-ip",
+            "100.64.0.5",
+            "--host-infra-reconcile-interval",
+            "15s",
+        ]);
+
+        assert_eq!(
+            config.host_infra_reconcile_interval,
+            Duration::from_secs(15)
+        );
     }
 }

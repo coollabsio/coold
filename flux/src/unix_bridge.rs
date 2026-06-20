@@ -34,15 +34,14 @@ use crate::envelope::{
     DispatchEnvelope, ResponseBody, ResponseEnvelope,
 };
 use crate::routing::{route_build, route_coold, RouteOutcome};
-use crate::state::{
-    InsertOutcome, ParkResult, Pending, PendingKind, ResponseData, Streams, DISPATCH_TIMEOUT_SECS,
-};
+use crate::state::{InsertOutcome, ParkResult, Pending, PendingKind, ResponseData, Streams};
 
 #[derive(Clone)]
 struct AppState {
     streams: Streams,
     pending: Pending,
     pending_max: usize,
+    dispatch_timeout: Duration,
 }
 
 pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
@@ -50,6 +49,7 @@ pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<(
         streams,
         pending,
         pending_max: config.pending_max,
+        dispatch_timeout: Duration::from_secs(config.dispatch_timeout_secs),
     };
 
     let app = Router::new()
@@ -187,7 +187,7 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
                 return coold_err(&request_id, 503, "host stream send failed");
             }
 
-            await_coold(&request_id, rx).await
+            await_coold(&request_id, rx, st.dispatch_timeout).await
         }
         RouteOutcome::PushError { code, message } => {
             warn!(%request_id, %host_id, %code, %message, "coold dispatch rejected");
@@ -197,8 +197,11 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
     }
 }
 
-async fn await_coold(request_id: &str, rx: oneshot::Receiver<ResponseData>) -> Response {
-    let timeout = Duration::from_secs(DISPATCH_TIMEOUT_SECS);
+async fn await_coold(
+    request_id: &str,
+    rx: oneshot::Receiver<ResponseData>,
+    timeout: Duration,
+) -> Response {
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(ResponseData::Coold(body))) => Json(ResponseEnvelope {
             request_id: request_id.to_owned(),

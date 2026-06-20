@@ -56,6 +56,11 @@ pub async fn run(config: Config) -> Result<()> {
         tokio::spawn(async move { run_reconcile_loop(ctx).await })
     };
 
+    let host_infra_handle = {
+        let config = ctx.config.clone();
+        tokio::spawn(async move { crate::host_infra::run(config).await })
+    };
+
     let dns_handle = {
         let config = ctx.config.clone();
         let corrosion = ctx.corrosion.clone();
@@ -80,6 +85,7 @@ pub async fn run(config: Config) -> Result<()> {
         res = events_handle    => propagate("events",    res)?,
         res = trigger_handle   => propagate("trigger",   res)?,
         res = reconcile_handle => propagate("reconcile", res)?,
+        res = host_infra_handle => propagate("host-infra", res)?,
         res = dns_handle       => propagate("dns",       res)?,
         res = firewall_handle  => propagate("firewall",  res)?,
         res = grpc_handle      => propagate("grpc",      res)?,

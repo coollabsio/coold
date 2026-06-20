@@ -98,10 +98,6 @@ impl Streams {
 
 // ─── Pending dispatches ──────────────────────────────────────────────────────
 
-/// Coold sync-dispatch timeout: how long a `POST /v1/coold/dispatch` handler
-/// parks before the sweeper drops its oneshot → handler returns 504.
-pub const DISPATCH_TIMEOUT_SECS: u64 = 10;
-
 /// How long a `Landed` response lingers waiting for a late poller.
 pub const LANDED_TTL_SECS: u64 = 30;
 
@@ -285,7 +281,7 @@ impl Pending {
 
     /// Evict expired entries.
     ///
-    /// - `Waiting` of kind `Coold` past `DISPATCH_TIMEOUT_SECS` → evicted.
+    /// - `Waiting` of kind `Coold` past the configured timeout → evicted.
     ///   Dropping the sinks causes each parked receiver to error, which
     ///   the handler maps to a 504 response.
     /// - `Landed` past `until` → evicted.
@@ -293,9 +289,8 @@ impl Pending {
     /// Build `Waiting` entries are *not* evicted — builds can take
     /// minutes, and the transient unit's `RuntimeMaxSec` is the real
     /// timeout. Returns `host_id`s of expired coold waits for logging.
-    pub fn drain_expired(&self) -> Vec<(String, PendingSnapshot)> {
+    pub fn drain_expired(&self, coold_timeout: Duration) -> Vec<(String, PendingSnapshot)> {
         let now = Instant::now();
-        let coold_timeout = Duration::from_secs(DISPATCH_TIMEOUT_SECS);
 
         let expired: Vec<String> = self
             .0
@@ -430,6 +425,23 @@ mod tests {
             p.insert_waiting("c".into(), "H".into(), PendingKind::Coold, 2),
             InsertOutcome::AtCapacity
         );
+    }
+
+    #[test]
+    fn drain_expired_uses_the_configured_coold_timeout() {
+        let p = Pending::new();
+        assert_eq!(
+            p.insert_waiting("a".into(), "H".into(), PendingKind::Coold, 16),
+            InsertOutcome::Inserted
+        );
+
+        std::thread::sleep(Duration::from_millis(25));
+
+        assert!(
+            p.drain_expired(Duration::from_secs(30)).is_empty(),
+            "entry should not expire before configured timeout"
+        );
+        assert_eq!(p.drain_expired(Duration::ZERO).len(), 1);
     }
 
     #[test]
