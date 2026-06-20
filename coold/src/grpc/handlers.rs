@@ -1,10 +1,11 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use futures_util::future::join_all;
 use tokio::sync::mpsc;
 use tokio::{fs, process::Command};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::builder::BuilderCtx;
 use crate::grpc::proto::{
@@ -40,12 +41,19 @@ pub async fn handle(
             .await;
         }
         server_msg::Command::ApplyCaddyIngress(req) => {
+            info!(%request_id, "applying Caddy ingress");
             let body = match apply_caddy_ingress(req.caddyfile, req.apps, req.mesh_network).await {
-                Ok(output) => response::Body::ApplyCaddyIngress(ApplyCaddyIngressResp { output }),
-                Err(e) => response::Body::Error(Error {
-                    code: 500,
-                    message: format!("{e:#}"),
-                }),
+                Ok(output) => {
+                    info!(%request_id, "Caddy ingress applied");
+                    response::Body::ApplyCaddyIngress(ApplyCaddyIngressResp { output })
+                }
+                Err(e) => {
+                    warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress apply failed");
+                    response::Body::Error(Error {
+                        code: 500,
+                        message: format!("{e:#}"),
+                    })
+                }
             };
             send_response(
                 &tx,
@@ -57,12 +65,19 @@ pub async fn handle(
             .await;
         }
         server_msg::Command::StopCaddyIngress(_) => {
+            info!(%request_id, "stopping Caddy ingress");
             let body = match stop_caddy_ingress().await {
-                Ok(output) => response::Body::StopCaddyIngress(StopCaddyIngressResp { output }),
-                Err(e) => response::Body::Error(Error {
-                    code: 500,
-                    message: format!("{e:#}"),
-                }),
+                Ok(output) => {
+                    info!(%request_id, "Caddy ingress stopped");
+                    response::Body::StopCaddyIngress(StopCaddyIngressResp { output })
+                }
+                Err(e) => {
+                    warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress stop failed");
+                    response::Body::Error(Error {
+                        code: 500,
+                        message: format!("{e:#}"),
+                    })
+                }
             };
             send_response(
                 &tx,
@@ -121,6 +136,14 @@ async fn apply_caddy_ingress(
     apps: Vec<CaddyAppIngressFile>,
     mesh_network: String,
 ) -> Result<String> {
+    let started_at = Instant::now();
+    info!(
+        apps = apps.len(),
+        mesh_network,
+        caddyfile_bytes = caddyfile.len(),
+        "starting Caddy ingress reconciliation"
+    );
+
     if caddyfile.trim().is_empty() {
         return Err(anyhow!("caddyfile is empty"));
     }
@@ -138,6 +161,7 @@ async fn apply_caddy_ingress(
     let caddyfile_path = base_path.join("Caddyfile");
     let temp_caddyfile_path = base_path.join("Caddyfile.tmp");
 
+    info!("creating Caddy ingress directories");
     fs::create_dir_all(&apps_path)
         .await
         .context("create Caddy app config directory")?;
@@ -152,6 +176,7 @@ async fn apply_caddy_ingress(
     for app in apps {
         let file_name = caddy_app_file_name(&app.name)?;
         expected_files.insert(file_name.clone());
+        info!(file_name, "writing Caddy app config");
         fs::write(apps_path.join(file_name), app.caddyfile)
             .await
             .context("write Caddy app config")?;
@@ -167,54 +192,75 @@ async fn apply_caddy_ingress(
     {
         let file_name = entry.file_name().to_string_lossy().to_string();
         if file_name.ends_with(".caddy") && !expected_files.contains(&file_name) {
+            info!(file_name, "removing stale Caddy app config");
             fs::remove_file(entry.path())
                 .await
                 .context("remove stale Caddy app config")?;
         }
     }
 
+    info!("writing temporary Caddyfile");
     fs::write(&temp_caddyfile_path, caddyfile)
         .await
         .context("write temporary Caddyfile")?;
 
-    run_command(Command::new("podman").args(["pull", "docker.io/library/caddy:2-alpine"]))
-        .await
-        .context("pull Caddy image")?;
+    run_logged_command(
+        "pull Caddy image",
+        Command::new("podman").args(["pull", "docker.io/library/caddy:2-alpine"]),
+    )
+    .await
+    .context("pull Caddy image")?;
 
-    run_command(Command::new("podman").args([
-        "run",
-        "--rm",
-        "-v",
-        &format!("{}:/etc/caddy:ro", base_path.display()),
-        "docker.io/library/caddy:2-alpine",
-        "caddy",
-        "validate",
-        "--config",
-        "/etc/caddy/Caddyfile.tmp",
-    ]))
+    run_logged_command(
+        "validate Caddyfile",
+        Command::new("podman").args([
+            "run",
+            "--rm",
+            "-v",
+            &format!("{}:/etc/caddy:ro", base_path.display()),
+            "docker.io/library/caddy:2-alpine",
+            "caddy",
+            "validate",
+            "--config",
+            "/etc/caddy/Caddyfile.tmp",
+        ]),
+    )
     .await
     .context("validate Caddyfile")?;
 
+    info!("installing Caddyfile");
     fs::rename(&temp_caddyfile_path, &caddyfile_path)
         .await
         .context("install Caddyfile")?;
 
-    start_or_reload_caddy(base_path, &mesh_network).await
+    let output = start_or_reload_caddy(base_path, &mesh_network).await;
+    info!(
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "finished Caddy ingress reconciliation"
+    );
+
+    output
 }
 
 async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) -> Result<String> {
-    if run_command(Command::new("podman").args(["container", "exists", "coolify-v5-caddy"]))
-        .await
-        .is_ok()
+    if run_logged_command(
+        "check existing Caddy ingress container",
+        Command::new("podman").args(["container", "exists", "coolify-v5-caddy"]),
+    )
+    .await
+    .is_ok()
     {
-        return run_command(Command::new("podman").args([
-            "exec",
-            "coolify-v5-caddy",
-            "caddy",
-            "reload",
-            "--config",
-            "/etc/caddy/Caddyfile",
-        ]))
+        return run_logged_command(
+            "reload Caddy ingress",
+            Command::new("podman").args([
+                "exec",
+                "coolify-v5-caddy",
+                "caddy",
+                "reload",
+                "--config",
+                "/etc/caddy/Caddyfile",
+            ]),
+        )
         .await
         .map(|output| {
             if output.trim().is_empty() {
@@ -226,35 +272,11 @@ async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) 
         .context("reload Caddy ingress");
     }
 
-    let output = run_command(Command::new("podman").args([
-        "run",
-        "-d",
-        "--replace",
-        "--name",
-        "coolify-v5-caddy",
-        "--network",
-        mesh_network,
-        "--restart",
-        "unless-stopped",
-        "-p",
-        "80:80",
-        "-p",
-        "443:443",
-        "-p",
-        "443:443/udp",
-        "-v",
-        &format!(
-            "{}:/etc/caddy/Caddyfile:ro",
-            base_path.join("Caddyfile").display()
-        ),
-        "-v",
-        &format!("{}:/etc/caddy/apps:ro", base_path.join("apps").display()),
-        "-v",
-        &format!("{}:/data", base_path.join("data").display()),
-        "-v",
-        &format!("{}:/config", base_path.join("config").display()),
-        "docker.io/library/caddy:2-alpine",
-    ]))
+    let args = start_caddy_args(base_path, mesh_network);
+    let output = run_logged_command(
+        "start Caddy ingress",
+        Command::new("podman").args(args.iter().map(String::as_str)),
+    )
     .await
     .context("start Caddy ingress")?;
 
@@ -263,6 +285,34 @@ async fn start_or_reload_caddy(base_path: &std::path::Path, mesh_network: &str) 
     } else {
         output
     })
+}
+
+fn start_caddy_args(base_path: &std::path::Path, mesh_network: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "-d".into(),
+        "--replace".into(),
+        "--name".into(),
+        "coolify-v5-caddy".into(),
+        "--network".into(),
+        mesh_network.into(),
+        "--restart".into(),
+        "unless-stopped".into(),
+        "-p".into(),
+        "80:80".into(),
+        "-v".into(),
+        format!(
+            "{}:/etc/caddy/Caddyfile:ro",
+            base_path.join("Caddyfile").display()
+        ),
+        "-v".into(),
+        format!("{}:/etc/caddy/apps:ro", base_path.join("apps").display()),
+        "-v".into(),
+        format!("{}:/data", base_path.join("data").display()),
+        "-v".into(),
+        format!("{}:/config", base_path.join("config").display()),
+        "docker.io/library/caddy:2-alpine".into(),
+    ]
 }
 
 fn caddy_app_file_name(value: &str) -> Result<String> {
@@ -279,15 +329,40 @@ fn caddy_app_file_name(value: &str) -> Result<String> {
 }
 
 async fn stop_caddy_ingress() -> Result<String> {
-    let output = run_command(Command::new("podman").args(["rm", "-f", "coolify-v5-caddy"]))
-        .await
-        .context("stop Caddy ingress")?;
+    let output = run_logged_command(
+        "stop Caddy ingress",
+        Command::new("podman").args(["rm", "-f", "coolify-v5-caddy"]),
+    )
+    .await
+    .context("stop Caddy ingress")?;
 
     Ok(if output.trim().is_empty() {
         "Caddy ingress stopped.".into()
     } else {
         output
     })
+}
+
+async fn run_logged_command(label: &str, command: &mut Command) -> Result<String> {
+    let started_at = Instant::now();
+    info!(step = label, "starting command");
+    let output = run_command(command).await;
+
+    match &output {
+        Ok(_) => info!(
+            step = label,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "command completed"
+        ),
+        Err(error) => warn!(
+            step = label,
+            elapsed_ms = started_at.elapsed().as_millis(),
+            %error,
+            "command failed"
+        ),
+    }
+
+    output
 }
 
 fn is_valid_podman_network_name(value: &str) -> bool {
@@ -363,4 +438,20 @@ async fn list_containers(podman: &PodmanClient) -> Result<ListContainersResp> {
     Ok(ListContainersResp {
         containers: summaries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn caddy_start_args_publish_http_only() {
+        let args = start_caddy_args(std::path::Path::new("/tmp/caddy"), "coolify-default-mesh");
+
+        assert!(args.windows(2).any(|window| window == ["-p", "80:80"]));
+        assert!(!args.windows(2).any(|window| window == ["-p", "443:443"]));
+        assert!(!args
+            .windows(2)
+            .any(|window| window == ["-p", "443:443/udp"]));
+    }
 }
