@@ -75,6 +75,34 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
+            server_msg::Command::ApplyCaddyIngress(_) => {
+                let resp = Response {
+                    request_id,
+                    body: Some(response::Body::ApplyCaddyIngress(
+                        coolify_proto::agent::v1::ApplyCaddyIngressResp {
+                            output: "Caddy ingress applied.".into(),
+                        },
+                    )),
+                };
+                tx.send(ClientMsg {
+                    payload: Some(client_msg::Payload::Response(resp)),
+                })
+                .await?;
+            }
+            server_msg::Command::StopCaddyIngress(_) => {
+                let resp = Response {
+                    request_id,
+                    body: Some(response::Body::StopCaddyIngress(
+                        coolify_proto::agent::v1::StopCaddyIngressResp {
+                            output: "Caddy ingress stopped.".into(),
+                        },
+                    )),
+                };
+                tx.send(ClientMsg {
+                    payload: Some(client_msg::Payload::Response(resp)),
+                })
+                .await?;
+            }
             server_msg::Command::Build(_) | server_msg::Command::CancelBuild(_) => {
                 // fake_coold does not implement the builder capability.
             }

@@ -38,6 +38,8 @@ message ServerMsg {
     string request_id = 1;
     oneof command {
         ListContainersReq list_containers = 10;
+        ApplyCaddyIngressReq apply_caddy_ingress = 11;
+        StopCaddyIngressReq  stop_caddy_ingress  = 12;
         BuildRequest      build           = 20;
         CancelBuild       cancel_build    = 21;
     }
@@ -48,6 +50,8 @@ message Response {
     string request_id = 1;
     oneof body {
         ListContainersResp list_containers = 10;
+        ApplyCaddyIngressResp apply_caddy_ingress = 11;
+        StopCaddyIngressResp  stop_caddy_ingress  = 12;
         BuildResponseBody  build           = 20;
         Error              error           = 100;
     }
@@ -68,6 +72,27 @@ message Error {
 }
 
 message ListContainersReq {}
+
+message ApplyCaddyIngressReq {
+    string caddyfile = 1;
+    string mesh_network = 2;
+    repeated CaddyAppIngressFile apps = 3;
+}
+
+message CaddyAppIngressFile {
+    string name = 1;
+    string caddyfile = 2;
+}
+
+message ApplyCaddyIngressResp {
+    string output = 1;
+}
+
+message StopCaddyIngressReq {}
+
+message StopCaddyIngressResp {
+    string output = 1;
+}
 
 message ListContainersResp {
     repeated ContainerSummary containers = 1;

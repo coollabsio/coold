@@ -32,6 +32,24 @@ pub struct DispatchEnvelope {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CommandPayload {
     ListContainers,
+    ApplyCaddyIngress {
+        caddyfile: String,
+        #[serde(default)]
+        apps: Vec<CaddyAppIngressFile>,
+        #[serde(default = "default_caddy_mesh_network")]
+        mesh_network: String,
+    },
+    StopCaddyIngress,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CaddyAppIngressFile {
+    pub name: String,
+    pub caddyfile: String,
+}
+
+fn default_caddy_mesh_network() -> String {
+    "coolify-default-mesh".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -72,6 +90,12 @@ impl ResponseBody {
                 .unwrap_or(serde_json::Value::Null);
                 Some(ResponseBody::Ok { data })
             }
+            Some(Body::ApplyCaddyIngress(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
+            Some(Body::StopCaddyIngress(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {
                 code: e.code,
                 message: e.message,

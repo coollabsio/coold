@@ -3,7 +3,9 @@
 //! side effects. Separating this keeps routing logic unit-testable.
 
 use coolify_proto::agent::v1::{
-    server_msg, BuildRequest, CancelBuild, ListContainersReq, ServerMsg, StaticConfig,
+    server_msg, ApplyCaddyIngressReq, BuildRequest,
+    CaddyAppIngressFile as ProtoCaddyAppIngressFile, CancelBuild, ListContainersReq, ServerMsg,
+    StaticConfig, StopCaddyIngressReq,
 };
 
 use crate::envelope::{
@@ -37,6 +39,24 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
 
     let cmd = match env.command {
         CommandPayload::ListContainers => server_msg::Command::ListContainers(ListContainersReq {}),
+        CommandPayload::ApplyCaddyIngress {
+            caddyfile,
+            apps,
+            mesh_network,
+        } => server_msg::Command::ApplyCaddyIngress(ApplyCaddyIngressReq {
+            caddyfile,
+            mesh_network,
+            apps: apps
+                .into_iter()
+                .map(|app| ProtoCaddyAppIngressFile {
+                    name: app.name,
+                    caddyfile: app.caddyfile,
+                })
+                .collect(),
+        }),
+        CommandPayload::StopCaddyIngress => {
+            server_msg::Command::StopCaddyIngress(StopCaddyIngressReq {})
+        }
     };
 
     let msg = ServerMsg {
@@ -351,6 +371,40 @@ mod tests {
                     msg.command,
                     Some(server_msg::Command::ListContainers(_))
                 ));
+            }
+            other => panic!("expected SendCoold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coold_dispatch_routes_caddy_apply_to_connected_host() {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "A", &["coold"]);
+        let env = DispatchEnvelope {
+            host_id: "A".into(),
+            request_id: "r1".into(),
+            command: CommandPayload::ApplyCaddyIngress {
+                caddyfile: ":80 {\n respond 200\n}".into(),
+                apps: vec![crate::envelope::CaddyAppIngressFile {
+                    name: "app_1".into(),
+                    caddyfile: "example.com {\n reverse_proxy app:80\n}".into(),
+                }],
+                mesh_network: "coolify-default-mesh".into(),
+            },
+        };
+        match route_coold(&streams, env) {
+            RouteOutcome::SendCoold { host_id, msg } => {
+                assert_eq!(host_id, "A");
+                assert_eq!(msg.request_id, "r1");
+                match msg.command {
+                    Some(server_msg::Command::ApplyCaddyIngress(req)) => {
+                        assert_eq!(req.mesh_network, "coolify-default-mesh");
+                        assert!(req.caddyfile.contains("respond 200"));
+                        assert_eq!(req.apps.len(), 1);
+                        assert_eq!(req.apps[0].name, "app_1");
+                    }
+                    other => panic!("expected ApplyCaddyIngress, got {other:?}"),
+                }
             }
             other => panic!("expected SendCoold, got {other:?}"),
         }
