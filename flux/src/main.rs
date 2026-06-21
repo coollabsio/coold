@@ -94,6 +94,25 @@ mod grpc_server {
             == Some("1")
     }
 
+    fn advertised_capability_not_granted<'a>(
+        advertised: &'a [String],
+        jwt_caps: &[String],
+    ) -> Option<&'a str> {
+        let has_coold_grant = jwt_caps.iter().any(|cap| cap == "coold");
+
+        advertised.iter().map(String::as_str).find(|capability| {
+            let explicitly_granted = jwt_caps.iter().any(|jwt_cap| jwt_cap == capability);
+            let granted_by_coold =
+                has_coold_grant && (*capability == "coold" || is_coold_primitive(capability));
+
+            !explicitly_granted && !granted_by_coold
+        })
+    }
+
+    fn is_coold_primitive(capability: &str) -> bool {
+        capability.starts_with("images.") || capability.starts_with("containers.")
+    }
+
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr: SocketAddr = config
             .grpc_bind
@@ -219,12 +238,12 @@ mod grpc_server {
                                 "Hello received"
                             );
 
-                            // Defense in depth: the host may only advertise a
-                            // capability already granted in its JWT.
-                            if let Some(missing) = h
-                                .capabilities
-                                .iter()
-                                .find(|c| !jwt_caps_clone.iter().any(|jc| jc == *c))
+                            // Defense in depth: the host may only advertise an
+                            // explicitly granted coarse capability, or a
+                            // namespaced primitive covered by the coarse `coold`
+                            // grant.
+                            if let Some(missing) =
+                                advertised_capability_not_granted(&h.capabilities, &jwt_caps_clone)
                             {
                                 warn!(
                                     host_id = %host_id_clone,
@@ -312,7 +331,7 @@ mod grpc_server {
 
     #[cfg(test)]
     mod tests {
-        use super::validate_bind;
+        use super::{advertised_capability_not_granted, validate_bind};
         use std::net::SocketAddr;
 
         fn parse(s: &str) -> SocketAddr {
@@ -349,6 +368,66 @@ mod grpc_server {
         #[test]
         fn accepts_loopback_without_override() {
             validate_bind(parse("127.0.0.1:6443"), false).unwrap();
+        }
+
+        #[test]
+        fn coold_jwt_grants_known_coold_primitives() {
+            let advertised = vec![
+                "coold".to_string(),
+                "images.pull".to_string(),
+                "containers.create".to_string(),
+                "containers.healthcheck.run".to_string(),
+            ];
+            let jwt_caps = vec!["coold".to_string()];
+
+            assert_eq!(
+                advertised_capability_not_granted(&advertised, &jwt_caps),
+                None
+            );
+        }
+
+        #[test]
+        fn coold_jwt_grants_new_primitives_in_approved_namespaces() {
+            let advertised = vec!["containers.pause".to_string()];
+            let jwt_caps = vec!["coold".to_string()];
+
+            assert_eq!(
+                advertised_capability_not_granted(&advertised, &jwt_caps),
+                None
+            );
+        }
+
+        #[test]
+        fn coold_jwt_rejects_unapproved_namespaced_capabilities() {
+            let advertised = vec!["secrets.read".to_string()];
+            let jwt_caps = vec!["coold".to_string()];
+
+            assert_eq!(
+                advertised_capability_not_granted(&advertised, &jwt_caps),
+                Some("secrets.read")
+            );
+        }
+
+        #[test]
+        fn coold_jwt_does_not_grant_unknown_capabilities() {
+            let advertised = vec!["coold".to_string(), "builder".to_string()];
+            let jwt_caps = vec!["coold".to_string()];
+
+            assert_eq!(
+                advertised_capability_not_granted(&advertised, &jwt_caps),
+                Some("builder")
+            );
+        }
+
+        #[test]
+        fn explicitly_granted_capabilities_are_allowed() {
+            let advertised = vec!["builder".to_string()];
+            let jwt_caps = vec!["coold".to_string(), "builder".to_string()];
+
+            assert_eq!(
+                advertised_capability_not_granted(&advertised, &jwt_caps),
+                None
+            );
         }
     }
 }
