@@ -130,6 +130,22 @@ mod grpc_server {
             .find(|capability| !jwt_caps.iter().any(|jwt_cap| jwt_cap == capability))
     }
 
+    fn validate_advertised_capabilities(
+        advertised: &[String],
+        jwt_caps: &[String],
+    ) -> Result<(), Status> {
+        if let Some(missing) = advertised_capability_not_granted(advertised, jwt_caps) {
+            warn!(
+                missing_cap = %missing,
+                jwt_caps = ?jwt_caps,
+                "host advertised a capability not granted in JWT; rejecting stream",
+            );
+            return Err(Status::permission_denied("invalid capabilities"));
+        }
+
+        Ok(())
+    }
+
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
         let addr: SocketAddr = config
             .grpc_bind
@@ -209,14 +225,35 @@ mod grpc_server {
             let host_id = verified.host_id.clone();
             let jwt_caps = verified.caps;
 
-            info!(%host_id, caps = ?jwt_caps, "coold stream connected");
+            let mut inbound = request.into_inner();
+            let hello = match inbound.next().await {
+                Some(Ok(ClientMsg {
+                    payload: Some(client_msg::Payload::Hello(hello)),
+                })) => hello,
+                Some(Ok(_)) | None => {
+                    warn!(%host_id, "gRPC stream rejected: first message was not Hello");
+                    return Err(Status::invalid_argument("hello required"));
+                }
+                Some(Err(e)) => {
+                    warn!(%host_id, error = %e, "gRPC stream rejected: failed to read Hello");
+                    return Err(e);
+                }
+            };
+
+            info!(
+                %host_id,
+                version = %hello.coold_version,
+                capabilities = ?hello.capabilities,
+                "coold stream connected"
+            );
+            validate_advertised_capabilities(&hello.capabilities, &jwt_caps)?;
 
             let (cmd_tx, cmd_rx) = mpsc::channel::<ServerMsg>(64);
             self.streams.insert(
                 host_id.clone(),
                 StreamHandle {
                     tx: cmd_tx,
-                    caps: jwt_caps.clone(),
+                    caps: hello.capabilities.clone(),
                 },
             );
 
@@ -225,8 +262,23 @@ mod grpc_server {
             let registry = self.registry.clone();
             let resource_status = self.resource_status.clone();
             let host_id_clone = host_id.clone();
-            let jwt_caps_clone = jwt_caps.clone();
-            let mut inbound = request.into_inner();
+            if let Some(registry) = registry.clone() {
+                let host_id = host_id.clone();
+                let capabilities = hello.capabilities.clone();
+                let coold_version = hello.coold_version.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = registry
+                        .upsert_connection(&host_id, capabilities, Some(coold_version))
+                        .await
+                    {
+                        warn!(
+                            host_id = %host_id,
+                            error = format!("{e:#}"),
+                            "Laravel agent connection upsert failed",
+                        );
+                    }
+                });
+            }
 
             tokio::spawn(async move {
                 let mut disconnect_reason = "stream_closed";
@@ -246,55 +298,8 @@ mod grpc_server {
                             });
                         }
                         Ok(ClientMsg {
-                            payload: Some(client_msg::Payload::Hello(h)),
-                        }) => {
-                            info!(
-                                host_id = %host_id_clone,
-                                version = %h.coold_version,
-                                capabilities = ?h.capabilities,
-                                "Hello received"
-                            );
-
-                            // Defense in depth: the host may only advertise an
-                            // explicitly granted coarse capability, or a
-                            // namespaced primitive covered by the coarse `coold`
-                            // grant.
-                            if let Some(missing) =
-                                advertised_capability_not_granted(&h.capabilities, &jwt_caps_clone)
-                            {
-                                warn!(
-                                    host_id = %host_id_clone,
-                                    missing_cap = %missing,
-                                    jwt_caps = ?jwt_caps_clone,
-                                    "host advertised a capability not granted in JWT; dropping stream",
-                                );
-                                disconnect_reason = "capability_mismatch";
-                                break;
-                            }
-
-                            let capabilities = h.capabilities;
-                            let coold_version = h.coold_version;
-                            streams.update_capabilities(&host_id_clone, capabilities.clone());
-                            if let Some(registry) = registry.clone() {
-                                let host_id = host_id_clone.clone();
-                                tokio::spawn(async move {
-                                    if let Err(e) = registry
-                                        .upsert_connection(
-                                            &host_id,
-                                            capabilities,
-                                            Some(coold_version),
-                                        )
-                                        .await
-                                    {
-                                        warn!(
-                                            host_id = %host_id,
-                                            error = format!("{e:#}"),
-                                            "Laravel agent connection upsert failed",
-                                        );
-                                    }
-                                });
-                            }
-                        }
+                            payload: Some(client_msg::Payload::Hello(_)),
+                        }) => warn!(host_id = %host_id_clone, "duplicate Hello ignored"),
                         Ok(_) => {}
                         Err(e) => {
                             warn!(host_id = %host_id_clone, error = %e, "stream recv error");
@@ -385,6 +390,17 @@ mod grpc_server {
         #[test]
         fn accepts_loopback_without_override() {
             validate_bind(parse("127.0.0.1:6443"), false).unwrap();
+        }
+
+        #[test]
+        fn invalid_hello_capabilities_are_rejected_before_stream_opens() {
+            let advertised = vec!["containers.list".to_string(), "ingress.apply".to_string()];
+            let jwt_caps = vec!["containers.list".to_string()];
+
+            let err = super::validate_advertised_capabilities(&advertised, &jwt_caps).unwrap_err();
+
+            assert_eq!(err.code(), tonic::Code::PermissionDenied);
+            assert_eq!(err.message(), "invalid capabilities");
         }
 
         #[test]

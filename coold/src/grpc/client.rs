@@ -1,6 +1,6 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -73,7 +73,7 @@ pub async fn run(
         .await
         .context("initial host JWT load")?;
 
-    let mut backoff = Duration::from_secs(1);
+    let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let http = reqwest::Client::new();
     loop {
         // Re-read the JWT file each reconnect so an external rotator can swap
@@ -87,7 +87,7 @@ pub async fn run(
                     "load host JWT failed"
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = next_backoff_after_delay(backoff);
                 continue;
             }
         };
@@ -110,25 +110,34 @@ pub async fn run(
                     "resolve flux URL failed"
                 );
                 tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                backoff = next_backoff_after_delay(backoff);
                 continue;
             }
         };
 
+        let connected_at = Instant::now();
         match connect_and_serve(&url, &jwt, &config, &podman, resource_status_tx.subscribe()).await
         {
             Ok(()) => {
-                warn!("grpc stream closed cleanly; reconnecting");
-                backoff = Duration::from_secs(1);
+                let (delay, next_backoff) =
+                    backoff_after_clean_stream_close(connected_at.elapsed(), backoff);
+                warn!(
+                    connected_ms = connected_at.elapsed().as_millis(),
+                    backoff_ms = delay.as_millis(),
+                    "grpc stream closed cleanly; reconnecting"
+                );
+                tokio::time::sleep(delay).await;
+                backoff = next_backoff;
             }
             Err(e) => {
+                let delay = retry_delay_for_error(&e, backoff);
                 warn!(
                     error = format!("{e:#}"),
-                    backoff_ms = backoff.as_millis(),
+                    backoff_ms = delay.as_millis(),
                     "grpc stream failed"
                 );
-                tokio::time::sleep(backoff).await;
-                backoff = (backoff * 2).min(Duration::from_secs(60));
+                tokio::time::sleep(delay).await;
+                backoff = next_backoff_after_delay(delay);
             }
         }
     }
@@ -139,6 +148,46 @@ fn assignment_request(config: &Config) -> AssignmentRequest {
         host_id: config.host_mgmt_ip.clone(),
         coold_version: VERSION.to_string(),
         capabilities: primitive_capabilities(),
+    }
+}
+
+const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(60);
+const STABLE_STREAM_RESET_AFTER: Duration = Duration::from_secs(30);
+const PERMANENT_REJECTION_RETRY_DELAY: Duration = Duration::from_secs(15 * 60);
+
+fn next_backoff_after_delay(delay: Duration) -> Duration {
+    (delay * 2).min(MAX_RECONNECT_BACKOFF)
+}
+
+fn backoff_after_clean_stream_close(
+    connected_for: Duration,
+    current_backoff: Duration,
+) -> (Duration, Duration) {
+    if connected_for >= STABLE_STREAM_RESET_AFTER {
+        return (INITIAL_RECONNECT_BACKOFF, INITIAL_RECONNECT_BACKOFF);
+    }
+
+    (current_backoff, next_backoff_after_delay(current_backoff))
+}
+
+fn retry_delay_for_error(error: &anyhow::Error, current_backoff: Duration) -> Duration {
+    let is_permanent_rejection = error.chain().any(|cause| {
+        cause.downcast_ref::<tonic::Status>().is_some_and(|status| {
+            matches!(
+                status.code(),
+                tonic::Code::Unauthenticated
+                    | tonic::Code::PermissionDenied
+                    | tonic::Code::InvalidArgument
+                    | tonic::Code::FailedPrecondition
+            )
+        })
+    });
+
+    if is_permanent_rejection {
+        PERMANENT_REJECTION_RETRY_DELAY
+    } else {
+        current_backoff
     }
 }
 
@@ -245,6 +294,15 @@ async fn connect_and_serve(
     .await
     .context("send Hello")?;
 
+    let outbound = ReceiverStream::new(rx);
+    let mut inbound = client
+        .stream(outbound)
+        .await
+        .context("open stream")?
+        .into_inner();
+
+    info!(flux_url = url, "grpc stream established");
+
     let status_tx = tx.clone();
     let status_forwarder = tokio::spawn(async move {
         loop {
@@ -271,15 +329,6 @@ async fn connect_and_serve(
         }
     });
 
-    let outbound = ReceiverStream::new(rx);
-    let mut inbound = client
-        .stream(outbound)
-        .await
-        .context("open stream")?
-        .into_inner();
-
-    info!(flux_url = url, "grpc stream established");
-
     while let Some(msg) = inbound.message().await.context("receive ServerMsg")? {
         let request_id = msg.request_id.clone();
         let Some(command) = msg.command else {
@@ -303,6 +352,7 @@ async fn connect_and_serve(
 mod tests {
     use super::load_host_jwt;
     use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
 
     fn write_jwt(
         dir: &std::path::Path,
@@ -358,6 +408,39 @@ mod tests {
         let err = load_host_jwt(&p).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("stat host JWT"), "got: {msg}");
+    }
+
+    #[test]
+    fn quick_clean_stream_close_keeps_backing_off() {
+        let current = Duration::from_secs(8);
+
+        let (delay, next) =
+            super::backoff_after_clean_stream_close(Duration::from_secs(2), current);
+
+        assert_eq!(delay, current);
+        assert_eq!(next, Duration::from_secs(16));
+    }
+
+    #[test]
+    fn stable_clean_stream_close_resets_backoff() {
+        let (delay, next) = super::backoff_after_clean_stream_close(
+            Duration::from_secs(30),
+            Duration::from_secs(8),
+        );
+
+        assert_eq!(delay, Duration::from_secs(1));
+        assert_eq!(next, Duration::from_secs(1));
+    }
+
+    #[test]
+    fn permanent_stream_rejections_use_long_retry_delay() {
+        let status = tonic::Status::permission_denied("invalid capabilities");
+        let err = anyhow::Error::new(status).context("open stream");
+
+        assert_eq!(
+            super::retry_delay_for_error(&err, Duration::from_secs(4)),
+            Duration::from_secs(900),
+        );
     }
 
     #[tokio::test]
