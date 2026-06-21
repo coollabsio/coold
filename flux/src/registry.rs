@@ -42,7 +42,6 @@ pub struct AgentConnectionPayload {
     pub flux_id: String,
     pub host_id: String,
     pub capabilities: Vec<String>,
-    pub builder_capacity: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coold_version: Option<String>,
 }
@@ -52,14 +51,12 @@ impl AgentConnectionPayload {
         flux_id: impl Into<String>,
         host_id: impl Into<String>,
         capabilities: Vec<String>,
-        builder_capacity: u32,
         coold_version: Option<String>,
     ) -> Self {
         Self {
             flux_id: flux_id.into(),
             host_id: host_id.into(),
             capabilities,
-            builder_capacity,
             coold_version,
         }
     }
@@ -139,16 +136,10 @@ impl RegistryClient {
         &self,
         host_id: &str,
         capabilities: Vec<String>,
-        builder_capacity: u32,
         coold_version: Option<String>,
     ) -> Result<()> {
-        let payload = AgentConnectionPayload::connected(
-            &self.flux_id,
-            host_id,
-            capabilities,
-            builder_capacity,
-            coold_version,
-        );
+        let payload =
+            AgentConnectionPayload::connected(&self.flux_id, host_id, capabilities, coold_version);
         self.post("/api/v1/internal/agent-connections/upsert", &payload)
             .await
     }
@@ -227,15 +218,13 @@ mod tests {
         let payload = AgentConnectionPayload::connected(
             "flux-eu-1",
             "100.64.0.5",
-            vec!["coold".into(), "builder".into()],
-            2,
+            vec!["coold".into()],
             Some("0.1.0".into()),
         );
 
         assert_eq!(payload.flux_id, "flux-eu-1");
         assert_eq!(payload.host_id, "100.64.0.5");
-        assert_eq!(payload.capabilities, vec!["coold", "builder"]);
-        assert_eq!(payload.builder_capacity, 2);
+        assert_eq!(payload.capabilities, vec!["coold"]);
         assert_eq!(payload.coold_version.as_deref(), Some("0.1.0"));
     }
 }

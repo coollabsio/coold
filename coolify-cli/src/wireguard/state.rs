@@ -1,9 +1,6 @@
 use ipnet::Ipv4Net;
 use serde::Serialize;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    net::Ipv4Addr,
-};
+use std::{collections::BTreeMap, net::Ipv4Addr};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Peer {
@@ -104,12 +101,6 @@ pub struct DesiredMesh {
     pub corrosion_version: String,
     pub corrosion_gossip_port: u16,
     pub corrosion_api_port: u16,
-    pub enable_builder: bool,
-    pub builder_hosts: Vec<String>,
-    pub builder_capacity: u32,
-    pub builder_cpu_quota: String,
-    pub builder_memory_max: String,
-    pub builder_timeout_secs: u32,
     pub intent: crate::wireguard::intent::Intent,
     pub new_nodes: Vec<String>,
     pub allow_replace: bool,
@@ -144,22 +135,5 @@ impl DesiredMesh {
                     .unwrap_or(host)
                     .to_string()
             })
-    }
-
-    pub fn builder_host_set(&self) -> BTreeSet<String> {
-        if !self.builder_hosts.is_empty() {
-            self.builder_hosts
-                .iter()
-                .filter(|h| self.nodes.contains(*h))
-                .cloned()
-                .collect()
-        } else if self.enable_builder {
-            self.nodes.iter().cloned().collect()
-        } else {
-            Default::default()
-        }
-    }
-    pub fn has_builder_cap(&self, host: &str) -> bool {
-        self.builder_host_set().contains(host)
     }
 }

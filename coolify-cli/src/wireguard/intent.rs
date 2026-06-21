@@ -46,7 +46,7 @@ fn categorize(a: &PlannedAction) -> Category {
         | InstallCorrosionService
         | InstallCooldService => Category::PeerRefresh,
         RecreatePodmanNetwork => Category::DestructiveReplace,
-        InstallCorrosion | InstallCoold | InstallBuilder => Category::VersionBump,
+        InstallCorrosion | InstallCoold => Category::VersionBump,
         WriteCorrosionSchema if a.detail.contains("DB will be reset") => Category::WipeDb,
         WriteCorrosionSchema => Category::SchemaFirstWrite,
     }
@@ -150,12 +150,6 @@ mod tests {
             corrosion_version: "v1".into(),
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
-            enable_builder: true,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
             intent,
             new_nodes: vec![],
             allow_replace: false,
@@ -238,7 +232,6 @@ mod tests {
             action("A-old", ActionType::WriteCorrosionConfig),
             action("A-old", ActionType::InstallFirewall),
             action("A-old", ActionType::InstallCoold),
-            action("A-old", ActionType::InstallBuilder),
             action("A-new", ActionType::InstallCoold),
         ]);
         let mut d = desired(Intent::Extend);
@@ -255,7 +248,7 @@ mod tests {
         assert!(kept.contains(&(&"A-old".to_string(), ActionType::InstallFirewall)));
         assert!(kept.contains(&(&"A-new".to_string(), ActionType::InstallCoold)));
         assert!(!kept.contains(&(&"A-old".to_string(), ActionType::InstallCoold)));
-        assert_eq!(p.skipped.len(), 2);
+        assert_eq!(p.skipped.len(), 1);
     }
 
     #[test]

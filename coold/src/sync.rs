@@ -192,7 +192,7 @@ async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
 /// Enumerate every container on the host, not just mesh-managed containers, so
 /// Coolify can receive status updates for ingress and future non-managed views.
 async fn desired_container_statuses(ctx: &SyncContext) -> Result<HashMap<String, ContainerStatus>> {
-    let containers = ctx.podman.list_containers().await?;
+    let containers = ctx.podman.containers_list().await?;
     let mut out = HashMap::new();
 
     for c in containers {
@@ -240,7 +240,7 @@ async fn desired_container_statuses(ctx: &SyncContext) -> Result<HashMap<String,
 /// is logged. Alpha does not support dual-attach routing; changing the schema
 /// to allow it would require a composite PK.
 async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint>> {
-    let containers = ctx.podman.list_containers().await?;
+    let containers = ctx.podman.containers_list().await?;
     let mut out: HashMap<String, Endpoint> = HashMap::new();
 
     // Build a lookup from podman network name → namespace so we can stamp

@@ -156,7 +156,6 @@ fn coolify_bootstrap_two_hosts() {
 
     step("1/6 coolify init bootstrap two hosts");
     let mut args = bootstrap_args(&servers, &host_a, &cfg.ssh_key);
-    args.extend(["--builder-hosts", &host_a]);
     local_coolify(&cfg.coolify_bin, &args).expect("coolify init bootstrap two hosts");
 
     step("2/6 verify wg0 IPs distinct");

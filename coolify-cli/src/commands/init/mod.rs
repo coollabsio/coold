@@ -58,18 +58,6 @@ pub struct BaseInitFlags {
     pub corrosion_api_port: u16,
     #[arg(short = 'y', long)]
     pub yes: bool,
-    #[arg(long, default_value_t = true)]
-    pub enable_builder: bool,
-    #[arg(long, value_delimiter = ',')]
-    pub builder_hosts: Vec<String>,
-    #[arg(long, default_value_t = 2)]
-    pub builder_capacity: u32,
-    #[arg(long, default_value = "200%")]
-    pub builder_cpu_quota: String,
-    #[arg(long, default_value = "2G")]
-    pub builder_memory_max: String,
-    #[arg(long, default_value_t = 1800)]
-    pub builder_timeout_secs: u32,
 }
 
 #[derive(Debug, Args)]
@@ -306,11 +294,6 @@ fn build_desired(
     if nodes.is_empty() {
         bail!("--nodes is required");
     }
-    for h in &base.builder_hosts {
-        if !nodes.contains(h) {
-            bail!("--builder-hosts entry {h:?} is not in --nodes");
-        }
-    }
     let hosts = mesh_hosts(&nodes)?;
     let listen_port_overrides = parse_port_overrides(&base.wg_listen_port_overrides)?;
     let endpoint_overrides = parse_endpoint_overrides(&base.wg_endpoint_overrides)?;
@@ -332,12 +315,6 @@ fn build_desired(
         corrosion_version: base.corrosion_version.clone(),
         corrosion_gossip_port: base.corrosion_gossip_port,
         corrosion_api_port: base.corrosion_api_port,
-        enable_builder: base.enable_builder,
-        builder_hosts: base.builder_hosts.clone(),
-        builder_capacity: base.builder_capacity,
-        builder_cpu_quota: base.builder_cpu_quota.clone(),
-        builder_memory_max: base.builder_memory_max.clone(),
-        builder_timeout_secs: base.builder_timeout_secs,
         intent,
         new_nodes,
         allow_replace,

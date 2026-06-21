@@ -4,16 +4,13 @@ version = "0.0.0"
 publish = false
 edition.workspace = true
 rust-version.workspace = true
-description = "Live-server black-box tests for coold/flux/builder. Disabled by default (#[ignore]); run with `cargo test -p e2e-tests -- --ignored --nocapture`."
+description = "Live-server black-box tests for coold/flux. Disabled by default (#[ignore]); run with `cargo test -p e2e-tests -- --ignored --nocapture`."
 license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-[[test]]
-name = "builder"
-path = "tests/builder.rs"
 
 [[test]]
 name = "install"

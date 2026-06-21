@@ -16,44 +16,58 @@ message ClientMsg {
     }
 }
 
-// First frame sent by coold after opening the stream.
 message Hello {
     string host_mgmt_ip = 1;
     string coold_version = 2;
     uint32 schema_min = 3;
     uint32 schema_max = 4;
-
-    // Capabilities this coold advertises (e.g. "coold" always, plus
-    // "builder" when --builder-enabled). Flux cross-checks these against
-    // the JWT "caps" claim and uses them for capability-based routing.
     repeated string capabilities = 5;
-
-    // Number of concurrent builds this coold will accept. Zero when the
-    // builder capability is disabled.
-    uint32 builder_capacity = 6;
 }
 
-// Command frame sent by flux.
 message ServerMsg {
     string request_id = 1;
     oneof command {
-        ListContainersReq list_containers = 10;
-        ApplyCaddyIngressReq apply_caddy_ingress = 11;
-        StopCaddyIngressReq  stop_caddy_ingress  = 12;
-        BuildRequest      build           = 20;
-        CancelBuild       cancel_build    = 21;
+        ImagesPullReq images_pull = 10;
+        ImagesListReq images_list = 11;
+        ImagesDeleteReq images_delete = 12;
+
+        ContainersCreateReq containers_create = 20;
+        ContainersStartReq containers_start = 21;
+        ContainersStopReq containers_stop = 22;
+        ContainersRestartReq containers_restart = 23;
+        ContainersDeleteReq containers_delete = 24;
+        ContainersInspectReq containers_inspect = 25;
+        ContainersListReq containers_list = 26;
+        ContainersLogsReq containers_logs = 27;
+        ContainersExecReq containers_exec = 28;
+        ContainersHealthcheckRunReq containers_healthcheck_run = 29;
+
+        ApplyCaddyIngressReq apply_caddy_ingress = 90;
+        StopCaddyIngressReq  stop_caddy_ingress  = 91;
     }
 }
 
-// Response frame sent by coold in reply to a ServerMsg.
 message Response {
     string request_id = 1;
     oneof body {
-        ListContainersResp list_containers = 10;
-        ApplyCaddyIngressResp apply_caddy_ingress = 11;
-        StopCaddyIngressResp  stop_caddy_ingress  = 12;
-        BuildResponseBody  build           = 20;
-        Error              error           = 100;
+        ImagesPullResp images_pull = 10;
+        ImagesListResp images_list = 11;
+        ImagesDeleteResp images_delete = 12;
+
+        ContainersCreateResp containers_create = 20;
+        ContainersStartResp containers_start = 21;
+        ContainersStopResp containers_stop = 22;
+        ContainersRestartResp containers_restart = 23;
+        ContainersDeleteResp containers_delete = 24;
+        ContainersInspectResp containers_inspect = 25;
+        ContainersListResp containers_list = 26;
+        ContainersLogsResp containers_logs = 27;
+        ContainersExecResp containers_exec = 28;
+        ContainersHealthcheckRunResp containers_healthcheck_run = 29;
+
+        ApplyCaddyIngressResp apply_caddy_ingress = 90;
+        StopCaddyIngressResp  stop_caddy_ingress  = 91;
+        Error error = 100;
     }
 }
 
@@ -71,7 +85,70 @@ message Error {
     string message = 2;
 }
 
-message ListContainersReq {}
+message ImagesPullReq { string reference = 1; }
+message ImagesPullResp { string digest = 1; string output = 2; }
+message ImagesListReq {}
+message ImagesDeleteReq { string reference = 1; bool force = 2; }
+message ImagesDeleteResp { string output = 1; }
+
+message ImageSummary {
+    string id = 1;
+    repeated string repo_tags = 2;
+    repeated string repo_digests = 3;
+    int64 size = 4;
+    string created = 5;
+}
+message ImagesListResp { repeated ImageSummary images = 1; }
+
+message PortMapping {
+    string host_ip = 1;
+    uint32 host_port = 2;
+    uint32 container_port = 3;
+    string protocol = 4;
+}
+
+message ContainersCreateReq {
+    string name = 1;
+    string image = 2;
+    repeated string command = 3;
+    repeated string env = 4;
+    repeated string networks = 5;
+    repeated string volumes = 6;
+    repeated PortMapping ports = 7;
+    repeated string dns = 8;
+    string restart_policy = 9;
+
+    bool privileged = 20;
+    string network_mode = 21;
+    repeated string capabilities = 22;
+}
+message ContainersCreateResp { string id = 1; }
+message ContainersStartReq { string id = 1; }
+message ContainersStartResp { string output = 1; }
+message ContainersStopReq { string id = 1; uint32 timeout_seconds = 2; }
+message ContainersStopResp { string output = 1; }
+message ContainersRestartReq { string id = 1; uint32 timeout_seconds = 2; }
+message ContainersRestartResp { string output = 1; }
+message ContainersDeleteReq { string id = 1; bool force = 2; }
+message ContainersDeleteResp { string output = 1; }
+message ContainersInspectReq { string id = 1; }
+message ContainersInspectResp { string json = 1; }
+message ContainersListReq {}
+message ContainersLogsReq { string id = 1; uint32 tail = 2; bool stdout = 3; bool stderr = 4; }
+message ContainersLogsResp { string output = 1; }
+message ContainersExecReq { string id = 1; repeated string command = 2; }
+message ContainersExecResp { int32 exit_code = 1; string output = 2; }
+message ContainersHealthcheckRunReq { string id = 1; }
+message ContainersHealthcheckRunResp { string output = 1; }
+
+message ContainerSummary {
+    string id = 1;
+    string name = 2;
+    string image = 3;
+    string state = 4;
+    repeated string networks = 5;
+}
+message ContainersListResp { repeated ContainerSummary containers = 1; }
 
 message ApplyCaddyIngressReq {
     string caddyfile = 1;
@@ -84,70 +161,6 @@ message CaddyAppIngressFile {
     string caddyfile = 2;
 }
 
-message ApplyCaddyIngressResp {
-    string output = 1;
-}
-
+message ApplyCaddyIngressResp { string output = 1; }
 message StopCaddyIngressReq {}
-
-message StopCaddyIngressResp {
-    string output = 1;
-}
-
-message ListContainersResp {
-    repeated ContainerSummary containers = 1;
-}
-
-message ContainerSummary {
-    string id = 1;
-    string name = 2;
-    string image = 3;
-    string state = 4;
-    repeated string networks = 5;
-}
-
-// ── build messages (merged from former builder.proto) ───────────────────────
-
-enum BuildStack {
-    BUILD_STACK_UNSPECIFIED = 0;
-    DOCKERFILE              = 1;
-    BUILDPACKS              = 2;
-    RAILPACK                = 3;
-    STATIC                  = 4;
-}
-
-message BuildRequest {
-    string       repo_url     = 1;
-    string       git_ref      = 2;  // commit sha preferred
-    BuildStack   stack        = 3;
-    string       target_image = 4;  // e.g. localhost/app-42
-    string       cache_key    = 5;
-    StaticConfig static_cfg   = 20;
-}
-
-message StaticConfig {
-    string output_dir = 1;  // relative to repo root; default "dist"
-    string base_image = 2;  // default: docker.io/library/nginx:alpine
-}
-
-message CancelBuild {}
-
-message BuildResponseBody {
-    oneof body {
-        BuildResult ok  = 10;
-        BuildError  err = 11;
-    }
-}
-
-message BuildResult {
-    string     digest       = 1;  // sha256:...
-    string     registry_ref = 2;  // localhost/<app>@sha256:...
-    uint64     duration_ms  = 3;
-    BuildStack stack_used   = 4;
-}
-
-message BuildError {
-    uint32 code    = 1;
-    string message = 2;
-    string stage   = 3;
-}
+message StopCaddyIngressResp { string output = 1; }

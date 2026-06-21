@@ -515,19 +515,6 @@ async fn phase3<R: Runner>(
         )
         .await?;
     }
-    if should_run(planned, host, ActionType::InstallBuilder, "") {
-        step(
-            runner,
-            host,
-            user,
-            port,
-            &mut out,
-            ActionType::InstallBuilder,
-            "",
-            services::builder::install_command(&desired.coold_version),
-        )
-        .await?;
-    }
     if should_run(planned, host, ActionType::InstallCooldService, "") {
         let ns = desired
             .sorted_namespaces()
@@ -538,20 +525,6 @@ async fn phase3<R: Runner>(
                 bridge_gateway: machine_ip(subnets[n][host]),
             })
             .collect::<Vec<_>>();
-        let builder = if desired.has_builder_cap(host) {
-            Some(services::coold::BuilderConfig {
-                capacity: desired.builder_capacity,
-                cpu_quota: desired.builder_cpu_quota.clone(),
-                memory_max: desired.builder_memory_max.clone(),
-                timeout_secs: desired.builder_timeout_secs,
-                deny_nets: vec![
-                    desired.mgmt_pool.to_string(),
-                    desired.container_pool.to_string(),
-                ],
-            })
-        } else {
-            None
-        };
         step(
             runner,
             host,
@@ -574,7 +547,7 @@ async fn phase3<R: Runner>(
                 ),
                 heredoc(
                     "/etc/systemd/system/coold.service",
-                    &services::coold::service_unit(mgmt[host], &ns, None, builder.as_ref()),
+                    &services::coold::service_unit(mgmt[host], &ns, None),
                     "0644"
                 ),
                 services::coold::MESH_DNS_ANCHOR_SERVICE,

@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
@@ -7,29 +6,240 @@ use tokio::sync::mpsc;
 use tokio::{fs, process::Command};
 use tracing::{debug, info, warn};
 
-use crate::builder::BuilderCtx;
 use crate::grpc::proto::{
-    client_msg, response, server_msg, ApplyCaddyIngressResp, BuildResponseBody,
-    CaddyAppIngressFile, ClientMsg, ContainerSummary, Error, ListContainersResp, Response,
-    StopCaddyIngressResp,
+    client_msg, response, server_msg, ApplyCaddyIngressResp, CaddyAppIngressFile, ClientMsg,
+    ContainerSummary, ContainersCreateResp, ContainersDeleteResp, ContainersExecResp,
+    ContainersHealthcheckRunResp, ContainersInspectResp, ContainersListResp, ContainersLogsResp,
+    ContainersRestartResp, ContainersStartResp, ContainersStopResp, Error, ImageSummary,
+    ImagesDeleteResp, ImagesListResp, ImagesPullResp, Response, StopCaddyIngressResp,
 };
+use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
 
 pub async fn handle(
     request_id: String,
     command: server_msg::Command,
     podman: &PodmanClient,
-    builder_ctx: Option<Arc<BuilderCtx>>,
     tx: mpsc::Sender<ClientMsg>,
 ) {
     match command {
-        server_msg::Command::ListContainers(_) => {
-            let body = match list_containers(podman).await {
-                Ok(resp) => response::Body::ListContainers(resp),
-                Err(e) => response::Body::Error(Error {
-                    code: 500,
-                    message: format!("{e:#}"),
+        server_msg::Command::ImagesPull(req) => {
+            let body = match podman.pull_image(&req.reference).await {
+                Ok((digest, output)) => {
+                    response::Body::ImagesPull(ImagesPullResp { digest, output })
+                }
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ImagesList(_) => {
+            let body = match podman.list_images().await {
+                Ok(images) => response::Body::ImagesList(ImagesListResp {
+                    images: images
+                        .into_iter()
+                        .map(|image| ImageSummary {
+                            id: image.id,
+                            repo_tags: image.repo_tags,
+                            repo_digests: image.repo_digests,
+                            size: image.size,
+                            created: image.created,
+                        })
+                        .collect(),
                 }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ImagesDelete(req) => {
+            let body = match podman.delete_image(&req.reference, req.force).await {
+                Ok(output) => response::Body::ImagesDelete(ImagesDeleteResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersCreate(req) => {
+            let input = CreateContainerInput {
+                name: req.name,
+                image: req.image,
+                command: req.command,
+                env: req.env,
+                networks: req.networks,
+                volumes: req.volumes,
+                ports: req
+                    .ports
+                    .into_iter()
+                    .map(|port| CreatePortMapping {
+                        host_ip: port.host_ip,
+                        host_port: port.host_port,
+                        container_port: port.container_port,
+                        protocol: port.protocol,
+                    })
+                    .collect(),
+                dns: req.dns,
+                restart_policy: req.restart_policy,
+                privileged: req.privileged,
+                network_mode: req.network_mode,
+                capabilities: req.capabilities,
+            };
+            let body = match podman.create_container(input).await {
+                Ok(id) => response::Body::ContainersCreate(ContainersCreateResp { id }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersStart(req) => {
+            let body = match podman.start_container(&req.id).await {
+                Ok(output) => response::Body::ContainersStart(ContainersStartResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersStop(req) => {
+            let body = match podman.stop_container(&req.id, req.timeout_seconds).await {
+                Ok(output) => response::Body::ContainersStop(ContainersStopResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersRestart(req) => {
+            let body = match podman.restart_container(&req.id, req.timeout_seconds).await {
+                Ok(output) => response::Body::ContainersRestart(ContainersRestartResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersDelete(req) => {
+            let body = match podman.delete_container(&req.id, req.force).await {
+                Ok(output) => response::Body::ContainersDelete(ContainersDeleteResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersInspect(req) => {
+            let body = match podman.inspect_container_json(&req.id).await {
+                Ok(json) => response::Body::ContainersInspect(ContainersInspectResp { json }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersList(_) => {
+            let body = match containers_list(podman).await {
+                Ok(resp) => response::Body::ContainersList(resp),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersLogs(req) => {
+            let body = match podman
+                .container_logs(&req.id, req.tail, req.stdout, req.stderr)
+                .await
+            {
+                Ok(output) => response::Body::ContainersLogs(ContainersLogsResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersExec(req) => {
+            let body = match podman.exec_container(&req.id, req.command).await {
+                Ok((exit_code, output)) => {
+                    response::Body::ContainersExec(ContainersExecResp { exit_code, output })
+                }
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::ContainersHealthcheckRun(req) => {
+            let body = match podman.run_healthcheck(&req.id).await {
+                Ok(output) => {
+                    response::Body::ContainersHealthcheckRun(ContainersHealthcheckRunResp {
+                        output,
+                    })
+                }
+                Err(e) => error_body(e),
             };
             send_response(
                 &tx,
@@ -49,10 +259,7 @@ pub async fn handle(
                 }
                 Err(e) => {
                     warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress apply failed");
-                    response::Body::Error(Error {
-                        code: 500,
-                        message: format!("{e:#}"),
-                    })
+                    error_body(e)
                 }
             };
             send_response(
@@ -73,10 +280,7 @@ pub async fn handle(
                 }
                 Err(e) => {
                     warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress stop failed");
-                    response::Body::Error(Error {
-                        code: 500,
-                        message: format!("{e:#}"),
-                    })
+                    error_body(e)
                 }
             };
             send_response(
@@ -88,37 +292,14 @@ pub async fn handle(
             )
             .await;
         }
-        server_msg::Command::Build(req) => match builder_ctx {
-            Some(ctx) => ctx.dispatch(request_id, req, tx),
-            None => {
-                let body = response::Body::Build(BuildResponseBody {
-                    body: Some(crate::grpc::proto::build_response_body::Body::Err(
-                        crate::grpc::proto::BuildError {
-                            code: 501,
-                            message: "builder capability not enabled on this host".into(),
-                            stage: "dispatch".into(),
-                        },
-                    )),
-                });
-                send_response(
-                    &tx,
-                    Response {
-                        request_id,
-                        body: Some(body),
-                    },
-                )
-                .await;
-            }
-        },
-        server_msg::Command::CancelBuild(_) => match builder_ctx {
-            Some(ctx) => {
-                if !ctx.cancel(&request_id).await {
-                    warn!(%request_id, "cancel for unknown or already-finished request_id");
-                }
-            }
-            None => warn!(%request_id, "received CancelBuild but builder capability disabled"),
-        },
     }
+}
+
+fn error_body(error: anyhow::Error) -> response::Body {
+    response::Body::Error(Error {
+        code: 500,
+        message: format!("{error:#}"),
+    })
 }
 
 async fn send_response(tx: &mpsc::Sender<ClientMsg>, response: Response) {
@@ -548,8 +729,8 @@ async fn run_command(command: &mut Command) -> Result<String> {
     Ok(combined)
 }
 
-async fn list_containers(podman: &PodmanClient) -> Result<ListContainersResp> {
-    let containers = podman.list_containers().await?;
+async fn containers_list(podman: &PodmanClient) -> Result<ContainersListResp> {
+    let containers = podman.containers_list().await?;
 
     // libpod list endpoint returns empty NetworkSettings.Networks; must inspect
     // each container to get actual network attachments. Run inspects concurrently.
@@ -586,7 +767,7 @@ async fn list_containers(podman: &PodmanClient) -> Result<ListContainersResp> {
         })
         .collect();
 
-    Ok(ListContainersResp {
+    Ok(ContainersListResp {
         containers: summaries,
     })
 }

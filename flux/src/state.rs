@@ -6,22 +6,15 @@ use tokio::sync::{mpsc, oneshot};
 
 use coolify_proto::agent::v1::ServerMsg;
 
-use crate::envelope::{BuildResponseBody, ResponseBody, StreamInventoryItem};
+use crate::envelope::{ResponseBody, StreamInventoryItem};
 
-/// Connected coold host along with its advertised capability set and
-/// builder capacity. One entry per open gRPC stream; keyed by `host_id`
-/// (the stable WireGuard mgmt IP Laravel uses when minting the JWT).
+/// Connected coold host along with its advertised capability set. One entry
+/// per open gRPC stream; keyed by `host_id` (the stable WireGuard mgmt IP
+/// Laravel uses when minting the JWT).
 #[derive(Clone)]
 pub struct StreamHandle {
     pub tx: mpsc::Sender<ServerMsg>,
     pub caps: Vec<String>,
-    pub builder_capacity: u32,
-}
-
-impl StreamHandle {
-    pub fn has_cap(&self, cap: &str) -> bool {
-        self.caps.iter().any(|c| c == cap)
-    }
 }
 
 /// Shared map: host_id → StreamHandle.
@@ -37,10 +30,9 @@ impl Streams {
         self.0.insert(host_id, handle);
     }
 
-    pub fn update_capabilities(&self, host_id: &str, caps: Vec<String>, builder_capacity: u32) {
+    pub fn update_capabilities(&self, host_id: &str, caps: Vec<String>) {
         if let Some(mut entry) = self.0.get_mut(host_id) {
             entry.caps = caps;
-            entry.builder_capacity = builder_capacity;
         }
     }
 
@@ -60,22 +52,6 @@ impl Streams {
         self.0.len()
     }
 
-    pub fn has_cap(&self, host_id: &str, cap: &str) -> bool {
-        self.0
-            .get(host_id)
-            .map(|e| e.value().has_cap(cap))
-            .unwrap_or(false)
-    }
-
-    /// First connected host that advertises `cap`. First-available semantics
-    /// mirror the old `BuilderStreams::pick_idle()` — no load-balancing.
-    pub fn pick_host_with_cap(&self, cap: &str) -> Option<String> {
-        self.0
-            .iter()
-            .find(|e| e.value().has_cap(cap))
-            .map(|e| e.key().clone())
-    }
-
     pub fn snapshot(&self) -> Vec<StreamInventoryItem> {
         let mut items = self
             .0
@@ -87,7 +63,6 @@ impl Streams {
                 StreamInventoryItem {
                     host_id: e.key().clone(),
                     caps,
-                    builder_capacity: e.value().builder_capacity,
                 }
             })
             .collect::<Vec<_>>();
@@ -104,7 +79,6 @@ pub const LANDED_TTL_SECS: u64 = 30;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PendingKind {
     Coold,
-    Build,
 }
 
 /// Typed body of a completed response. Kind must match the originating
@@ -113,7 +87,6 @@ pub enum PendingKind {
 #[derive(Debug, Clone)]
 pub enum ResponseData {
     Coold(ResponseBody),
-    Build(BuildResponseBody),
 }
 
 /// State machine for a single request_id.
@@ -286,9 +259,7 @@ impl Pending {
     ///   the handler maps to a 504 response.
     /// - `Landed` past `until` → evicted.
     ///
-    /// Build `Waiting` entries are *not* evicted — builds can take
-    /// minutes, and the transient unit's `RuntimeMaxSec` is the real
-    /// timeout. Returns `host_id`s of expired coold waits for logging.
+    /// Returns `host_id`s of expired waits for logging.
     pub fn drain_expired(&self, coold_timeout: Duration) -> Vec<(String, PendingSnapshot)> {
         let now = Instant::now();
 
@@ -297,8 +268,7 @@ impl Pending {
             .iter()
             .filter(|e| match &e.value().state {
                 PendingState::Waiting { .. } => {
-                    matches!(e.value().kind, PendingKind::Coold)
-                        && now.duration_since(e.value().started_at) >= coold_timeout
+                    now.duration_since(e.value().started_at) >= coold_timeout
                 }
                 PendingState::Landed { until, .. } => now >= *until,
             })
@@ -356,23 +326,18 @@ mod tests {
     #[tokio::test]
     async fn park_returns_landed_when_response_arrived_first() {
         let p = Pending::new();
-        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Build, 16);
+        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Coold, 16);
 
         p.deliver(
             "r1",
-            ResponseData::Build(BuildResponseBody::Ok {
-                digest: "sha256:x".into(),
-                registry_ref: "ref".into(),
-                duration_ms: 1,
+            ResponseData::Coold(ResponseBody::Ok {
+                data: serde_json::json!({"k": "v"}),
             }),
         );
 
         match p.park("r1") {
-            ParkResult::AlreadyLanded(ResponseData::Build(BuildResponseBody::Ok {
-                digest,
-                ..
-            })) => {
-                assert_eq!(digest, "sha256:x");
+            ParkResult::AlreadyLanded(ResponseData::Coold(ResponseBody::Ok { data })) => {
+                assert_eq!(data, serde_json::json!({"k": "v"}));
             }
             _ => panic!("expected AlreadyLanded"),
         }
@@ -384,12 +349,10 @@ mod tests {
     async fn deliver_during_park_does_not_drop_response() {
         use std::sync::Arc;
         let p = Arc::new(Pending::new());
-        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Build, 16);
+        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Coold, 16);
 
-        let body = ResponseData::Build(BuildResponseBody::Ok {
-            digest: "sha256:y".into(),
-            registry_ref: "ref".into(),
-            duration_ms: 1,
+        let body = ResponseData::Coold(ResponseBody::Ok {
+            data: serde_json::json!({"k": "v"}),
         });
 
         let p1 = p.clone();
@@ -405,7 +368,7 @@ mod tests {
 
         let got = park_task.await.expect("task joined");
         assert!(
-            matches!(got, Some(ResponseData::Build(_))),
+            matches!(got, Some(ResponseData::Coold(_))),
             "response dropped"
         );
     }
@@ -452,7 +415,7 @@ mod tests {
             InsertOutcome::Inserted
         );
         assert_eq!(
-            p.insert_waiting("a".into(), "H2".into(), PendingKind::Build, 16),
+            p.insert_waiting("a".into(), "H2".into(), PendingKind::Coold, 16),
             InsertOutcome::Duplicate
         );
         // Original entry still intact — host_id/kind unchanged.
@@ -474,8 +437,7 @@ mod stream_snapshot_tests {
             "b".into(),
             StreamHandle {
                 tx: tx.clone(),
-                caps: vec!["builder".into(), "coold".into(), "builder".into()],
-                builder_capacity: 2,
+                caps: vec!["coold".into(), "coold".into()],
             },
         );
         streams.insert(
@@ -483,7 +445,6 @@ mod stream_snapshot_tests {
             StreamHandle {
                 tx,
                 caps: vec!["coold".into()],
-                builder_capacity: 0,
             },
         );
         let got = streams.snapshot();
@@ -491,6 +452,6 @@ mod stream_snapshot_tests {
             got.iter().map(|s| s.host_id.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"]
         );
-        assert_eq!(got[1].caps, vec!["builder", "coold"]);
+        assert_eq!(got[1].caps, vec!["coold"]);
     }
 }

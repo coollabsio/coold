@@ -10,9 +10,7 @@ pub const VERSION: &str = match option_env!("COOLIFY_FLUX_VERSION") {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "flux", version = VERSION, about)]
 pub struct Config {
-    /// Address the gRPC server binds on (coold dials this). Build traffic
-    /// rides on the same stream; there is no longer a separate builder
-    /// listener.
+    /// Address the gRPC server binds on (coold dials this).
     ///
     /// Required — must be a specific interface IP, typically the WireGuard
     /// mgmt IP (e.g. `10.42.0.1:6443`). Refuses to start on `0.0.0.0` / `::`

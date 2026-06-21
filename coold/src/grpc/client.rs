@@ -1,6 +1,5 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
@@ -12,7 +11,6 @@ use tonic::transport::Channel;
 use tonic::Request;
 use tracing::{info, warn};
 
-use crate::builder::{BuilderCtx, BuilderSettings};
 use crate::config::{Config, VERSION};
 use crate::grpc::handlers::handle;
 use crate::grpc::proto::{
@@ -25,7 +23,6 @@ pub(crate) struct AssignmentRequest {
     pub host_id: String,
     pub coold_version: String,
     pub capabilities: Vec<String>,
-    pub builder_capacity: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,35 +68,10 @@ pub async fn run(
         return Ok(());
     }
 
-    // Verify the JWT file exists and has correct perms before we set up the
-    // builder context — fail-fast on misconfig rather than discovering it
-    // halfway through reconnect backoff.
+    // Verify the JWT file exists and has correct perms before connecting.
     load_host_jwt(&config.host_jwt_path)
         .await
         .context("initial host JWT load")?;
-
-    let builder_ctx = if config.builder_enabled {
-        let ctx = Arc::new(BuilderCtx::new(BuilderSettings {
-            work_root: config.builder_work_dir.clone(),
-            builder_bin: config.builder_bin.clone(),
-            capacity: config.builder_capacity,
-            timeout_secs: config.builder_timeout_secs,
-            memory_max: config.builder_memory_max.clone(),
-            cpu_quota: config.builder_cpu_quota.clone(),
-            deny_nets: config.builder_deny_nets.clone(),
-        }));
-        ctx.ensure_work_root()
-            .await
-            .with_context(|| format!("mkdir -p {}", config.builder_work_dir.display()))?;
-        info!(
-            work_dir = %config.builder_work_dir.display(),
-            capacity = config.builder_capacity,
-            "builder capability enabled",
-        );
-        Some(ctx)
-    } else {
-        None
-    };
 
     let mut backoff = Duration::from_secs(1);
     let http = reqwest::Client::new();
@@ -143,15 +115,7 @@ pub async fn run(
             }
         };
 
-        match connect_and_serve(
-            &url,
-            &jwt,
-            &config,
-            &podman,
-            builder_ctx.clone(),
-            resource_status_tx.subscribe(),
-        )
-        .await
+        match connect_and_serve(&url, &jwt, &config, &podman, resource_status_tx.subscribe()).await
         {
             Ok(()) => {
                 warn!("grpc stream closed cleanly; reconnecting");
@@ -171,18 +135,33 @@ pub async fn run(
 }
 
 fn assignment_request(config: &Config) -> AssignmentRequest {
-    let mut capabilities = vec!["coold".to_string()];
-    let mut builder_capacity = 0u32;
-    if config.builder_enabled {
-        capabilities.push("builder".to_string());
-        builder_capacity = config.builder_capacity;
-    }
     AssignmentRequest {
         host_id: config.host_mgmt_ip.clone(),
         coold_version: VERSION.to_string(),
-        capabilities,
-        builder_capacity,
+        capabilities: primitive_capabilities(),
     }
+}
+
+fn primitive_capabilities() -> Vec<String> {
+    [
+        "coold",
+        "images.pull",
+        "images.list",
+        "images.delete",
+        "containers.create",
+        "containers.start",
+        "containers.stop",
+        "containers.restart",
+        "containers.delete",
+        "containers.inspect",
+        "containers.list",
+        "containers.logs",
+        "containers.exec",
+        "containers.healthcheck.run",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 async fn resolve_flux_url(
@@ -228,7 +207,6 @@ async fn connect_and_serve(
     jwt: &str,
     config: &Config,
     podman: &PodmanClient,
-    builder_ctx: Option<Arc<BuilderCtx>>,
     mut resource_status_rx: broadcast::Receiver<ResourceStatusUpdate>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
@@ -248,20 +226,7 @@ async fn connect_and_serve(
 
     let (tx, rx) = mpsc::channel::<ClientMsg>(64);
 
-    // Resume any in-flight builder units left by a prior coold invocation.
-    // Must happen after the mpsc channel is live so adopted builds can enqueue
-    // their final Response onto the stream (it will drain once the stream
-    // binds below). Safe when builder_ctx is None — nothing to resume.
-    if let Some(ctx) = builder_ctx.as_ref().cloned() {
-        ctx.resume_or_reap(tx.clone()).await;
-    }
-
-    let mut capabilities = vec!["coold".to_string()];
-    let mut builder_capacity = 0u32;
-    if config.builder_enabled {
-        capabilities.push("builder".to_string());
-        builder_capacity = config.builder_capacity;
-    }
+    let capabilities = primitive_capabilities();
 
     tx.send(ClientMsg {
         payload: Some(client_msg::Payload::Hello(Hello {
@@ -270,7 +235,6 @@ async fn connect_and_serve(
             schema_min: 1,
             schema_max: 1,
             capabilities,
-            builder_capacity,
         })),
     })
     .await
@@ -320,9 +284,8 @@ async fn connect_and_serve(
 
         let tx = tx.clone();
         let podman = podman.clone();
-        let builder_ctx = builder_ctx.clone();
         tokio::spawn(async move {
-            handle(request_id, command, &podman, builder_ctx, tx).await;
+            handle(request_id, command, &podman, tx).await;
         });
     }
 
@@ -397,8 +360,7 @@ mod tests {
         let req = super::AssignmentRequest {
             host_id: "100.64.0.5".into(),
             coold_version: "test".into(),
-            capabilities: vec!["coold".into()],
-            builder_capacity: 0,
+            capabilities: super::primitive_capabilities(),
         };
 
         let got = super::resolve_flux_url(
@@ -419,8 +381,7 @@ mod tests {
         let req = super::AssignmentRequest {
             host_id: "100.64.0.5".into(),
             coold_version: "test".into(),
-            capabilities: vec!["coold".into()],
-            builder_capacity: 0,
+            capabilities: super::primitive_capabilities(),
         };
 
         let err = super::resolve_flux_url(&reqwest::Client::new(), None, None, "jwt", &req)
@@ -476,8 +437,7 @@ mod tests {
         let req = super::AssignmentRequest {
             host_id: "100.64.0.5".into(),
             coold_version: "test".into(),
-            capabilities: vec!["coold".into(), "builder".into()],
-            builder_capacity: 2,
+            capabilities: super::primitive_capabilities(),
         };
 
         let got = super::resolve_flux_url(

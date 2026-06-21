@@ -58,16 +58,16 @@ mod grpc_server {
 
     use coolify_proto::agent::v1::{
         agent_server::{Agent, AgentServer},
-        client_msg, response, ClientMsg, ServerMsg,
+        client_msg, ClientMsg, ServerMsg,
     };
 
     use crate::{
         auth,
         config::Config,
-        envelope::{BuildResponseBody, ResponseBody},
+        envelope::ResponseBody,
         registry::RegistryClient,
         resource_status::ResourceStatusPublisher,
-        state::{Pending, PendingKind, ResponseData, StreamHandle, Streams},
+        state::{Pending, ResponseData, StreamHandle, Streams},
     };
 
     /// Reject `0.0.0.0` / `::` binds unless explicitly opted in. The gRPC
@@ -181,7 +181,6 @@ mod grpc_server {
                 StreamHandle {
                     tx: cmd_tx,
                     caps: jwt_caps.clone(),
-                    builder_capacity: 0,
                 },
             );
 
@@ -217,7 +216,6 @@ mod grpc_server {
                                 host_id = %host_id_clone,
                                 version = %h.coold_version,
                                 capabilities = ?h.capabilities,
-                                builder_capacity = h.builder_capacity,
                                 "Hello received"
                             );
 
@@ -239,13 +237,8 @@ mod grpc_server {
                             }
 
                             let capabilities = h.capabilities;
-                            let builder_capacity = h.builder_capacity;
                             let coold_version = h.coold_version;
-                            streams.update_capabilities(
-                                &host_id_clone,
-                                capabilities.clone(),
-                                builder_capacity,
-                            );
+                            streams.update_capabilities(&host_id_clone, capabilities.clone());
                             if let Some(registry) = registry.clone() {
                                 let host_id = host_id_clone.clone();
                                 tokio::spawn(async move {
@@ -253,7 +246,6 @@ mod grpc_server {
                                         .upsert_connection(
                                             &host_id,
                                             capabilities,
-                                            builder_capacity,
                                             Some(coold_version),
                                         )
                                         .await
@@ -293,10 +285,8 @@ mod grpc_server {
         }
     }
 
-    /// Map a coold gRPC `Response` to the right lane's `ResponseData` and
-    /// hand it to the pending entry. If the dispatch was for a build, an
-    /// `Error` body is translated to `BuildResponseBody::Error`; otherwise
-    /// to `ResponseBody::Error`. Unknown request_id → drop.
+    /// Map a coold gRPC `Response` to `ResponseData` and hand it to the
+    /// pending entry. Unknown request_id → drop.
     fn deliver_response(pending: &Pending, resp: coolify_proto::agent::v1::Response) {
         let request_id = resp.request_id.clone();
         let kind = match pending.get(&request_id) {
@@ -307,35 +297,15 @@ mod grpc_server {
             }
         };
 
-        let data = match (kind, resp.body) {
-            (_, Some(response::Body::Build(b))) => {
-                ResponseData::Build(BuildResponseBody::from_proto(b))
-            }
-            (PendingKind::Build, Some(response::Body::Error(e))) => {
-                ResponseData::Build(BuildResponseBody::Error {
-                    code: e.code,
-                    message: e.message,
-                    stage: String::new(),
-                })
-            }
-            (PendingKind::Build, _) => {
-                warn!(%request_id, "non-build Response for build request; dropping");
-                return;
-            }
-            (PendingKind::Coold, body) => {
-                let resp = coolify_proto::agent::v1::Response {
-                    request_id: request_id.clone(),
-                    body,
-                };
-                match ResponseBody::try_from_proto(resp) {
-                    Some(rb) => ResponseData::Coold(rb),
-                    None => {
-                        warn!(%request_id, "build body on coold request; dropping");
-                        return;
-                    }
-                }
-            }
+        let resp = coolify_proto::agent::v1::Response {
+            request_id: request_id.clone(),
+            body: resp.body,
         };
+        let Some(body) = ResponseBody::try_from_proto(resp) else {
+            warn!(%request_id, ?kind, "unsupported response body; dropping");
+            return;
+        };
+        let data = ResponseData::Coold(body);
 
         pending.deliver(&request_id, data);
     }

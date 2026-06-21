@@ -33,7 +33,7 @@ scheduling, rollback, ingress templating, RBAC, audit.
 | Host facts (`podman info`, `wg show`, `/proc/*`, `iptables -nvL`) | **coold** | Read-only endpoints for central to scrape. |
 | Bearer-token authn + deny-dangerous-flags filter + ops/debug request log | **coold** | No RBAC, no per-user identity. |
 | Compose file parsing (services, networks, depends_on, volumes) | **central** | Emits primitive op sequence. |
-| OCI image build (Dockerfile / Buildpacks / Railpack / Static) | **builder** (separate binary in this workspace) | buildah bud → shared containers-storage. coold never builds. See §6. |
+| OCI image build (Dockerfile / Buildpacks / Railpack / Static) | **deferred builder** | Not active in current v5 Flux/coold runtime. Requires a dedicated ADR/API. coold never builds. |
 | App model (app → services → deployments → replicas) | **central** | Central DB. coold has no notion of "app". |
 | Scheduling (which host runs which container) | **central** | Consumes coold host facts; decides placement. |
 | Deploy orchestration (rolling swap, health gate, proxy cutover, rollback) | **central controller** | State machine in central. |
@@ -153,10 +153,7 @@ answer is "put it in central":
 For completeness on the other side of the split:
 
 - **App model**: `App { id, name, source: git|dockerfile|compose|image, services: [...] }`.
-- **Builder**: BuildKit / Buildpacks / Nixpacks → registry push. Runs on the
-  **first mesh host by default** for self-hosted; central may override per-
-  deploy via `target_host_id`. Cloud = central-run. Same binary, config-
-  selected role.
+- **Builder**: deferred until a dedicated ADR/API defines build scheduling, logs, artifacts, cancellation, and registry flow.
 - **Compose translator**: `docker-compose.yml` → N `containers/create` +
   volume creates + service-register + firewall-allow frames.
 - **Flux**: round-robin / least-loaded / pin / GPU-affinity. Consumes
@@ -177,7 +174,7 @@ Walkthrough of a single deploy, showing every primitive op. Mirrors
 `coolify` init/apply docs.
 
 ```
-T0  Central builder clones source, invokes BuildKit / buildpack / nixpacks.
+T0  Central build pipeline clones source, invokes BuildKit / buildpack / nixpacks.
     Output: OCI image @ registry.coolify.io/tenant/web:v2.
 
 T1  Central deploy controller picks target host H (flux).
@@ -261,13 +258,20 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
   distributed FS are post-alpha.
 - Backup: `podman volume export` + scp, orchestrated by central.
 
-## 11. Builder
+## 11. Builder (deferred)
 
-- Self-hosted default: **first mesh host** runs the builder. Central may pin
-  to a specific host per-deploy via `target_host_id`.
-- Cloud: builder runs inside central's infra.
-- Builder is never coold. Builder writes to a registry; coold only pulls the
-  resulting tag via `POST /images/pull`.
+Builder is a future building block, but it is not part of the active v5
+Flux/coold runtime surface right now. The current contract deliberately has no
+Flux `/v1/build/*` lane, no protobuf `BuildRequest` / `CancelBuild`, no coold
+builder capability, and no CLI `--builder-*` bootstrap flags.
+
+Before re-enabling builder, add an ADR/API covering:
+
+- who schedules builds and how capacity is represented;
+- where build logs, artifacts, and final results live;
+- cancellation and restart-adoption semantics;
+- whether builder runs as a coold child, a separate host agent, or central infra;
+- registry push/pull flow for single-node and multi-node clusters.
 
 ## 12. Persistence
 
@@ -487,9 +491,6 @@ All handlers live in `flux/src/unix_bridge.rs`. Axum routes:
 ```
 GET  /v1/health                              -> {"ok": true}
 POST /v1/coold/dispatch                      sync, 10 s timeout
-POST /v1/build/dispatch                      202 Accepted + {request_id}
-GET  /v1/build/result/:request_id            long-poll, ?timeout_ms= (default 30 000)
-POST /v1/build/:request_id/cancel            204 No Content
 ```
 
 Access control = filesystem perms. No TLS, no bearer, no per-request
@@ -504,7 +505,7 @@ Coold dispatch — request and response:
 POST /v1/coold/dispatch
 { "host_id": "10.64.0.7",
   "request_id": "01HX…",
-  "command": { "type": "list_containers" } }
+  "command": { "type": "containers.list" } }
 
 // response (sync)
 { "request_id": "01HX…",
@@ -516,13 +517,12 @@ POST /v1/coold/dispatch
   "code": 404, "message": "host not connected" }
 ```
 
-Only `list_containers` is wired today. Every future verb from §3 adds a
+Image and container primitives are wired today. Every future verb from §3 adds a
 variant to `CommandPayload` and a match arm in `route_coold`.
 
 Build dispatch:
 
 ```json
-POST /v1/build/dispatch
 { "host_id": "10.64.0.7",                // optional — absent = flux picks
   "request_id": "01HY…",
   "command": { "type": "static_build",
@@ -536,7 +536,6 @@ POST /v1/build/dispatch
 { "request_id": "01HY…" }
 
 // later:
-GET /v1/build/result/01HY…?timeout_ms=30000
 { "request_id": "01HY…",
   "status": "ok",
   "digest": "sha256:…",
@@ -567,32 +566,13 @@ GET /v1/build/result/01HY…?timeout_ms=30000
 
 Unknown `host_id` → 404. Host stream dropped mid-dispatch → 503.
 
-### Build dispatch flow
-
-1. Laravel `POST /v1/build/dispatch`. `route_build` picks the target:
-   - `host_id` present → require `"builder"` cap on that stream, else 503.
-   - `host_id` absent → `Streams::pick_host_with_cap("builder")` (first
-     match; no load balancing), else 503.
-2. `Pending::insert_waiting` with `PendingKind::Build`; handler returns
-   202 immediately. Build `Waiting` entries are **not** swept by the
-   timeout sweeper — the systemd-run transient unit's `RuntimeMaxSec`
-   is the real ceiling.
-3. Laravel polls `GET /v1/build/result/:id?timeout_ms=…`. `Pending::park`
-   either hands back a cached `Landed` body or returns a receiver that
-   awaits the in-flight response.
-4. coold streams the final `Response` back the same way coold dispatch
-   does; `deliver_response` fans out to parked pollers.
-5. Cancel: `POST /v1/build/:request_id/cancel` → `route_build` resolves
-   the owning host from `Pending`, emits `CancelBuild` on its stream,
-   coold runs `systemctl kill --signal=SIGTERM <scope>`.
-
 ### Flux config (env vars)
 
 All sourced from `flux/src/config.rs`:
 
 | var | default | role |
 |---|---|---|
-| `COOLIFY_FLUX_GRPC_BIND` | _required_ | coold dials this. Build traffic shares this port — no separate builder listener. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1`. |
+| `COOLIFY_FLUX_GRPC_BIND` | _required_ | coold dials this. Must be a specific interface IP (typically the WireGuard mgmt IP, e.g. `10.42.0.1:6443`); `0.0.0.0` / `::` refused unless `COOLIFY_FLUX_ALLOW_PUBLIC_BIND=1`. |
 | `COOLIFY_FLUX_ALLOW_PUBLIC_BIND` | unset | Set to `1` to allow binding `0.0.0.0` / `::`. Dev/test only — JWTs cross the wire unencrypted. |
 | `COOLIFY_FLUX_ID` | unset | Stable flux identity reported to Laravel in hosted-cloud mode. |
 | `COOLIFY_FLUX_PUBLIC_URL` | unset | Public TLS URL returned to coold by Laravel assignment. |
@@ -622,24 +602,19 @@ Laravel before each connect attempt and dials the returned flux URL.
 Cargo.toml          # workspace root (members: coold, flux, builder, builder-core, proto, e2e-tests)
 proto/
   agent.proto       # shared Protobuf: Agent.Stream, Hello, ServerMsg, ClientMsg, Response,
-                    # BuildRequest, CancelBuild, BuildResponseBody, capabilities, builder_capacity
   Cargo.toml
   src/lib.rs
 coold/
   Cargo.toml
-  src/              # dials flux gRPC, podman proxy, firewall writer, DNS, builder subprocess driver
+  src/              # dials flux gRPC, podman proxy, firewall scaffold, DNS
 flux/
   Cargo.toml
   src/
     main.rs         # tonic AgentServer (grpc_server mod) + pending_sweeper
     config.rs       # COOLIFY_FLUX_* env vars (see table above)
     auth.rs         # JWT verify (ES256/RS256, sub = host_id, caps claim)
-    state.rs        # Streams: DashMap<host_id, StreamHandle{tx, caps, builder_capacity}>
                     # Pending: DashMap<request_id, PendingEntry{Waiting|Landed}>
     envelope.rs     # Laravel-facing JSON: DispatchEnvelope, ResponseEnvelope,
-                    # BuildDispatchEnvelope, BuildResponseEnvelope
-    routing.rs      # pure routing (no I/O): route_coold, route_build → RouteOutcome
-    unix_bridge.rs  # axum UDS server, handlers for /v1/coold/* and /v1/build/*
 builder/
   Cargo.toml
   src/main.rs       # one-shot CLI: reads request.json, runs builder-core, writes result.json
@@ -647,101 +622,12 @@ builder-core/
   src/              # reusable git + buildah pipeline (static_build.rs etc.)
 ```
 
-## 17. builder — OCI image build agent
+## 17. builder — deferred OCI image build agent
 
-`builder/` is a separate binary in this Cargo workspace. coold never
-runs builds directly; it spawns the builder per-request.
-
-### Role
-
-- Builder no longer holds its own gRPC stream. Commit `1024747`
-  collapsed it onto coold's `Agent.Stream`: one stream per host, not
-  two. Coold advertises `"builder"` in its Hello `capabilities` (gated
-  by `COOLIFY_COOLD_BUILDER_ENABLED`); the flux capability-routes build
-  envelopes to any host that carries it.
-- Per build: coold spawns the builder binary inside a
-  `systemd-run --pipe --scope coolify-build-<request_id>` transient
-  unit for cgroup + FS isolation (`PrivateTmp`, `ProtectSystem=strict`,
-  `ReadWritePaths` allowlist, `MemoryMax`, `CPUQuota`, `RuntimeMaxSec`,
-  `IPAddressDeny` for mgmt / container CIDRs).
-- Builder clones the repo (shallow), runs the toolchain, writes the OCI
-  image to shared podman containers-storage
-  (`/var/lib/containers/storage`).
-- Builder emits NDJSON frames on stdout **and** durably to
-  `<work_dir>/events.ndjson` (see persistence below).
-- Coold parses the final frame and relays a `Response` over the
-  existing stream; flux delivers it on the build lane.
-
-### Supported stacks (v0.1 MVP)
-
-| Stack | Detector | Impl |
-|---|---|---|
-| `STATIC` | explicit in BuildRequest | generateContainerfile → `buildah bud` → nginx:alpine base |
-| `DOCKERFILE` | — | post-MVP |
-| `BUILDPACKS` | — | post-MVP |
-| `RAILPACK` | — | post-MVP |
-
-### Storage model (single-node MVP)
-
-Builder writes to the same `/var/lib/containers/storage` as coold +
-podman. No registry, no push over the network. coold calls
-`containers/create image=localhost/<app>@sha256:...`; image is already
-present. Multi-node requires a registry or `podman save`/`load` —
-deferred.
-
-### Persistence (survive coold restart)
-
-Commit `8ac89a1` makes builds durable across a coold upgrade or crash.
-
-- **Durable event log**: every NDJSON frame is appended to
-  `<work_dir>/events.ndjson`. Stdout remains best-effort — SIGPIPE is
-  ignored at builder startup and write errors are swallowed, so a dead
-  reader (coold gone) never terminates the build.
-- **Final outcome**: atomically written (`.tmp` + `rename`) as
-  `<work_dir>/result.json` on success or `<work_dir>/error.json` on
-  error / cancel. Exit codes: 0 success, 1 build error, 2 usage/IO
-  error, 130 on SIGTERM.
-- **Restart adoption**: coold's `resume_or_reap` runs after the outbound
-  gRPC mpsc channel is live but before Hello. For every
-  `coolify-build-*.service` found on disk it classifies the unit:
-  - **active** → adopt: re-register in `active_builds` (cancel routing
-    keeps working), spawn a task that polls `systemctl is-active` every
-    2 s and, on exit, reads `result.json` / `error.json` and emits the
-    `Response` on the new stream.
-  - **inactive + `result.json`** → emit success `Response` immediately.
-  - **inactive + `error.json`** → emit error `Response` immediately.
-  - **inactive + neither** → emit `500 builder exited without result
-    file` so Laravel gets a terminal error instead of hanging.
-- Flux-side: no change. `Response` envelopes carry `request_id`; the
-  flux routes by lookup in `Pending` regardless of which coold stream
-  (old or restarted) delivered them. If both flux and coold restart,
-  delivery still works as long as Laravel's poller is still holding
-  `GET /v1/build/result/:id`.
-
-### Cancellation
-
-`POST /v1/build/:request_id/cancel` →
-`route_build(Cancel)` → flux finds the owning host in `Pending`,
-pushes `CancelBuild` over the stream → coold runs `systemctl kill
---signal=SIGTERM <scope>`. The cgroup kill takes the builder, buildah,
-and git down together.
-
-### Ports
-
-- flux coold + build gRPC: `:6443` (single listener).
-- No `:6444`. The separate builder listener was removed in `1024747`.
-
-### Single-node systemd layout
-
-```
-coold.service     → dials flux :6443, advertises "builder" cap when enabled,
-                    spawns builder subprocesses in transient units per build
-flux.service → listens :6443 (coold gRPC) + /run/coolify/flux.sock (Laravel UDS)
-```
-
-Builder has no long-lived unit; each build runs under
-`coolify-build-<request_id>.service` (transient, cleaned by systemd on
-exit or by coold's `resume_or_reap` on next start).
+`builder/` and `builder-core/` remain in the workspace as dormant reference
+code, but current v5 does not expose builder as a Flux/coold primitive. Keep
+new builder work behind a fresh ADR/API before reintroducing protobuf messages,
+Flux routes, coold runtime config, CLI flags, or E2E suites.
 
 ## 18. Cross-references
 
@@ -756,8 +642,7 @@ The central Coolify v5 brain is a separate **Laravel app**, not part of this
 Rust workspace. It owns all app-aware logic (compose, Dockerfiles, buildpacks,
 scheduling, rollback, ingress templating, RBAC, audit) and its own persistent
 state. This workspace ships only the data-plane pieces: host agent (`coold`),
-stream router (`flux`), build agent (`builder`), and cluster bootstrap
-(`coolify`) — each independently testable.
+stream router (`flux`) and cluster bootstrap (`coolify`). The build agent (`builder`) is deferred reference code until a dedicated ADR/API lands.
 
 
 ### Laravel to coold request path
@@ -767,14 +652,13 @@ operations it calls flux's local Unix socket (`COOLIFY_FLUX_UNIX_SOCKET_PATH`,
 default `/run/coolify/flux.sock`; grant the php-fpm group access via
 `COOLIFY_FLUX_UNIX_SOCKET_GROUP`). Flux routes the request down the existing
 coold-initiated gRPC stream keyed by `host_id`. Example: `POST /v1/coold/dispatch`
-with a `list_containers` command maps host-offline responses to error code,
+with a `containers.list` command maps host-offline responses to error code,
 timeouts, missing `host_id`, and malformed flux responses per `envelope.rs`.
 
 
 ### Flux stream inventory
 
 Flux exposes a local UDS inventory endpoint at `GET /v1/streams`, returning
-connected host streams (`host_id`, capabilities, builder capacity). Laravel polls
+connected host streams (`host_id`, capabilities). Laravel polls
 this to discover online agents and materialize them into its own server registry
-(persisting capabilities and last-seen, marking them online). Builds use
-`POST /v1/build/dispatch` + `GET /v1/build/result/:request_id`.
+(persisting capabilities and last-seen, marking them online).

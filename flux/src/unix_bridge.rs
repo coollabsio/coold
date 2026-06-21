@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -22,18 +22,14 @@ use hyper::body::Incoming;
 use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
-use serde::{Deserialize, Serialize};
 use tokio::net::UnixListener;
 use tokio::sync::oneshot;
 use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::envelope::{
-    BuildCommandPayload, BuildDispatchEnvelope, BuildResponseBody, BuildResponseEnvelope,
-    DispatchEnvelope, ResponseBody, ResponseEnvelope,
-};
-use crate::routing::{route_build, route_coold, RouteOutcome};
+use crate::envelope::{DispatchEnvelope, ResponseBody, ResponseEnvelope};
+use crate::routing::{route_coold, RouteOutcome};
 use crate::state::{InsertOutcome, ParkResult, Pending, PendingKind, ResponseData, Streams};
 
 #[derive(Clone)]
@@ -56,9 +52,6 @@ pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<(
         .route("/v1/health", get(health))
         .route("/v1/streams", get(stream_inventory))
         .route("/v1/coold/dispatch", post(coold_dispatch))
-        .route("/v1/build/dispatch", post(build_dispatch))
-        .route("/v1/build/result/:request_id", get(build_result))
-        .route("/v1/build/:request_id/cancel", post(build_cancel))
         .with_state(state);
 
     let listener = bind(
@@ -193,7 +186,6 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
             warn!(%request_id, %host_id, %code, %message, "coold dispatch rejected");
             coold_err(&request_id, code, message)
         }
-        _ => coold_err(&request_id, 500, "routing mismatch"),
     }
 }
 
@@ -208,9 +200,6 @@ async fn await_coold(
             body,
         })
         .into_response(),
-        Ok(Ok(ResponseData::Build(_))) => {
-            coold_err(request_id, 500, "build response on coold lane")
-        }
         // Sink dropped without a value (sweeper evicted on timeout, or the
         // entry was removed by a send-failure path above).
         Ok(Err(_)) => coold_err(request_id, 504, "dispatch timeout"),
@@ -224,143 +213,6 @@ fn coold_err(request_id: &str, code: u32, message: &str) -> Response {
         body: ResponseBody::Error {
             code,
             message: message.to_owned(),
-        },
-    };
-    let status = code_to_status(code);
-    (status, Json(env)).into_response()
-}
-
-// ─── Build ───────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-struct BuildDispatchAck {
-    request_id: String,
-}
-
-async fn build_dispatch(
-    State(st): State<AppState>,
-    Json(env): Json<BuildDispatchEnvelope>,
-) -> Response {
-    // Cancel is not valid on the dispatch endpoint; route it through the
-    // dedicated cancel path for clarity.
-    if matches!(env.command, BuildCommandPayload::Cancel {}) {
-        return build_err(
-            &env.request_id,
-            400,
-            "use /v1/build/{id}/cancel for cancels",
-            "dispatch",
-        );
-    }
-
-    let request_id = env.request_id.clone();
-    match route_build(&st.streams, &st.pending, st.pending_max, env) {
-        RouteOutcome::SendBuild { host_id, msg } => {
-            let Some(tx) = st.streams.get_tx(&host_id) else {
-                st.pending.remove(&request_id);
-                return build_err(&request_id, 503, "builder host disconnected", "dispatch");
-            };
-            if let Err(e) = tx.send(msg).await {
-                st.pending.remove(&request_id);
-                warn!(%request_id, error = %e, "send build to host stream failed");
-                return build_err(&request_id, 503, "host stream send failed", "dispatch");
-            }
-            (StatusCode::ACCEPTED, Json(BuildDispatchAck { request_id })).into_response()
-        }
-        RouteOutcome::PushError { code, message } => {
-            warn!(%request_id, %code, %message, "build dispatch rejected");
-            build_err(&request_id, code, message, "dispatch")
-        }
-        _ => build_err(&request_id, 500, "routing mismatch", "dispatch"),
-    }
-}
-
-async fn build_result(
-    State(st): State<AppState>,
-    AxumPath(request_id): AxumPath<String>,
-    axum::extract::Query(q): axum::extract::Query<ResultQuery>,
-) -> Response {
-    match st.pending.park(&request_id) {
-        ParkResult::AlreadyLanded(ResponseData::Build(body)) => {
-            Json(BuildResponseEnvelope { request_id, body }).into_response()
-        }
-        ParkResult::AlreadyLanded(ResponseData::Coold(_)) => {
-            build_err(&request_id, 500, "coold response on build lane", "result")
-        }
-        ParkResult::NotFound => build_err(&request_id, 404, "unknown request_id", "result"),
-        ParkResult::Parked(rx) => {
-            // Cap caller-supplied poll waits so a malicious or buggy client
-            // can't pin a UDS connection forever by passing `u64::MAX`.
-            const MAX_POLL_MS: u64 = 300_000;
-            let raw_ms = q.timeout_ms.unwrap_or(30_000).min(MAX_POLL_MS);
-            let timeout = Duration::from_millis(raw_ms);
-            match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(ResponseData::Build(body))) => {
-                    Json(BuildResponseEnvelope { request_id, body }).into_response()
-                }
-                Ok(Ok(ResponseData::Coold(_))) => {
-                    build_err(&request_id, 500, "coold response on build lane", "result")
-                }
-                Ok(Err(_)) | Err(_) => (
-                    StatusCode::REQUEST_TIMEOUT,
-                    Json(BuildResponseEnvelope {
-                        request_id: request_id.clone(),
-                        body: BuildResponseBody::Error {
-                            code: 408,
-                            message: "result poll timed out".into(),
-                            stage: "result".into(),
-                        },
-                    }),
-                )
-                    .into_response(),
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct ResultQuery {
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-}
-
-async fn build_cancel(
-    State(st): State<AppState>,
-    AxumPath(request_id): AxumPath<String>,
-) -> Response {
-    let env = BuildDispatchEnvelope {
-        host_id: None,
-        request_id: request_id.clone(),
-        command: BuildCommandPayload::Cancel {},
-    };
-    match route_build(&st.streams, &st.pending, st.pending_max, env) {
-        RouteOutcome::SendCancel { host_id, msg } => {
-            let Some(tx) = st.streams.get_tx(&host_id) else {
-                warn!(%request_id, %host_id, "cancel: owning host disconnected");
-                return StatusCode::NO_CONTENT.into_response();
-            };
-            if let Err(e) = tx.send(msg).await {
-                warn!(%request_id, error = %e, "send cancel to host stream failed");
-            }
-            StatusCode::NO_CONTENT.into_response()
-        }
-        RouteOutcome::DropCancelHostGone { host_id } => {
-            warn!(%request_id, %host_id, "cancel: owning host lost builder cap");
-            StatusCode::NO_CONTENT.into_response()
-        }
-        RouteOutcome::PushError { code, message } => {
-            build_err(&request_id, code, message, "cancel")
-        }
-        _ => build_err(&request_id, 500, "routing mismatch", "cancel"),
-    }
-}
-
-fn build_err(request_id: &str, code: u32, message: &str, stage: &str) -> Response {
-    let env = BuildResponseEnvelope {
-        request_id: request_id.to_owned(),
-        body: BuildResponseBody::Error {
-            code,
-            message: message.to_owned(),
-            stage: stage.to_owned(),
         },
     };
     let status = code_to_status(code);

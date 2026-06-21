@@ -1,4 +1,4 @@
-//! Minimal fake coold: dials flux, sends Hello, answers ListContainers with a stub.
+//! Minimal fake coold: dials flux, sends Hello, answers ContainersList with a stub.
 //!
 //! Usage:
 //!   COOLIFY_COOLD_FLUX_URL=http://127.0.0.1:6443 JWT=<token> cargo run -p flux --example fake_coold
@@ -12,7 +12,7 @@ use tonic::Request;
 
 use coolify_proto::agent::v1::{
     agent_client::AgentClient, client_msg, response, server_msg, ClientMsg, ContainerSummary,
-    Hello, ListContainersResp, Response,
+    ContainersListResp, Error, Hello, Response,
 };
 
 #[tokio::main]
@@ -43,7 +43,6 @@ async fn main() -> Result<()> {
             schema_min: 1,
             schema_max: 1,
             capabilities: vec!["coold".into()],
-            builder_capacity: 0,
         })),
     })
     .await?;
@@ -57,10 +56,10 @@ async fn main() -> Result<()> {
         let request_id = msg.request_id.clone();
         let Some(command) = msg.command else { continue };
         match command {
-            server_msg::Command::ListContainers(_) => {
+            server_msg::Command::ContainersList(_) => {
                 let resp = Response {
                     request_id,
-                    body: Some(response::Body::ListContainers(ListContainersResp {
+                    body: Some(response::Body::ContainersList(ContainersListResp {
                         containers: vec![ContainerSummary {
                             id: "deadbeef".into(),
                             name: "fake-web".into(),
@@ -103,8 +102,18 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
-            server_msg::Command::Build(_) | server_msg::Command::CancelBuild(_) => {
-                // fake_coold does not implement the builder capability.
+            _ => {
+                let resp = Response {
+                    request_id,
+                    body: Some(response::Body::Error(Error {
+                        code: 501,
+                        message: "fake_coold does not implement this primitive".into(),
+                    })),
+                };
+                tx.send(ClientMsg {
+                    payload: Some(client_msg::Payload::Response(resp)),
+                })
+                .await?;
             }
         }
     }

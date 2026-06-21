@@ -3,32 +3,26 @@
 //! side effects. Separating this keeps routing logic unit-testable.
 
 use coolify_proto::agent::v1::{
-    server_msg, ApplyCaddyIngressReq, BuildRequest,
-    CaddyAppIngressFile as ProtoCaddyAppIngressFile, CancelBuild, ListContainersReq, ServerMsg,
-    StaticConfig, StopCaddyIngressReq,
+    server_msg, ApplyCaddyIngressReq, CaddyAppIngressFile as ProtoCaddyAppIngressFile,
+    ContainersCreateReq, ContainersDeleteReq, ContainersExecReq, ContainersHealthcheckRunReq,
+    ContainersInspectReq, ContainersListReq, ContainersLogsReq, ContainersRestartReq,
+    ContainersStartReq, ContainersStopReq, ImagesDeleteReq, ImagesListReq, ImagesPullReq,
+    PortMapping as ProtoPortMapping, ServerMsg, StopCaddyIngressReq,
 };
 
-use crate::envelope::{
-    BuildCommandPayload, BuildDispatchEnvelope, CommandPayload, DispatchEnvelope,
-};
-use crate::state::{InsertOutcome, Pending, PendingKind, Streams};
+use crate::envelope::{CommandPayload, DispatchEnvelope};
+use crate::state::Streams;
 
-/// What the caller should do next. `SendCoold` / `SendBuild` / `SendCancel`
-/// all carry a fully-formed `ServerMsg` ready to push down the host's
-/// `mpsc` tx. `PushError` maps to an HTTP error response. `DropCancelHostGone`
-/// is log-only — the original build's final response will have reported the
-/// failure already.
+/// What the caller should do next. `SendCoold` carries a fully-formed
+/// `ServerMsg` ready to push down the host's mpsc tx. `PushError` maps
+/// to an HTTP error response.
 #[derive(Debug)]
 pub enum RouteOutcome {
     SendCoold { host_id: String, msg: ServerMsg },
-    SendBuild { host_id: String, msg: ServerMsg },
-    SendCancel { host_id: String, msg: ServerMsg },
     PushError { code: u32, message: &'static str },
-    DropCancelHostGone { host_id: String },
 }
 
-/// Route a coold command envelope to its target host. Currently only
-/// `list_containers` — expects `host_id` pin to be present.
+/// Route a coold command envelope to its pinned target host.
 pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
     if streams.get(&env.host_id).is_none() {
         return RouteOutcome::PushError {
@@ -38,7 +32,89 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
     }
 
     let cmd = match env.command {
-        CommandPayload::ListContainers => server_msg::Command::ListContainers(ListContainersReq {}),
+        CommandPayload::ImagesPull { reference } => {
+            server_msg::Command::ImagesPull(ImagesPullReq { reference })
+        }
+        CommandPayload::ImagesList => server_msg::Command::ImagesList(ImagesListReq {}),
+        CommandPayload::ImagesDelete { reference, force } => {
+            server_msg::Command::ImagesDelete(ImagesDeleteReq { reference, force })
+        }
+        CommandPayload::ContainersCreate {
+            name,
+            image,
+            command,
+            env,
+            networks,
+            volumes,
+            ports,
+            dns,
+            restart_policy,
+            privileged,
+            network_mode,
+            capabilities,
+        } => server_msg::Command::ContainersCreate(ContainersCreateReq {
+            name,
+            image,
+            command,
+            env,
+            networks,
+            volumes,
+            ports: ports
+                .into_iter()
+                .map(|port| ProtoPortMapping {
+                    host_ip: port.host_ip,
+                    host_port: port.host_port,
+                    container_port: port.container_port,
+                    protocol: port.protocol,
+                })
+                .collect(),
+            dns,
+            restart_policy,
+            privileged,
+            network_mode,
+            capabilities,
+        }),
+        CommandPayload::ContainersStart { id } => {
+            server_msg::Command::ContainersStart(ContainersStartReq { id })
+        }
+        CommandPayload::ContainersStop {
+            id,
+            timeout_seconds,
+        } => server_msg::Command::ContainersStop(ContainersStopReq {
+            id,
+            timeout_seconds,
+        }),
+        CommandPayload::ContainersRestart {
+            id,
+            timeout_seconds,
+        } => server_msg::Command::ContainersRestart(ContainersRestartReq {
+            id,
+            timeout_seconds,
+        }),
+        CommandPayload::ContainersDelete { id, force } => {
+            server_msg::Command::ContainersDelete(ContainersDeleteReq { id, force })
+        }
+        CommandPayload::ContainersInspect { id } => {
+            server_msg::Command::ContainersInspect(ContainersInspectReq { id })
+        }
+        CommandPayload::ContainersList => server_msg::Command::ContainersList(ContainersListReq {}),
+        CommandPayload::ContainersLogs {
+            id,
+            tail,
+            stdout,
+            stderr,
+        } => server_msg::Command::ContainersLogs(ContainersLogsReq {
+            id,
+            tail,
+            stdout,
+            stderr,
+        }),
+        CommandPayload::ContainersExec { id, command } => {
+            server_msg::Command::ContainersExec(ContainersExecReq { id, command })
+        }
+        CommandPayload::ContainersHealthcheckRun { id } => {
+            server_msg::Command::ContainersHealthcheckRun(ContainersHealthcheckRunReq { id })
+        }
         CommandPayload::ApplyCaddyIngress {
             caddyfile,
             apps,
@@ -69,119 +145,11 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
     }
 }
 
-/// Route a build-command envelope. For `static_build`, picks the target host
-/// (pinned or load-balanced) and inserts a `Pending` entry keyed by
-/// `request_id` so the gRPC response path can deliver to the right waiter.
-/// For `cancel`, looks up the owning host via `Pending` and produces a
-/// `CancelBuild` message.
-pub fn route_build(
-    streams: &Streams,
-    pending: &Pending,
-    pending_max: usize,
-    env: BuildDispatchEnvelope,
-) -> RouteOutcome {
-    match env.command {
-        BuildCommandPayload::StaticBuild {
-            repo_url,
-            git_ref,
-            target_image,
-            output_dir,
-            base_image,
-        } => {
-            let target_host = match env.host_id.as_deref() {
-                Some(id) => {
-                    if !streams.has_cap(id, "builder") {
-                        return RouteOutcome::PushError {
-                            code: 503,
-                            message: "host has no builder capability",
-                        };
-                    }
-                    id.to_string()
-                }
-                None => match streams.pick_host_with_cap("builder") {
-                    Some(id) => id,
-                    None => {
-                        return RouteOutcome::PushError {
-                            code: 503,
-                            message: "no builder-capable host connected",
-                        };
-                    }
-                },
-            };
-
-            match pending.insert_waiting(
-                env.request_id.clone(),
-                target_host.clone(),
-                PendingKind::Build,
-                pending_max,
-            ) {
-                InsertOutcome::Inserted => {}
-                InsertOutcome::Duplicate => {
-                    return RouteOutcome::PushError {
-                        code: 409,
-                        message: "request_id already in flight",
-                    };
-                }
-                InsertOutcome::AtCapacity => {
-                    return RouteOutcome::PushError {
-                        code: 503,
-                        message: "flux at pending-dispatch capacity",
-                    };
-                }
-            }
-
-            let build_req = BuildRequest {
-                repo_url,
-                git_ref,
-                stack: coolify_proto::agent::v1::BuildStack::Static as i32,
-                target_image,
-                cache_key: String::new(),
-                static_cfg: Some(StaticConfig {
-                    output_dir: output_dir.unwrap_or_else(|| "dist".into()),
-                    base_image: base_image
-                        .unwrap_or_else(|| "docker.io/library/nginx:alpine".into()),
-                }),
-            };
-            let msg = ServerMsg {
-                request_id: env.request_id,
-                command: Some(server_msg::Command::Build(build_req)),
-            };
-            RouteOutcome::SendBuild {
-                host_id: target_host,
-                msg,
-            }
-        }
-        BuildCommandPayload::Cancel {} => {
-            let Some(entry) = pending.get(&env.request_id) else {
-                return RouteOutcome::PushError {
-                    code: 404,
-                    message: "request_id not in flight",
-                };
-            };
-            if !streams.has_cap(&entry.host_id, "builder") {
-                return RouteOutcome::DropCancelHostGone {
-                    host_id: entry.host_id,
-                };
-            }
-            let msg = ServerMsg {
-                request_id: env.request_id,
-                command: Some(server_msg::Command::CancelBuild(CancelBuild {})),
-            };
-            RouteOutcome::SendCancel {
-                host_id: entry.host_id,
-                msg,
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{PendingKind, StreamHandle};
+    use crate::state::{StreamHandle, Streams};
     use tokio::sync::mpsc;
-
-    const CAP: usize = 16;
 
     fn insert_host(streams: &Streams, host_id: &str, caps: &[&str]) -> mpsc::Receiver<ServerMsg> {
         let (tx, rx) = mpsc::channel::<ServerMsg>(16);
@@ -190,240 +158,231 @@ mod tests {
             StreamHandle {
                 tx,
                 caps: caps.iter().map(|c| c.to_string()).collect(),
-                builder_capacity: 2,
             },
         );
         rx
     }
 
-    fn static_env(request_id: &str, host_id: Option<&str>) -> BuildDispatchEnvelope {
-        BuildDispatchEnvelope {
-            host_id: host_id.map(str::to_owned),
-            request_id: request_id.to_owned(),
-            command: BuildCommandPayload::StaticBuild {
-                repo_url: "https://example.com/repo".into(),
-                git_ref: "main".into(),
-                target_image: "localhost/t".into(),
-                output_dir: None,
-                base_image: None,
+    #[test]
+    fn route_coold_rejects_disconnected_host() {
+        let streams = Streams::new();
+        let out = route_coold(
+            &streams,
+            DispatchEnvelope {
+                host_id: "missing".into(),
+                request_id: "r1".into(),
+                command: CommandPayload::ContainersList,
             },
-        }
-    }
+        );
 
-    fn cancel_env(request_id: &str) -> BuildDispatchEnvelope {
-        BuildDispatchEnvelope {
-            host_id: None,
-            request_id: request_id.to_owned(),
-            command: BuildCommandPayload::Cancel {},
-        }
-    }
-
-    #[test]
-    fn dispatch_pinned_to_builder_host_routes_to_that_host() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        let _rx_a = insert_host(&streams, "A", &["coold", "builder"]);
-        let _rx_b = insert_host(&streams, "B", &["coold", "builder"]);
-
-        let out = route_build(&streams, &pending, CAP, static_env("r1", Some("A")));
         match out {
-            RouteOutcome::SendBuild { host_id, .. } => assert_eq!(host_id, "A"),
-            other => panic!("expected SendBuild to A, got {other:?}"),
-        }
-        // Pending entry must be created for timeout sweeping.
-        let entry = pending.get("r1").expect("pending populated");
-        assert_eq!(entry.host_id, "A");
-        assert_eq!(entry.kind, PendingKind::Build);
-    }
-
-    #[test]
-    fn dispatch_pinned_to_coold_only_host_returns_503() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        insert_host(&streams, "A", &["coold"]);
-
-        let out = route_build(&streams, &pending, CAP, static_env("r1", Some("A")));
-        match out {
-            RouteOutcome::PushError { code, message } => {
-                assert_eq!(code, 503);
-                assert_eq!(message, "host has no builder capability");
-            }
-            other => panic!("expected 503, got {other:?}"),
-        }
-        assert!(pending.get("r1").is_none(), "no pending on reject");
-    }
-
-    #[test]
-    fn dispatch_pinned_to_unknown_host_returns_503() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        insert_host(&streams, "A", &["coold", "builder"]);
-
-        let out = route_build(&streams, &pending, CAP, static_env("r1", Some("Z")));
-        match out {
-            RouteOutcome::PushError { code, message } => {
-                assert_eq!(code, 503);
-                assert_eq!(message, "host has no builder capability");
-            }
-            other => panic!("expected 503, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn dispatch_without_host_id_picks_builder_capable_host() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        // A has only coold; B is builder-capable. Router must pick B.
-        insert_host(&streams, "A", &["coold"]);
-        insert_host(&streams, "B", &["coold", "builder"]);
-
-        let out = route_build(&streams, &pending, CAP, static_env("r1", None));
-        match out {
-            RouteOutcome::SendBuild { host_id, .. } => assert_eq!(host_id, "B"),
-            other => panic!("expected SendBuild to B, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn dispatch_without_host_id_when_no_builder_returns_503() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        insert_host(&streams, "A", &["coold"]);
-        insert_host(&streams, "B", &["coold"]);
-
-        let out = route_build(&streams, &pending, CAP, static_env("r1", None));
-        match out {
-            RouteOutcome::PushError { code, message } => {
-                assert_eq!(code, 503);
-                assert_eq!(message, "no builder-capable host connected");
-            }
-            other => panic!("expected 503, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cancel_routes_to_owning_host() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        insert_host(&streams, "A", &["coold", "builder"]);
-        insert_host(&streams, "B", &["coold", "builder"]);
-        let _ = pending.insert_waiting("r1".into(), "B".into(), PendingKind::Build, CAP);
-
-        let out = route_build(&streams, &pending, CAP, cancel_env("r1"));
-        match out {
-            RouteOutcome::SendCancel { host_id, msg } => {
-                assert_eq!(host_id, "B");
-                assert_eq!(msg.request_id, "r1");
-                assert!(matches!(
-                    msg.command,
-                    Some(server_msg::Command::CancelBuild(_))
-                ));
-            }
-            other => panic!("expected SendCancel to B, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cancel_for_unknown_request_returns_404() {
-        let streams = Streams::new();
-        let pending = Pending::new();
-        insert_host(&streams, "A", &["coold", "builder"]);
-
-        let out = route_build(&streams, &pending, CAP, cancel_env("nope"));
-        match out {
-            RouteOutcome::PushError { code, message } => {
-                assert_eq!(code, 404);
-                assert_eq!(message, "request_id not in flight");
-            }
-            other => panic!("expected 404, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn cancel_when_owning_host_lost_builder_cap_drops_silently() {
-        // Host reconnected with fewer caps between build start and cancel.
-        let streams = Streams::new();
-        let pending = Pending::new();
-        let _ = pending.insert_waiting("r1".into(), "A".into(), PendingKind::Build, CAP);
-        insert_host(&streams, "A", &["coold"]);
-
-        let out = route_build(&streams, &pending, CAP, cancel_env("r1"));
-        match out {
-            RouteOutcome::DropCancelHostGone { host_id } => assert_eq!(host_id, "A"),
-            other => panic!("expected DropCancelHostGone, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn coold_dispatch_routes_to_connected_host() {
-        let streams = Streams::new();
-        let _rx = insert_host(&streams, "A", &["coold"]);
-        let env = DispatchEnvelope {
-            host_id: "A".into(),
-            request_id: "r1".into(),
-            command: CommandPayload::ListContainers,
-        };
-        match route_coold(&streams, env) {
-            RouteOutcome::SendCoold { host_id, msg } => {
-                assert_eq!(host_id, "A");
-                assert_eq!(msg.request_id, "r1");
-                assert!(matches!(
-                    msg.command,
-                    Some(server_msg::Command::ListContainers(_))
-                ));
-            }
-            other => panic!("expected SendCoold, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn coold_dispatch_routes_caddy_apply_to_connected_host() {
-        let streams = Streams::new();
-        let _rx = insert_host(&streams, "A", &["coold"]);
-        let env = DispatchEnvelope {
-            host_id: "A".into(),
-            request_id: "r1".into(),
-            command: CommandPayload::ApplyCaddyIngress {
-                caddyfile: ":80 {\n respond 200\n}".into(),
-                apps: vec![crate::envelope::CaddyAppIngressFile {
-                    name: "app_1".into(),
-                    caddyfile: "example.com {\n reverse_proxy app:80\n}".into(),
-                }],
-                mesh_network: "coolify-default-mesh".into(),
-            },
-        };
-        match route_coold(&streams, env) {
-            RouteOutcome::SendCoold { host_id, msg } => {
-                assert_eq!(host_id, "A");
-                assert_eq!(msg.request_id, "r1");
-                match msg.command {
-                    Some(server_msg::Command::ApplyCaddyIngress(req)) => {
-                        assert_eq!(req.mesh_network, "coolify-default-mesh");
-                        assert!(req.caddyfile.contains("respond 200"));
-                        assert_eq!(req.apps.len(), 1);
-                        assert_eq!(req.apps[0].name, "app_1");
-                    }
-                    other => panic!("expected ApplyCaddyIngress, got {other:?}"),
-                }
-            }
-            other => panic!("expected SendCoold, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn coold_dispatch_unknown_host_returns_404() {
-        let streams = Streams::new();
-        let env = DispatchEnvelope {
-            host_id: "Z".into(),
-            request_id: "r1".into(),
-            command: CommandPayload::ListContainers,
-        };
-        match route_coold(&streams, env) {
             RouteOutcome::PushError { code, message } => {
                 assert_eq!(code, 404);
                 assert_eq!(message, "host not connected");
             }
-            other => panic!("expected 404, got {other:?}"),
+            other => panic!("expected PushError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn route_coold_builds_containers_list_message() {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "H", &["coold"]);
+        let out = route_coold(
+            &streams,
+            DispatchEnvelope {
+                host_id: "H".into(),
+                request_id: "r1".into(),
+                command: CommandPayload::ContainersList,
+            },
+        );
+
+        match out {
+            RouteOutcome::SendCoold { host_id, msg } => {
+                assert_eq!(host_id, "H");
+                assert!(matches!(
+                    msg.command,
+                    Some(server_msg::Command::ContainersList(_))
+                ));
+            }
+            other => panic!("expected SendCoold, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_coold_builds_images_list_message() {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "H", &["coold"]);
+        let out = route_coold(
+            &streams,
+            DispatchEnvelope {
+                host_id: "H".into(),
+                request_id: "r1".into(),
+                command: CommandPayload::ImagesList,
+            },
+        );
+
+        match out {
+            RouteOutcome::SendCoold { msg, .. } => {
+                assert!(matches!(
+                    msg.command,
+                    Some(server_msg::Command::ImagesList(_))
+                ));
+            }
+            other => panic!("expected SendCoold, got {other:?}"),
+        }
+    }
+
+    fn route_command(command: serde_json::Value) -> server_msg::Command {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "H", &["coold"]);
+        let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
+            "host_id": "H",
+            "request_id": "r1",
+            "command": command,
+        }))
+        .expect("valid dispatch envelope");
+
+        match route_coold(&streams, env) {
+            RouteOutcome::SendCoold {
+                msg:
+                    ServerMsg {
+                        command: Some(command),
+                        ..
+                    },
+                ..
+            } => command,
+            other => panic!("expected routed command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn routes_all_image_primitives_from_dotted_json_names() {
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "images.pull",
+                "reference": "docker.io/library/nginx:alpine"
+            })),
+            server_msg::Command::ImagesPull(ImagesPullReq { reference }) if reference == "docker.io/library/nginx:alpine"
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({ "type": "images.list" })),
+            server_msg::Command::ImagesList(_)
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "images.delete",
+                "reference": "docker.io/library/nginx:alpine",
+                "force": true
+            })),
+            server_msg::Command::ImagesDelete(ImagesDeleteReq { reference, force })
+                if reference == "docker.io/library/nginx:alpine" && force
+        ));
+    }
+
+    #[test]
+    fn routes_all_container_primitives_from_dotted_json_names() {
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.create",
+                "name": "web",
+                "image": "docker.io/library/nginx:alpine",
+                "command": ["nginx", "-g", "daemon off;"],
+                "env": ["APP_ENV=production"],
+                "networks": ["coolify-default-mesh"],
+                "volumes": ["/data/web:/app"],
+                "ports": [{
+                    "host_ip": "127.0.0.1",
+                    "host_port": 8080,
+                    "container_port": 80,
+                    "protocol": "tcp"
+                }],
+                "dns": ["10.210.0.1"],
+                "restart_policy": "unless-stopped"
+            })),
+            server_msg::Command::ContainersCreate(ContainersCreateReq { name, image, ports, .. })
+                if name == "web"
+                    && image == "docker.io/library/nginx:alpine"
+                    && ports.len() == 1
+                    && ports[0].container_port == 80
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({ "type": "containers.start", "id": "abc" })),
+            server_msg::Command::ContainersStart(ContainersStartReq { id }) if id == "abc"
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.stop",
+                "id": "abc",
+                "timeout_seconds": 3
+            })),
+            server_msg::Command::ContainersStop(ContainersStopReq { id, timeout_seconds })
+                if id == "abc" && timeout_seconds == 3
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.restart",
+                "id": "abc",
+                "timeout_seconds": 4
+            })),
+            server_msg::Command::ContainersRestart(ContainersRestartReq { id, timeout_seconds })
+                if id == "abc" && timeout_seconds == 4
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.delete",
+                "id": "abc",
+                "force": true
+            })),
+            server_msg::Command::ContainersDelete(ContainersDeleteReq { id, force })
+                if id == "abc" && force
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({ "type": "containers.inspect", "id": "abc" })),
+            server_msg::Command::ContainersInspect(ContainersInspectReq { id }) if id == "abc"
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({ "type": "containers.list" })),
+            server_msg::Command::ContainersList(_)
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.logs",
+                "id": "abc",
+                "tail": 50,
+                "stdout": true,
+                "stderr": true
+            })),
+            server_msg::Command::ContainersLogs(ContainersLogsReq { id, tail, stdout, stderr })
+                if id == "abc" && tail == 50 && stdout && stderr
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.exec",
+                "id": "abc",
+                "command": ["echo", "ok"]
+            })),
+            server_msg::Command::ContainersExec(ContainersExecReq { id, command })
+                if id == "abc" && command == ["echo", "ok"]
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "containers.healthcheck.run",
+                "id": "abc"
+            })),
+            server_msg::Command::ContainersHealthcheckRun(ContainersHealthcheckRunReq { id })
+                if id == "abc"
+        ));
     }
 }

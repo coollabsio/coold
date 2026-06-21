@@ -37,7 +37,6 @@ pub enum ActionType {
     WriteCorrosionSchema,
     InstallCorrosionService,
     InstallCooldService,
-    InstallBuilder,
 }
 impl std::fmt::Display for ActionType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -371,22 +370,7 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                     bridge_gateway: machine_ip(subnets[ns][host]),
                 })
                 .collect::<Vec<_>>();
-            let builder = if desired.has_builder_cap(host) {
-                Some(services::coold::BuilderConfig {
-                    capacity: desired.builder_capacity,
-                    cpu_quota: desired.builder_cpu_quota.clone(),
-                    memory_max: desired.builder_memory_max.clone(),
-                    timeout_secs: desired.builder_timeout_secs,
-                    deny_nets: vec![
-                        desired.mgmt_pool.to_string(),
-                        desired.container_pool.to_string(),
-                    ],
-                })
-            } else {
-                None
-            };
-            let coold_unit =
-                services::coold::service_unit(mgmt_ip, &ns_configs, None, builder.as_ref());
+            let coold_unit = services::coold::service_unit(mgmt_ip, &ns_configs, None);
             let coold_unit_drift = state.coold_unit_sha256 != sha256_hex(coold_unit.as_bytes());
             if !state.corrosion_active || cfg_drift || corrosion_drift || schema_drift {
                 push(
@@ -395,20 +379,6 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                     "",
                     ActionType::InstallCorrosionService,
                     "systemctl enable --now corrosion",
-                );
-            }
-            if desired.has_builder_cap(host) {
-                push(
-                    &mut plan,
-                    host,
-                    "",
-                    ActionType::InstallBuilder,
-                    &format!(
-                        "builder {} → {} (+ buildah, git; capacity={})",
-                        desired.coold_version,
-                        services::builder::BUILDER_BINARY_PATH,
-                        desired.builder_capacity.max(2)
-                    ),
                 );
             }
             if !state.coold_active || cfg_drift || coold_drift || coold_unit_drift {
@@ -469,12 +439,6 @@ mod tests {
             corrosion_version: "v1".into(),
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
-            enable_builder: true,
-            builder_hosts: vec![],
-            builder_capacity: 2,
-            builder_cpu_quota: "200%".into(),
-            builder_memory_max: "2G".into(),
-            builder_timeout_secs: 1800,
             intent: Intent::Upgrade,
             new_nodes: vec![],
             allow_replace: false,

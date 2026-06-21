@@ -1,7 +1,7 @@
 /// Minimal fake-flux gRPC server for local development/testing.
 ///
 /// Starts an Agent service on 127.0.0.1:50051, waits for coold to connect,
-/// reads its Hello frame, sends one ListContainersReq, prints the response,
+/// reads its Hello frame, sends one ContainersListReq, prints the response,
 /// then exits. Plain h2c (no TLS).
 ///
 /// Usage:
@@ -21,7 +21,7 @@ pub mod proto {
 
 use proto::{
     agent_server::{Agent, AgentServer},
-    client_msg, server_msg, ClientMsg, ListContainersReq, ServerMsg,
+    client_msg, server_msg, ClientMsg, ContainersListReq, ServerMsg,
 };
 
 struct FakeFlux;
@@ -64,12 +64,12 @@ impl Agent for FakeFlux {
                 }
             }
 
-            // Send ListContainersReq
+            // Send ContainersListReq
             let req_id = "r1".to_string();
             let _ = tx
                 .send(Ok(ServerMsg {
                     request_id: req_id.clone(),
-                    command: Some(server_msg::Command::ListContainers(ListContainersReq {})),
+                    command: Some(server_msg::Command::ContainersList(ContainersListReq {})),
                 }))
                 .await;
 
@@ -79,8 +79,8 @@ impl Agent for FakeFlux {
                     Ok(msg) => {
                         if let Some(client_msg::Payload::Response(resp)) = msg.payload {
                             if resp.request_id == req_id {
-                                println!("[fake_flux] ListContainersResp:");
-                                if let Some(proto::response::Body::ListContainers(lc)) = resp.body {
+                                println!("[fake_flux] ContainersListResp:");
+                                if let Some(proto::response::Body::ContainersList(lc)) = resp.body {
                                     for c in &lc.containers {
                                         println!(
                                             "  id={} name={} image={} state={} networks={:?}",

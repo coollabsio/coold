@@ -19,20 +19,11 @@ $EDITOR e2e-tests/.env
 cargo test -p e2e-tests --no-run
 ```
 
-## Suite 1 — `builder.rs` (Hetzner-provisioned)
+## Deferred builder suite
 
-Provisions 2 VMs (A = central + builder, B = coold-only), runs
-`coolify init bootstrap`, then executes every dispatch / cancel / restart
-/ artifact-perm scenario on the shared cluster. VMs destroyed on drop.
-Uses the same env vars as the install suite (see below):
-
-```bash
-cargo test -p e2e-tests --test builder builder_lifecycle -- --ignored --nocapture --test-threads=1
-```
-
-The whole suite is a single `#[test] fn builder_lifecycle` — there are
-no longer individual scenario tests (running each separately would
-provision its own cluster, which is wasteful).
+The previous builder lifecycle suite is parked at `deferred/builder.rs` while
+builder is not part of the active v5 Flux/coold API surface. Re-enable it only
+after a new builder ADR/API lands.
 
 ## Suite 2 — `install.rs` (Hetzner-provisioned)
 

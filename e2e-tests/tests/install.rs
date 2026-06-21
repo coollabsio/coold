@@ -103,23 +103,11 @@ fn assert_flux_socket(ssh_key: &str, host: &str) {
 /// Verify the runtime dirs + systemd unit files coold relies on exist,
 /// are the right object type, and have the expected mode + owner. Called
 /// on every host that runs flux (central). Covers the flux parent
-/// dir, the builder work tree, and both systemd unit files.
+/// dir and systemd unit files.
 fn assert_core_file_perms(ssh_key: &str, host: &str) {
     // (path, expected `stat -c %F` kind, allowed mode strings, expected owner)
     let specs: &[(&str, &str, &[&str], &str)] = &[
         ("/run/coolify", "directory", &["700", "750", "755"], "root"),
-        (
-            "/var/lib/coolify-builder",
-            "directory",
-            &["700", "750", "755"],
-            "root",
-        ),
-        (
-            "/var/lib/coolify-builder/work",
-            "directory",
-            &["700"],
-            "root",
-        ),
         (
             "/etc/systemd/system/coold.service",
             "regular file",
@@ -223,7 +211,6 @@ fn install_single_host() {
             MGMT_POOL,
             "--container-pool",
             CONTAINER_POOL,
-            "--enable-builder",
             "--yes",
         ],
     )
@@ -282,8 +269,8 @@ fn install_two_hosts() {
     let host_a = cluster.hosts()[0].ipv4.clone();
     let host_b = cluster.hosts()[1].ipv4.clone();
 
-    // 1. Install: hostA = central + builder, hostB = coold-only.
-    step("1/9  coolify init bootstrap (install 2-host stack; A=central+builder, B=coold-only)");
+    // 1. Install: hostA = central, hostB = second coold node.
+    step("1/9  coolify init bootstrap (install 2-host stack; A=central, B=node)");
     local_coolify(
         &cfg.coolify_bin,
         &[
@@ -301,8 +288,6 @@ fn install_two_hosts() {
             MGMT_POOL,
             "--container-pool",
             CONTAINER_POOL,
-            "--builder-hosts",
-            &host_a,
             "--yes",
         ],
     )
@@ -351,7 +336,7 @@ fn install_two_hosts() {
     );
     ok(&format!("hostB → {mgmt_a} OK"));
 
-    // 5. Core coold stack on both, central + builder only on hostA.
+    // 5. Core coold stack on both, central only on hostA.
     step("5/7  verify systemd units + firewall scaffold on both hosts");
     for h in &[&host_a, &host_b] {
         for unit in CORE_UNITS {

@@ -18,15 +18,6 @@ pub struct FluxConfig {
     pub jwt_path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BuilderConfig {
-    pub capacity: u32,
-    pub cpu_quota: String,
-    pub memory_max: String,
-    pub timeout_secs: u32,
-    pub deny_nets: Vec<String>,
-}
-
 pub fn namespaces_env_value(ns: &[CooldNamespace]) -> String {
     ns.iter()
         .map(|n| format!("{}:{}:{}", n.name, n.network, n.bridge_gateway))
@@ -38,7 +29,6 @@ pub fn service_unit(
     mgmt_ip: Ipv4Addr,
     namespaces: &[CooldNamespace],
     flux: Option<&FluxConfig>,
-    builder: Option<&BuilderConfig>,
 ) -> String {
     let ns_env = if namespaces.is_empty() {
         String::new()
@@ -57,45 +47,13 @@ pub fn service_unit(
             )
         })
         .unwrap_or_default();
-    let (builder_env, builder_pre) = if let Some(b) = builder {
-        let cap = if b.capacity == 0 { 2 } else { b.capacity };
-        let cpu = if b.cpu_quota.is_empty() {
-            "200%"
-        } else {
-            &b.cpu_quota
-        };
-        let mem = if b.memory_max.is_empty() {
-            "2G"
-        } else {
-            &b.memory_max
-        };
-        let timeout = if b.timeout_secs == 0 {
-            1800
-        } else {
-            b.timeout_secs
-        };
-        (
-            format!(
-                "Environment=COOLIFY_COOLD_BUILDER_ENABLED=true\nEnvironment=COOLIFY_COOLD_BUILDER_WORK_DIR={}\nEnvironment=COOLIFY_COOLD_BUILDER_CAPACITY={cap}\nEnvironment=COOLIFY_COOLD_BUILDER_CPU_QUOTA={cpu}\nEnvironment=COOLIFY_COOLD_BUILDER_MEMORY_MAX={mem}\nEnvironment=COOLIFY_COOLD_BUILDER_TIMEOUT_SECS={timeout}\nEnvironment=COOLIFY_COOLD_BUILDER_BIN={}\nEnvironment=COOLIFY_COOLD_BUILDER_DENY_NETS={}\n",
-                crate::services::builder::BUILDER_WORK_DIR,
-                crate::services::builder::BUILDER_BINARY_PATH,
-                b.deny_nets.join(",")
-            ),
-            format!(
-                "ExecStartPre=/bin/mkdir -p {}\n",
-                crate::services::builder::BUILDER_WORK_DIR
-            ),
-        )
-    } else {
-        (String::new(), String::new())
-    };
     let mesh_dns_units = if namespaces.is_empty() {
         String::new()
     } else {
         format!(" {MESH_DNS_ANCHOR_SERVICE} {MESH_DNS_RESOLVER_SERVICE}")
     };
     format!(
-        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service{mesh_dns_units}\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service{mesh_dns_units}\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{flux_env}{builder_env}{builder_pre}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service{mesh_dns_units}\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service{mesh_dns_units}\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{flux_env}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -220,7 +178,6 @@ mod tests {
                 },
             ],
             None,
-            None,
         );
         for want in [
             "Environment=COOLIFY_COOLD_HOST_MGMT_IP=100.64.0.5",
@@ -279,14 +236,14 @@ mod tests {
 
     #[test]
     fn service_unit_omits_namespace_env_when_empty() {
-        let got = service_unit("100.64.0.5".parse().unwrap(), &[], None, None);
+        let got = service_unit("100.64.0.5".parse().unwrap(), &[], None);
         assert!(!got.contains("COOLIFY_COOLD_NAMESPACES"));
         assert!(!got.contains("COOLIFY_COOLD_DNS_ZONE"));
         assert!(got.contains("Environment=COOLIFY_COOLD_HOST_MGMT_IP=100.64.0.5"));
     }
 
     #[test]
-    fn service_unit_emits_flux_and_builder_env_with_defaults() {
+    fn service_unit_emits_flux_env() {
         let got = service_unit(
             "100.64.0.5".parse().unwrap(),
             &[],
@@ -294,25 +251,13 @@ mod tests {
                 url: "http://100.64.0.1:6443".into(),
                 jwt_path: "/etc/coolify/host-jwt".into(),
             }),
-            Some(&BuilderConfig {
-                capacity: 0,
-                cpu_quota: String::new(),
-                memory_max: String::new(),
-                timeout_secs: 0,
-                deny_nets: vec!["100.64.0.0/16".into(), "10.210.0.0/16".into()],
-            }),
         );
         for want in [
             "Environment=COOLIFY_COOLD_FLUX_URL=http://100.64.0.1:6443",
             "Environment=COOLIFY_COOLD_HOST_JWT_PATH=/etc/coolify/host-jwt",
-            "Environment=COOLIFY_COOLD_BUILDER_ENABLED=true",
-            "Environment=COOLIFY_COOLD_BUILDER_CAPACITY=2",
-            "Environment=COOLIFY_COOLD_BUILDER_CPU_QUOTA=200%",
-            "Environment=COOLIFY_COOLD_BUILDER_MEMORY_MAX=2G",
-            "Environment=COOLIFY_COOLD_BUILDER_TIMEOUT_SECS=1800",
-            "Environment=COOLIFY_COOLD_BUILDER_DENY_NETS=100.64.0.0/16,10.210.0.0/16",
         ] {
             assert!(got.contains(want), "missing {want} in:\n{got}");
         }
+        assert!(!got.contains("COOLIFY_COOLD_BUILDER_"));
     }
 }
