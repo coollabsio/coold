@@ -437,14 +437,14 @@ mod stream_snapshot_tests {
             "b".into(),
             StreamHandle {
                 tx: tx.clone(),
-                caps: vec!["coold".into(), "coold".into()],
+                caps: vec!["containers.list".into(), "containers.list".into()],
             },
         );
         streams.insert(
             "a".into(),
             StreamHandle {
                 tx,
-                caps: vec!["coold".into()],
+                caps: vec!["containers.list".into()],
             },
         );
         let got = streams.snapshot();
@@ -452,6 +452,6 @@ mod stream_snapshot_tests {
             got.iter().map(|s| s.host_id.as_str()).collect::<Vec<_>>(),
             vec!["a", "b"]
         );
-        assert_eq!(got[1].caps, vec!["coold"]);
+        assert_eq!(got[1].caps, vec!["containers.list"]);
     }
 }

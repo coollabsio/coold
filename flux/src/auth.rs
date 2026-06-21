@@ -6,8 +6,7 @@ use serde::Deserialize;
 struct Claims {
     /// host_id issued by Laravel at enrollment.
     sub: String,
-    /// Capabilities this host is authorized for. Always includes "coold";
-    /// hosts running builds also carry "builder".
+    /// Capabilities this host is authorized for.
     #[serde(default)]
     caps: Vec<String>,
 }
@@ -103,7 +102,7 @@ mod tests {
         TestClaims {
             sub: "host-a".into(),
             aud: "coold".into(),
-            caps: vec!["coold".into()],
+            caps: vec!["containers.list".into()],
             exp: (n as i64 + exp_offset) as usize,
             iat: n,
         }
@@ -214,7 +213,7 @@ mod tests {
         let jwt = encode(&Header::new(Algorithm::ES256), &claims(3600), &enc).unwrap();
         let v = verify_jwt(&jwt, std::str::from_utf8(&keys.pub_pem).unwrap()).unwrap();
         assert_eq!(v.host_id, "host-a");
-        assert_eq!(v.caps, vec!["coold".to_string()]);
+        assert_eq!(v.caps, vec!["containers.list".to_string()]);
     }
 
     #[test]

@@ -144,7 +144,6 @@ fn assignment_request(config: &Config) -> AssignmentRequest {
 
 fn primitive_capabilities() -> Vec<String> {
     [
-        "coold",
         "images.pull",
         "images.list",
         "images.delete",

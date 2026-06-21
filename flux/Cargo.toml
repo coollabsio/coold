@@ -39,6 +39,3 @@ tempfile = "3"
 
 [[example]]
 name = "sign_jwt"
-
-[[example]]
-name = "fake_coold"

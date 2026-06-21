@@ -3,8 +3,8 @@
 //! Usage:
 //!   cargo run -p flux --example sign_jwt -- <host_id> <priv_pem_out> <pub_pem_out> [caps]
 //!
-//! `caps` is an optional comma-separated capability list; defaults to "coold".
-//! Example: `coold,builder` for a host that should accept build dispatches.
+//! `caps` is an optional comma-separated capability list; defaults to all coold primitives.
+//! Example: `containers.list,ingress.apply,builder` for a host that should accept those dispatches.
 //!
 //! Prints the signed JWT to stdout.
 
@@ -21,6 +21,29 @@ struct Claims {
     caps: Vec<String>,
     exp: usize,
     iat: usize,
+}
+
+fn default_capabilities() -> Vec<String> {
+    [
+        "images.pull",
+        "images.list",
+        "images.delete",
+        "containers.create",
+        "containers.start",
+        "containers.stop",
+        "containers.restart",
+        "containers.delete",
+        "containers.inspect",
+        "containers.list",
+        "containers.logs",
+        "containers.exec",
+        "containers.healthcheck.run",
+        "ingress.apply",
+        "ingress.stop",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,7 +63,7 @@ fn main() -> anyhow::Result<()> {
                 .filter(|c| !c.is_empty())
                 .collect()
         })
-        .unwrap_or_else(|| vec!["coold".to_string()]);
+        .unwrap_or_else(default_capabilities);
 
     let status = Command::new("openssl")
         .args([

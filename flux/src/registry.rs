@@ -218,13 +218,13 @@ mod tests {
         let payload = AgentConnectionPayload::connected(
             "flux-eu-1",
             "100.64.0.5",
-            vec!["coold".into()],
+            vec!["containers.list".into()],
             Some("0.1.0".into()),
         );
 
         assert_eq!(payload.flux_id, "flux-eu-1");
         assert_eq!(payload.host_id, "100.64.0.5");
-        assert_eq!(payload.capabilities, vec!["coold"]);
+        assert_eq!(payload.capabilities, vec!["containers.list"]);
         assert_eq!(payload.coold_version.as_deref(), Some("0.1.0"));
     }
 }

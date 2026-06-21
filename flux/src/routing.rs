@@ -217,7 +217,7 @@ mod tests {
     #[test]
     fn route_coold_rejects_host_missing_required_primitive_capability() {
         let streams = Streams::new();
-        let _rx = insert_host(&streams, "H", &["coold"]);
+        let _rx = insert_host(&streams, "H", &["images.list"]);
 
         let out = route_coold(
             &streams,
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn route_coold_builds_containers_list_message() {
         let streams = Streams::new();
-        let _rx = insert_host(&streams, "H", &["coold", "containers.list"]);
+        let _rx = insert_host(&streams, "H", &["containers.list"]);
         let out = route_coold(
             &streams,
             DispatchEnvelope {
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn route_coold_builds_images_list_message() {
         let streams = Streams::new();
-        let _rx = insert_host(&streams, "H", &["coold", "images.list"]);
+        let _rx = insert_host(&streams, "H", &["images.list"]);
         let out = route_coold(
             &streams,
             DispatchEnvelope {
@@ -292,7 +292,6 @@ mod tests {
             &streams,
             "H",
             &[
-                "coold",
                 "images.pull",
                 "images.list",
                 "images.delete",
@@ -572,7 +571,7 @@ mod tests {
 
         for (capability, command) in cases {
             let streams = Streams::new();
-            let _rx = insert_host(&streams, "H", &["coold", capability]);
+            let _rx = insert_host(&streams, "H", &[capability]);
             let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
                 "host_id": "H",
                 "request_id": "r1",
