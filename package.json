@@ -1,13 +1,5 @@
 {
   "name": "coolify-v5-workspace",
   "private": true,
-  "type": "module",
-  "scripts": {
-    "dev": "bash scripts/dev.sh",
-    "dev:vm": "bash scripts/dev-vm.sh dev",
-    "dev:vm:up": "bash scripts/dev-vm.sh up",
-    "dev:vm:shell": "bash scripts/dev-vm.sh shell",
-    "dev:vm:stop": "bash scripts/dev-vm.sh stop",
-    "dev:vm:delete": "bash scripts/dev-vm.sh delete"
-  }
+  "type": "module"
 }

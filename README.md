@@ -77,40 +77,9 @@ Live host reads flow: Laravel → flux UDS → coold outbound gRPC stream → Po
 
 ### Local development
 
-One command starts flux + a fake coold; point your Laravel app at the
-printed flux socket:
-
-```bash
-bun run dev
-```
-
-Full-fidelity Lima VM development (Podman, Corrosion, flux, real coold all run inside an isolated Linux VM):
-
-```bash
-bun run dev:vm:up   # create/start the VM
-bun run dev:vm      # run the real-coold dev stack in the VM
-```
-
-The Lima VM keeps runtime state inside Linux (`/run/podman`, `/var/lib/corrosion`, `/etc/coolify`, iptables/nft, DNS binds). The repo is mounted read/write at `/workspace/coold`, so source edits still affect your checkout. Useful VM commands:
-
-```bash
-bun run dev:vm:shell
-bun run dev:vm:stop
-bun run dev:vm:delete
-```
-
-To run the real stack from inside the VM shell directly:
-
-```bash
-REAL_COOLD=1 bun run dev
-```
-
-Useful override:
-
-```bash
-COOLIFY_FLUX_GRPC_BIND=127.0.0.1:6444 \
-bun run dev
-```
+Coolify owns local/VM dev orchestration for the full stack. This repo does not
+provide dev launcher scripts; use the Coolify repo to start the development
+environment, then work on the Rust binaries here as needed.
 
 ---
 

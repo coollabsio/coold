@@ -31,8 +31,8 @@
 
 ## Deferred real-engine smoke tests
 
-- Add ignored real-Podman primitive smoke tests against the Lima VM for the image/container primitive surface:
+- Add ignored real-Podman primitive smoke tests against the Coolify-managed Linux VM for the image/container primitive surface:
   - `images.pull`, `images.list`, `images.delete`
   - `containers.create`, `containers.start`, `containers.list`, `containers.inspect`, `containers.logs`, `containers.exec`, `containers.stop`, `containers.delete`
   - one negative `containers.create` deny-filter case, such as `privileged: true`
-- Add real-Podman/Lima smoke coverage for each remaining primitive group as it is implemented.
+- Add real-Podman smoke coverage for each remaining primitive group as it is implemented.
