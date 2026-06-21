@@ -134,7 +134,7 @@ The v5 bootstrap firewall scaffold installs the cross-host and same-bridge enfor
 | Cross-host | iptables `COOLIFY-ALLOW` (filter) | wg0 ↔ bridge |
 | Intra-host same-bridge | nft `coolify_bridge::coolify_allow` (bridge family) | Same-bridge traffic bypassing FORWARD |
 
-Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule ID = `sha256("namespace|src|dst|proto|port")[:12]`. Tuples only; audit / RBAC / owners live in Laravel.
+Snapshots: `/etc/coolify/allow.rules` + `/etc/coolify/allow.nft`. Restored on boot by `coolify-mesh-fw.service` + `coolify-mesh-allow.service`. Rule IDs are caller-provided stable handles from Laravel. Tuples only; audit / RBAC / owners live in Laravel.
 
 ---
 

@@ -5,7 +5,8 @@
 use coolify_proto::agent::v1::{
     server_msg, ApplyIngressReq, ContainersCreateReq, ContainersDeleteReq, ContainersExecReq,
     ContainersHealthcheckRunReq, ContainersInspectReq, ContainersListReq, ContainersLogsReq,
-    ContainersRestartReq, ContainersStartReq, ContainersStopReq, ImagesDeleteReq, ImagesListReq,
+    ContainersRestartReq, ContainersStartReq, ContainersStopReq, FirewallAllowReq, FirewallListReq,
+    FirewallReconcileReq, FirewallRevokeReq, FirewallRule, ImagesDeleteReq, ImagesListReq,
     ImagesPullReq, IngressAppConfig as ProtoIngressAppConfig, PortMapping as ProtoPortMapping,
     ServerMsg, StopIngressReq,
 };
@@ -143,6 +144,32 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
         CommandPayload::StopIngress { kind } => {
             server_msg::Command::IngressStop(StopIngressReq { kind })
         }
+        CommandPayload::FirewallAllow {
+            id,
+            namespace,
+            src,
+            dst,
+            proto,
+            port,
+        } => server_msg::Command::FirewallAllow(FirewallAllowReq {
+            rule: Some(FirewallRule {
+                id,
+                namespace,
+                src,
+                dst,
+                proto,
+                port,
+            }),
+        }),
+        CommandPayload::FirewallRevoke { id } => {
+            server_msg::Command::FirewallRevoke(FirewallRevokeReq { id })
+        }
+        CommandPayload::FirewallList { namespace } => {
+            server_msg::Command::FirewallList(FirewallListReq { namespace })
+        }
+        CommandPayload::FirewallReconcile => {
+            server_msg::Command::FirewallReconcile(FirewallReconcileReq {})
+        }
     };
 
     let msg = ServerMsg {
@@ -172,6 +199,10 @@ fn required_capability(command: &CommandPayload) -> &'static str {
         CommandPayload::ContainersHealthcheckRun { .. } => "containers.healthcheck.run",
         CommandPayload::ApplyIngress { .. } => "ingress.apply",
         CommandPayload::StopIngress { .. } => "ingress.stop",
+        CommandPayload::FirewallAllow { .. } => "firewall.allow",
+        CommandPayload::FirewallRevoke { .. } => "firewall.revoke",
+        CommandPayload::FirewallList { .. } => "firewall.list",
+        CommandPayload::FirewallReconcile => "firewall.reconcile",
     }
 }
 
@@ -566,6 +597,30 @@ mod tests {
             (
                 "ingress.stop",
                 serde_json::json!({ "type": "ingress.stop", "kind": "caddy" }),
+            ),
+            (
+                "firewall.allow",
+                serde_json::json!({
+                    "type": "firewall.allow",
+                    "id": "rule-api-postgres",
+                    "namespace": "default",
+                    "src": "coolify-v5-nginx-a",
+                    "dst": "coolify-v5-nginx-b",
+                    "proto": "tcp",
+                    "port": 5432
+                }),
+            ),
+            (
+                "firewall.revoke",
+                serde_json::json!({ "type": "firewall.revoke", "id": "abc123" }),
+            ),
+            (
+                "firewall.list",
+                serde_json::json!({ "type": "firewall.list", "namespace": "default" }),
+            ),
+            (
+                "firewall.reconcile",
+                serde_json::json!({ "type": "firewall.reconcile" }),
             ),
         ];
 

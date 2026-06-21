@@ -159,6 +159,10 @@ fn primitive_capabilities() -> Vec<String> {
         "containers.healthcheck.run",
         "ingress.apply",
         "ingress.stop",
+        "firewall.allow",
+        "firewall.revoke",
+        "firewall.list",
+        "firewall.reconcile",
     ]
     .into_iter()
     .map(str::to_string)

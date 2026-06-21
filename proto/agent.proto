@@ -44,6 +44,11 @@ message ServerMsg {
 
         ApplyIngressReq ingress_apply = 90;
         StopIngressReq  ingress_stop  = 91;
+
+        FirewallAllowReq firewall_allow = 92;
+        FirewallRevokeReq firewall_revoke = 93;
+        FirewallListReq firewall_list = 94;
+        FirewallReconcileReq firewall_reconcile = 95;
     }
 }
 
@@ -67,6 +72,10 @@ message Response {
 
         ApplyIngressResp ingress_apply = 90;
         StopIngressResp  ingress_stop  = 91;
+        FirewallAllowResp firewall_allow = 92;
+        FirewallRevokeResp firewall_revoke = 93;
+        FirewallListResp firewall_list = 94;
+        FirewallReconcileResp firewall_reconcile = 95;
         Error error = 100;
     }
 }
@@ -165,3 +174,21 @@ message IngressAppConfig {
 message ApplyIngressResp { string output = 1; }
 message StopIngressReq { string kind = 1; }
 message StopIngressResp { string output = 1; }
+
+message FirewallRule {
+    string namespace = 1;
+    string src = 2;
+    string dst = 3;
+    string proto = 4;
+    uint32 port = 5;
+    string id = 6;
+}
+
+message FirewallAllowReq { FirewallRule rule = 1; }
+message FirewallAllowResp { string id = 1; string output = 2; }
+message FirewallRevokeReq { string id = 1; }
+message FirewallRevokeResp { string output = 1; }
+message FirewallListReq { string namespace = 1; }
+message FirewallListResp { repeated FirewallRule rules = 1; }
+message FirewallReconcileReq {}
+message FirewallReconcileResp { string output = 1; }

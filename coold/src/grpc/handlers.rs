@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
@@ -10,8 +11,9 @@ use crate::grpc::proto::{
     client_msg, response, server_msg, ApplyIngressResp, ClientMsg, ContainerSummary,
     ContainersCreateResp, ContainersDeleteResp, ContainersExecResp, ContainersHealthcheckRunResp,
     ContainersInspectResp, ContainersListResp, ContainersLogsResp, ContainersRestartResp,
-    ContainersStartResp, ContainersStopResp, Error, ImageSummary, ImagesDeleteResp, ImagesListResp,
-    ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
+    ContainersStartResp, ContainersStopResp, Error, FirewallAllowResp, FirewallListResp,
+    FirewallReconcileResp, FirewallRevokeResp, FirewallRule as ProtoFirewallRule, ImageSummary,
+    ImagesDeleteResp, ImagesListResp, ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
 };
 use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
@@ -282,6 +284,69 @@ pub async fn handle(
                     warn!(%request_id, error = %format!("{e:#}"), "ingress stop failed");
                     error_body(e)
                 }
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::FirewallAllow(req) => {
+            let body = match req.rule {
+                Some(rule) => match firewall_allow(FirewallRule::from(rule)).await {
+                    Ok((id, output)) => {
+                        response::Body::FirewallAllow(FirewallAllowResp { id, output })
+                    }
+                    Err(e) => error_body(e),
+                },
+                None => error_body(anyhow!("missing firewall rule")),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::FirewallRevoke(req) => {
+            let body = match firewall_revoke(&req.id).await {
+                Ok(output) => response::Body::FirewallRevoke(FirewallRevokeResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::FirewallList(req) => {
+            let body = match firewall_list(&req.namespace).await {
+                Ok(rules) => response::Body::FirewallList(FirewallListResp {
+                    rules: rules.into_iter().map(ProtoFirewallRule::from).collect(),
+                }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::FirewallReconcile(_) => {
+            let body = match firewall_reconcile().await {
+                Ok(output) => response::Body::FirewallReconcile(FirewallReconcileResp { output }),
+                Err(e) => error_body(e),
             };
             send_response(
                 &tx,
@@ -659,6 +724,349 @@ fn caddy_nft_add_args(caddy_ip: &str, mesh_subnet: &str) -> Vec<String> {
     ]
 }
 
+const FIREWALL_STATE_PATH: &str = "/etc/coolify/firewall-rules.tsv";
+const FIREWALL_ALLOW_RULES_PATH: &str = "/etc/coolify/allow.rules";
+const FIREWALL_BRIDGE_ALLOW_RULES_PATH: &str = "/etc/coolify/allow.nft";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FirewallRule {
+    id: String,
+    namespace: String,
+    src: String,
+    dst: String,
+    proto: String,
+    port: u32,
+}
+
+impl From<ProtoFirewallRule> for FirewallRule {
+    fn from(rule: ProtoFirewallRule) -> Self {
+        Self {
+            id: rule.id,
+            namespace: rule.namespace,
+            src: rule.src,
+            dst: rule.dst,
+            proto: if rule.proto.is_empty() {
+                "tcp".into()
+            } else {
+                rule.proto
+            },
+            port: rule.port,
+        }
+    }
+}
+
+impl From<FirewallRule> for ProtoFirewallRule {
+    fn from(rule: FirewallRule) -> Self {
+        Self {
+            id: rule.id,
+            namespace: rule.namespace,
+            src: rule.src,
+            dst: rule.dst,
+            proto: rule.proto,
+            port: rule.port,
+        }
+    }
+}
+
+async fn firewall_allow(rule: FirewallRule) -> Result<(String, String)> {
+    validate_firewall_rule(&rule)?;
+    let normalized = resolve_firewall_rule(rule).await?;
+    let id = normalized.id.clone();
+    let mut rules = load_firewall_rules().await?;
+    rules.retain(|existing| existing.id != id);
+    rules.push(normalized.clone());
+    save_firewall_rules(&rules).await?;
+    apply_firewall_rule(&normalized).await?;
+
+    Ok((id, "Firewall rule applied.".into()))
+}
+
+async fn firewall_revoke(id: &str) -> Result<String> {
+    let mut rules = load_firewall_rules().await?;
+    let before = rules.len();
+    rules.retain(|rule| rule.id != id);
+
+    if rules.len() == before {
+        return Err(anyhow!("firewall rule not found: {id}"));
+    }
+
+    save_firewall_rules(&rules).await?;
+    firewall_reconcile().await?;
+
+    Ok("Firewall rule removed.".into())
+}
+
+async fn firewall_list(namespace: &str) -> Result<Vec<FirewallRule>> {
+    let mut rules = load_firewall_rules().await?;
+    if !namespace.is_empty() {
+        rules.retain(|rule| rule.namespace == namespace);
+    }
+
+    Ok(rules)
+}
+
+async fn firewall_reconcile() -> Result<String> {
+    let rules = load_firewall_rules().await?;
+    save_firewall_rules(&rules).await?;
+    run_logged_command(
+        "flush Coolify allow iptables chain",
+        Command::new("iptables").args(["-F", "COOLIFY-ALLOW"]),
+    )
+    .await
+    .context("flush Coolify allow iptables chain")?;
+    run_logged_command(
+        "restore Coolify allow iptables snapshot",
+        Command::new("sh").args([
+            "-c",
+            &format!("iptables-restore --noflush < {FIREWALL_ALLOW_RULES_PATH}"),
+        ]),
+    )
+    .await
+    .context("restore Coolify allow iptables snapshot")?;
+    run_logged_command(
+        "flush Coolify bridge allow chain",
+        Command::new("nft").args([
+            "flush",
+            "chain",
+            "bridge",
+            "coolify_bridge",
+            "coolify_allow",
+        ]),
+    )
+    .await
+    .context("flush Coolify bridge allow chain")?;
+    run_logged_command(
+        "restore Coolify bridge allow snapshot",
+        Command::new("nft").args(["-f", FIREWALL_BRIDGE_ALLOW_RULES_PATH]),
+    )
+    .await
+    .context("restore Coolify bridge allow snapshot")?;
+
+    Ok("Firewall rules reconciled.".into())
+}
+
+async fn apply_firewall_rule(rule: &FirewallRule) -> Result<()> {
+    let iptables_args = firewall_iptables_insert_args(rule);
+    run_logged_command(
+        "apply Coolify iptables allow rule",
+        Command::new("iptables").args(iptables_args.iter().map(String::as_str)),
+    )
+    .await
+    .context("apply Coolify iptables allow rule")?;
+
+    let nft_args = firewall_nft_add_args(rule);
+    run_logged_command(
+        "apply Coolify bridge allow rule",
+        Command::new("nft").args(nft_args.iter().map(String::as_str)),
+    )
+    .await
+    .context("apply Coolify bridge allow rule")?;
+
+    Ok(())
+}
+
+async fn load_firewall_rules() -> Result<Vec<FirewallRule>> {
+    if !Path::new(FIREWALL_STATE_PATH).exists() {
+        return Ok(vec![]);
+    }
+
+    let content = fs::read_to_string(FIREWALL_STATE_PATH)
+        .await
+        .context("read Coolify firewall rules")?;
+
+    Ok(content
+        .lines()
+        .filter_map(parse_firewall_rule_line)
+        .collect())
+}
+
+async fn save_firewall_rules(rules: &[FirewallRule]) -> Result<()> {
+    fs::create_dir_all("/etc/coolify")
+        .await
+        .context("create Coolify config directory")?;
+    fs::write(FIREWALL_STATE_PATH, render_firewall_state(rules))
+        .await
+        .context("write Coolify firewall state")?;
+    fs::write(FIREWALL_ALLOW_RULES_PATH, render_iptables_snapshot(rules))
+        .await
+        .context("write Coolify iptables allow snapshot")?;
+    fs::write(FIREWALL_BRIDGE_ALLOW_RULES_PATH, render_nft_snapshot(rules))
+        .await
+        .context("write Coolify bridge allow snapshot")?;
+
+    Ok(())
+}
+
+fn firewall_iptables_insert_args(rule: &FirewallRule) -> Vec<String> {
+    vec![
+        "-I".into(),
+        "COOLIFY-ALLOW".into(),
+        "1".into(),
+        "-s".into(),
+        cidr(&rule.src),
+        "-d".into(),
+        cidr(&rule.dst),
+        "-p".into(),
+        rule.proto.clone(),
+        "--dport".into(),
+        rule.port.to_string(),
+        "-m".into(),
+        "comment".into(),
+        "--comment".into(),
+        format!("coolify-fw:{}", rule.id),
+        "-j".into(),
+        "ACCEPT".into(),
+    ]
+}
+
+fn firewall_nft_add_args(rule: &FirewallRule) -> Vec<String> {
+    vec![
+        "add".into(),
+        "rule".into(),
+        "bridge".into(),
+        "coolify_bridge".into(),
+        "coolify_allow".into(),
+        "meta".into(),
+        "protocol".into(),
+        "ip".into(),
+        "ip".into(),
+        "saddr".into(),
+        rule.src.clone(),
+        "ip".into(),
+        "daddr".into(),
+        rule.dst.clone(),
+        rule.proto.clone(),
+        "dport".into(),
+        rule.port.to_string(),
+        "accept".into(),
+    ]
+}
+
+fn render_firewall_state(rules: &[FirewallRule]) -> String {
+    rules
+        .iter()
+        .map(|rule| {
+            format!(
+                "{}\t{}\t{}\t{}\t{}\t{}",
+                rule.id, rule.namespace, rule.src, rule.dst, rule.proto, rule.port
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn render_iptables_snapshot(rules: &[FirewallRule]) -> String {
+    let mut lines = vec!["*filter".to_string()];
+    for rule in rules {
+        lines.push(format!(
+            "-A COOLIFY-ALLOW -s {} -d {} -p {} --dport {} -m comment --comment coolify-fw:{} -j ACCEPT",
+            cidr(&rule.src),
+            cidr(&rule.dst),
+            rule.proto,
+            rule.port,
+            rule.id
+        ));
+    }
+    lines.push("COMMIT".into());
+    lines.join("\n") + "\n"
+}
+
+fn render_nft_snapshot(rules: &[FirewallRule]) -> String {
+    rules
+        .iter()
+        .map(|rule| {
+            format!(
+                "add rule bridge coolify_bridge coolify_allow meta protocol ip ip saddr {} ip daddr {} {} dport {} accept",
+                rule.src, rule.dst, rule.proto, rule.port
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+fn parse_firewall_rule_line(line: &str) -> Option<FirewallRule> {
+    let parts = line.split('\t').collect::<Vec<_>>();
+    if parts.len() == 6 {
+        return Some(FirewallRule {
+            id: parts[0].to_string(),
+            namespace: parts[1].to_string(),
+            src: parts[2].to_string(),
+            dst: parts[3].to_string(),
+            proto: parts[4].to_string(),
+            port: parts[5].parse().ok()?,
+        });
+    }
+
+    if parts.len() != 5 {
+        return None;
+    }
+
+    Some(FirewallRule {
+        id: String::new(),
+        namespace: parts[0].to_string(),
+        src: parts[1].to_string(),
+        dst: parts[2].to_string(),
+        proto: parts[3].to_string(),
+        port: parts[4].parse().ok()?,
+    })
+}
+
+fn validate_firewall_rule(rule: &FirewallRule) -> Result<()> {
+    if rule.id.is_empty() {
+        return Err(anyhow!("firewall rule id is required"));
+    }
+    if rule.namespace.is_empty() || rule.src.is_empty() || rule.dst.is_empty() {
+        return Err(anyhow!(
+            "firewall rule namespace, src, and dst are required"
+        ));
+    }
+    if !matches!(rule.proto.as_str(), "tcp" | "udp") {
+        return Err(anyhow!("unsupported firewall protocol: {}", rule.proto));
+    }
+    if rule.port == 0 || rule.port > 65535 {
+        return Err(anyhow!("firewall port must be between 1 and 65535"));
+    }
+
+    Ok(())
+}
+
+fn cidr(value: &str) -> String {
+    if value.contains('/') {
+        value.to_string()
+    } else {
+        format!("{value}/32")
+    }
+}
+
+async fn resolve_firewall_rule(rule: FirewallRule) -> Result<FirewallRule> {
+    let network = format!("coolify-{}-mesh", rule.namespace);
+
+    Ok(FirewallRule {
+        src: resolve_firewall_endpoint(&rule.src, &network).await?,
+        dst: resolve_firewall_endpoint(&rule.dst, &network).await?,
+        ..rule
+    })
+}
+
+async fn resolve_firewall_endpoint(value: &str, network: &str) -> Result<String> {
+    if is_ip_or_cidr(value) {
+        return Ok(value.trim_end_matches("/32").to_string());
+    }
+
+    container_ip(value, network)
+        .await
+        .with_context(|| format!("resolve firewall endpoint {value} on {network}"))
+}
+
+fn is_ip_or_cidr(value: &str) -> bool {
+    value
+        .split('/')
+        .next()
+        .is_some_and(|address| address.parse::<std::net::Ipv4Addr>().is_ok())
+}
+
 fn caddy_app_file_name(value: &str) -> Result<String> {
     if value.is_empty()
         || value.len() > 128
@@ -860,6 +1268,41 @@ mod tests {
                 "daddr",
                 "10.210.0.0/24",
                 "accept",
+            ]
+        );
+    }
+
+    #[test]
+    fn firewall_allow_args_scope_source_destination_and_port() {
+        let rule = FirewallRule {
+            id: "rule-api-postgres".into(),
+            namespace: "default".into(),
+            src: "10.210.0.2".into(),
+            dst: "10.210.0.3".into(),
+            proto: "tcp".into(),
+            port: 5432,
+        };
+
+        assert_eq!(
+            firewall_iptables_insert_args(&rule),
+            [
+                "-I",
+                "COOLIFY-ALLOW",
+                "1",
+                "-s",
+                "10.210.0.2/32",
+                "-d",
+                "10.210.0.3/32",
+                "-p",
+                "tcp",
+                "--dport",
+                "5432",
+                "-m",
+                "comment",
+                "--comment",
+                "coolify-fw:rule-api-postgres",
+                "-j",
+                "ACCEPT",
             ]
         );
     }

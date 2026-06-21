@@ -116,6 +116,25 @@ pub enum CommandPayload {
         #[serde(default = "default_ingress_kind")]
         kind: String,
     },
+    #[serde(rename = "firewall.allow")]
+    FirewallAllow {
+        id: String,
+        namespace: String,
+        src: String,
+        dst: String,
+        #[serde(default = "default_firewall_proto")]
+        proto: String,
+        port: u32,
+    },
+    #[serde(rename = "firewall.revoke")]
+    FirewallRevoke { id: String },
+    #[serde(rename = "firewall.list")]
+    FirewallList {
+        #[serde(default)]
+        namespace: String,
+    },
+    #[serde(rename = "firewall.reconcile")]
+    FirewallReconcile,
 }
 
 #[derive(Debug, Deserialize)]
@@ -143,6 +162,10 @@ fn default_ingress_kind() -> String {
 
 fn default_caddy_mesh_network() -> String {
     "coolify-default-mesh".into()
+}
+
+fn default_firewall_proto() -> String {
+    "tcp".into()
 }
 
 #[derive(Debug, Serialize)]
@@ -237,6 +260,33 @@ impl ResponseBody {
                 data: serde_json::json!({ "output": r.output }),
             }),
             Some(Body::IngressStop(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
+            Some(Body::FirewallAllow(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "id": r.id, "output": r.output }),
+            }),
+            Some(Body::FirewallRevoke(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
+            Some(Body::FirewallList(r)) => Some(ResponseBody::Ok {
+                data: serde_json::to_value(
+                    r.rules
+                        .iter()
+                        .map(|rule| {
+                            serde_json::json!({
+                                "id": rule.id,
+                                "namespace": rule.namespace,
+                                "src": rule.src,
+                                "dst": rule.dst,
+                                "proto": rule.proto,
+                                "port": rule.port,
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                )
+                .unwrap_or(serde_json::Value::Null),
+            }),
+            Some(Body::FirewallReconcile(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {

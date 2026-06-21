@@ -76,7 +76,7 @@ DELETE networks/{name}
 GET    networks
 
 # Firewall (coold = sole writer; dual-plane: iptables + nft bridge)
-firewall.allow            {namespace, src, dst, proto?, port?}  -> {id}
+firewall.allow            {id, namespace, src, dst, proto?, port?}  -> {id}
 firewall.revoke           {id}
 firewall.list             {?namespace}
 firewall.reconcile        {}  # flush + reload both snapshots
