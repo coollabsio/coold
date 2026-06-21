@@ -189,15 +189,14 @@ ServerMsg.containers_list             -> Response.containers_list
 ServerMsg.containers_logs             -> Response.containers_logs
 ServerMsg.containers_exec             -> Response.containers_exec
 ServerMsg.containers_healthcheck_run  -> Response.containers_healthcheck_run
-ServerMsg.apply_caddy_ingress         -> Response.apply_caddy_ingress
-ServerMsg.stop_caddy_ingress          -> Response.stop_caddy_ingress
+ServerMsg.ingress_apply              -> Response.ingress_apply
+ServerMsg.ingress_stop               -> Response.ingress_stop
 ```
 
 `containers.list` returns Podman container summaries plus inspected network
 attachments. `containers.create` applies the coold deny filter for privileged
 mode, host networking, custom capabilities, and unsafe host mounts before it
-calls Podman. Caddy ingress commands are temporary gRPC-only host commands until
-ingress is decomposed into smaller file/container primitives.
+calls Podman. Ingress commands dispatch to the requested ingress kind; Caddy is the first supported kind.
 
 Not implemented yet in this codebase: volume CRUD, network CRUD, firewall
 mutation over gRPC, explicit service endpoint CRUD, DNS diagnostics, and host

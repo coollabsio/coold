@@ -42,8 +42,8 @@ message ServerMsg {
         ContainersExecReq containers_exec = 28;
         ContainersHealthcheckRunReq containers_healthcheck_run = 29;
 
-        ApplyCaddyIngressReq apply_caddy_ingress = 90;
-        StopCaddyIngressReq  stop_caddy_ingress  = 91;
+        ApplyIngressReq ingress_apply = 90;
+        StopIngressReq  ingress_stop  = 91;
     }
 }
 
@@ -65,8 +65,8 @@ message Response {
         ContainersExecResp containers_exec = 28;
         ContainersHealthcheckRunResp containers_healthcheck_run = 29;
 
-        ApplyCaddyIngressResp apply_caddy_ingress = 90;
-        StopCaddyIngressResp  stop_caddy_ingress  = 91;
+        ApplyIngressResp ingress_apply = 90;
+        StopIngressResp  ingress_stop  = 91;
         Error error = 100;
     }
 }
@@ -150,17 +150,18 @@ message ContainerSummary {
 }
 message ContainersListResp { repeated ContainerSummary containers = 1; }
 
-message ApplyCaddyIngressReq {
-    string caddyfile = 1;
-    string mesh_network = 2;
-    repeated CaddyAppIngressFile apps = 3;
+message ApplyIngressReq {
+    string kind = 1;
+    string config = 2;
+    string mesh_network = 3;
+    repeated IngressAppConfig apps = 4;
 }
 
-message CaddyAppIngressFile {
+message IngressAppConfig {
     string name = 1;
-    string caddyfile = 2;
+    string config = 2;
 }
 
-message ApplyCaddyIngressResp { string output = 1; }
-message StopCaddyIngressReq {}
-message StopCaddyIngressResp { string output = 1; }
+message ApplyIngressResp { string output = 1; }
+message StopIngressReq { string kind = 1; }
+message StopIngressResp { string output = 1; }

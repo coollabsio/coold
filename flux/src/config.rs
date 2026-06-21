@@ -7,6 +7,8 @@ pub const VERSION: &str = match option_env!("COOLIFY_FLUX_VERSION") {
     None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
 };
 
+pub const FLUX_LOG_FILE_PATH: &str = "/var/www/html/storage/logs/flux.log";
+
 #[derive(Debug, Clone, Parser)]
 #[command(name = "flux", version = VERSION, about)]
 pub struct Config {
@@ -108,5 +110,33 @@ impl Config {
                 anyhow::anyhow!("read JWT pubkey {}: {e}", cfg.jwt_public_key_path.display())
             })?;
         Ok(cfg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Config, FLUX_LOG_FILE_PATH};
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn defaults_flux_file_log_to_laravel_storage_logs() {
+        assert_eq!(
+            PathBuf::from(FLUX_LOG_FILE_PATH),
+            PathBuf::from("/var/www/html/storage/logs/flux.log")
+        );
+    }
+
+    #[test]
+    fn rejects_flux_file_log_path_override() {
+        let result = Config::try_parse_from([
+            "flux",
+            "--grpc-bind",
+            "127.0.0.1:6443",
+            "--log-file-path",
+            "/tmp/custom-flux.log",
+        ]);
+
+        assert!(result.is_err());
     }
 }

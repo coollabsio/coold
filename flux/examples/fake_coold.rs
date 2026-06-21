@@ -42,7 +42,11 @@ async fn main() -> Result<()> {
             coold_version: "fake-0.1".into(),
             schema_min: 1,
             schema_max: 1,
-            capabilities: vec!["coold".into()],
+            capabilities: vec![
+                "coold".into(),
+                "ingress.apply".into(),
+                "ingress.stop".into(),
+            ],
         })),
     })
     .await?;
@@ -74,11 +78,11 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
-            server_msg::Command::ApplyCaddyIngress(_) => {
+            server_msg::Command::IngressApply(_) => {
                 let resp = Response {
                     request_id,
-                    body: Some(response::Body::ApplyCaddyIngress(
-                        coolify_proto::agent::v1::ApplyCaddyIngressResp {
+                    body: Some(response::Body::IngressApply(
+                        coolify_proto::agent::v1::ApplyIngressResp {
                             output: "Caddy ingress applied.".into(),
                         },
                     )),
@@ -88,11 +92,11 @@ async fn main() -> Result<()> {
                 })
                 .await?;
             }
-            server_msg::Command::StopCaddyIngress(_) => {
+            server_msg::Command::IngressStop(_) => {
                 let resp = Response {
                     request_id,
-                    body: Some(response::Body::StopCaddyIngress(
-                        coolify_proto::agent::v1::StopCaddyIngressResp {
+                    body: Some(response::Body::IngressStop(
+                        coolify_proto::agent::v1::StopIngressResp {
                             output: "Caddy ingress stopped.".into(),
                         },
                     )),

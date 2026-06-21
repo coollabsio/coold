@@ -7,11 +7,11 @@ use tokio::{fs, process::Command};
 use tracing::{debug, info, warn};
 
 use crate::grpc::proto::{
-    client_msg, response, server_msg, ApplyCaddyIngressResp, CaddyAppIngressFile, ClientMsg,
-    ContainerSummary, ContainersCreateResp, ContainersDeleteResp, ContainersExecResp,
-    ContainersHealthcheckRunResp, ContainersInspectResp, ContainersListResp, ContainersLogsResp,
-    ContainersRestartResp, ContainersStartResp, ContainersStopResp, Error, ImageSummary,
-    ImagesDeleteResp, ImagesListResp, ImagesPullResp, Response, StopCaddyIngressResp,
+    client_msg, response, server_msg, ApplyIngressResp, ClientMsg, ContainerSummary,
+    ContainersCreateResp, ContainersDeleteResp, ContainersExecResp, ContainersHealthcheckRunResp,
+    ContainersInspectResp, ContainersListResp, ContainersLogsResp, ContainersRestartResp,
+    ContainersStartResp, ContainersStopResp, Error, ImageSummary, ImagesDeleteResp, ImagesListResp,
+    ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
 };
 use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
@@ -250,15 +250,15 @@ pub async fn handle(
             )
             .await;
         }
-        server_msg::Command::ApplyCaddyIngress(req) => {
-            info!(%request_id, "applying Caddy ingress");
-            let body = match apply_caddy_ingress(req.caddyfile, req.apps, req.mesh_network).await {
+        server_msg::Command::IngressApply(req) => {
+            info!(%request_id, kind = %req.kind, "applying ingress");
+            let body = match apply_ingress(req.kind, req.config, req.apps, req.mesh_network).await {
                 Ok(output) => {
-                    info!(%request_id, "Caddy ingress applied");
-                    response::Body::ApplyCaddyIngress(ApplyCaddyIngressResp { output })
+                    info!(%request_id, "ingress applied");
+                    response::Body::IngressApply(ApplyIngressResp { output })
                 }
                 Err(e) => {
-                    warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress apply failed");
+                    warn!(%request_id, error = %format!("{e:#}"), "ingress apply failed");
                     error_body(e)
                 }
             };
@@ -271,15 +271,15 @@ pub async fn handle(
             )
             .await;
         }
-        server_msg::Command::StopCaddyIngress(_) => {
-            info!(%request_id, "stopping Caddy ingress");
-            let body = match stop_caddy_ingress().await {
+        server_msg::Command::IngressStop(req) => {
+            info!(%request_id, kind = %req.kind, "stopping ingress");
+            let body = match stop_ingress(req.kind).await {
                 Ok(output) => {
-                    info!(%request_id, "Caddy ingress stopped");
-                    response::Body::StopCaddyIngress(StopCaddyIngressResp { output })
+                    info!(%request_id, "ingress stopped");
+                    response::Body::IngressStop(StopIngressResp { output })
                 }
                 Err(e) => {
-                    warn!(%request_id, error = %format!("{e:#}"), "Caddy ingress stop failed");
+                    warn!(%request_id, error = %format!("{e:#}"), "ingress stop failed");
                     error_body(e)
                 }
             };
@@ -312,9 +312,21 @@ async fn send_response(tx: &mpsc::Sender<ClientMsg>, response: Response) {
     }
 }
 
+async fn apply_ingress(
+    kind: String,
+    config: String,
+    apps: Vec<IngressAppConfig>,
+    mesh_network: String,
+) -> Result<String> {
+    match kind.as_str() {
+        "caddy" => apply_caddy_ingress(config, apps, mesh_network).await,
+        unsupported => Err(anyhow!("unsupported ingress kind: {unsupported}")),
+    }
+}
+
 async fn apply_caddy_ingress(
     caddyfile: String,
-    apps: Vec<CaddyAppIngressFile>,
+    apps: Vec<IngressAppConfig>,
     mesh_network: String,
 ) -> Result<String> {
     let started_at = Instant::now();
@@ -329,7 +341,7 @@ async fn apply_caddy_ingress(
         return Err(anyhow!("caddyfile is empty"));
     }
 
-    if caddyfile.len() > 256 * 1024 || apps.iter().any(|app| app.caddyfile.len() > 256 * 1024) {
+    if caddyfile.len() > 256 * 1024 || apps.iter().any(|app| app.config.len() > 256 * 1024) {
         return Err(anyhow!("caddyfile is too large"));
     }
 
@@ -358,7 +370,7 @@ async fn apply_caddy_ingress(
         let file_name = caddy_app_file_name(&app.name)?;
         expected_files.insert(file_name.clone());
         info!(file_name, "writing Caddy app config");
-        fs::write(apps_path.join(file_name), app.caddyfile)
+        fs::write(apps_path.join(file_name), app.config)
             .await
             .context("write Caddy app config")?;
     }
@@ -658,6 +670,13 @@ fn caddy_app_file_name(value: &str) -> Result<String> {
     }
 
     Ok(format!("{value}.caddy"))
+}
+
+async fn stop_ingress(kind: String) -> Result<String> {
+    match kind.as_str() {
+        "caddy" => stop_caddy_ingress().await,
+        unsupported => Err(anyhow!("unsupported ingress kind: {unsupported}")),
+    }
 }
 
 async fn stop_caddy_ingress() -> Result<String> {

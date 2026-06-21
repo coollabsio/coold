@@ -158,6 +158,8 @@ fn primitive_capabilities() -> Vec<String> {
         "containers.logs",
         "containers.exec",
         "containers.healthcheck.run",
+        "ingress.apply",
+        "ingress.stop",
     ]
     .into_iter()
     .map(str::to_string)

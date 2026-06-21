@@ -3,11 +3,11 @@
 //! side effects. Separating this keeps routing logic unit-testable.
 
 use coolify_proto::agent::v1::{
-    server_msg, ApplyCaddyIngressReq, CaddyAppIngressFile as ProtoCaddyAppIngressFile,
-    ContainersCreateReq, ContainersDeleteReq, ContainersExecReq, ContainersHealthcheckRunReq,
-    ContainersInspectReq, ContainersListReq, ContainersLogsReq, ContainersRestartReq,
-    ContainersStartReq, ContainersStopReq, ImagesDeleteReq, ImagesListReq, ImagesPullReq,
-    PortMapping as ProtoPortMapping, ServerMsg, StopCaddyIngressReq,
+    server_msg, ApplyIngressReq, ContainersCreateReq, ContainersDeleteReq, ContainersExecReq,
+    ContainersHealthcheckRunReq, ContainersInspectReq, ContainersListReq, ContainersLogsReq,
+    ContainersRestartReq, ContainersStartReq, ContainersStopReq, ImagesDeleteReq, ImagesListReq,
+    ImagesPullReq, IngressAppConfig as ProtoIngressAppConfig, PortMapping as ProtoPortMapping,
+    ServerMsg, StopIngressReq,
 };
 
 use crate::envelope::{CommandPayload, DispatchEnvelope};
@@ -24,10 +24,18 @@ pub enum RouteOutcome {
 
 /// Route a coold command envelope to its pinned target host.
 pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
-    if streams.get(&env.host_id).is_none() {
+    let Some(stream) = streams.get(&env.host_id) else {
         return RouteOutcome::PushError {
             code: 404,
             message: "host not connected",
+        };
+    };
+
+    let required_capability = required_capability(&env.command);
+    if !stream.caps.iter().any(|cap| cap == required_capability) {
+        return RouteOutcome::PushError {
+            code: 501,
+            message: "primitive not supported by host",
         };
     }
 
@@ -115,23 +123,25 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
         CommandPayload::ContainersHealthcheckRun { id } => {
             server_msg::Command::ContainersHealthcheckRun(ContainersHealthcheckRunReq { id })
         }
-        CommandPayload::ApplyCaddyIngress {
-            caddyfile,
+        CommandPayload::ApplyIngress {
+            kind,
+            config,
             apps,
             mesh_network,
-        } => server_msg::Command::ApplyCaddyIngress(ApplyCaddyIngressReq {
-            caddyfile,
+        } => server_msg::Command::IngressApply(ApplyIngressReq {
+            kind,
+            config,
             mesh_network,
             apps: apps
                 .into_iter()
-                .map(|app| ProtoCaddyAppIngressFile {
+                .map(|app| ProtoIngressAppConfig {
                     name: app.name,
-                    caddyfile: app.caddyfile,
+                    config: app.config,
                 })
                 .collect(),
         }),
-        CommandPayload::StopCaddyIngress => {
-            server_msg::Command::StopCaddyIngress(StopCaddyIngressReq {})
+        CommandPayload::StopIngress { kind } => {
+            server_msg::Command::IngressStop(StopIngressReq { kind })
         }
     };
 
@@ -142,6 +152,26 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
     RouteOutcome::SendCoold {
         host_id: env.host_id,
         msg,
+    }
+}
+
+fn required_capability(command: &CommandPayload) -> &'static str {
+    match command {
+        CommandPayload::ImagesPull { .. } => "images.pull",
+        CommandPayload::ImagesList => "images.list",
+        CommandPayload::ImagesDelete { .. } => "images.delete",
+        CommandPayload::ContainersCreate { .. } => "containers.create",
+        CommandPayload::ContainersStart { .. } => "containers.start",
+        CommandPayload::ContainersStop { .. } => "containers.stop",
+        CommandPayload::ContainersRestart { .. } => "containers.restart",
+        CommandPayload::ContainersDelete { .. } => "containers.delete",
+        CommandPayload::ContainersInspect { .. } => "containers.inspect",
+        CommandPayload::ContainersList => "containers.list",
+        CommandPayload::ContainersLogs { .. } => "containers.logs",
+        CommandPayload::ContainersExec { .. } => "containers.exec",
+        CommandPayload::ContainersHealthcheckRun { .. } => "containers.healthcheck.run",
+        CommandPayload::ApplyIngress { .. } => "ingress.apply",
+        CommandPayload::StopIngress { .. } => "ingress.stop",
     }
 }
 
@@ -185,9 +215,32 @@ mod tests {
     }
 
     #[test]
-    fn route_coold_builds_containers_list_message() {
+    fn route_coold_rejects_host_missing_required_primitive_capability() {
         let streams = Streams::new();
         let _rx = insert_host(&streams, "H", &["coold"]);
+
+        let out = route_coold(
+            &streams,
+            DispatchEnvelope {
+                host_id: "H".into(),
+                request_id: "r1".into(),
+                command: CommandPayload::ContainersList,
+            },
+        );
+
+        match out {
+            RouteOutcome::PushError { code, message } => {
+                assert_eq!(code, 501);
+                assert_eq!(message, "primitive not supported by host");
+            }
+            other => panic!("expected PushError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_coold_builds_containers_list_message() {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "H", &["coold", "containers.list"]);
         let out = route_coold(
             &streams,
             DispatchEnvelope {
@@ -212,7 +265,7 @@ mod tests {
     #[test]
     fn route_coold_builds_images_list_message() {
         let streams = Streams::new();
-        let _rx = insert_host(&streams, "H", &["coold"]);
+        let _rx = insert_host(&streams, "H", &["coold", "images.list"]);
         let out = route_coold(
             &streams,
             DispatchEnvelope {
@@ -235,7 +288,28 @@ mod tests {
 
     fn route_command(command: serde_json::Value) -> server_msg::Command {
         let streams = Streams::new();
-        let _rx = insert_host(&streams, "H", &["coold"]);
+        let _rx = insert_host(
+            &streams,
+            "H",
+            &[
+                "coold",
+                "images.pull",
+                "images.list",
+                "images.delete",
+                "containers.create",
+                "containers.start",
+                "containers.stop",
+                "containers.restart",
+                "containers.delete",
+                "containers.inspect",
+                "containers.list",
+                "containers.logs",
+                "containers.exec",
+                "containers.healthcheck.run",
+                "ingress.apply",
+                "ingress.stop",
+            ],
+        );
         let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
             "host_id": "H",
             "request_id": "r1",
@@ -384,5 +458,132 @@ mod tests {
             server_msg::Command::ContainersHealthcheckRun(ContainersHealthcheckRunReq { id })
                 if id == "abc"
         ));
+    }
+
+    #[test]
+    fn routes_ingress_primitives_from_dotted_json_names() {
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "ingress.apply",
+                "kind": "caddy",
+                "config": "example.com { respond \"ok\" }",
+                "mesh_network": "coolify-default-mesh",
+                "apps": [{
+                    "name": "web",
+                    "config": "web.example.com { reverse_proxy web:3000 }"
+                }]
+            })),
+            server_msg::Command::IngressApply(ApplyIngressReq { kind, config, apps, .. })
+                if kind == "caddy"
+                    && config.contains("example.com")
+                    && apps.len() == 1
+                    && apps[0].name == "web"
+                    && apps[0].config.contains("reverse_proxy")
+        ));
+
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "ingress.stop",
+                "kind": "caddy"
+            })),
+            server_msg::Command::IngressStop(StopIngressReq { kind }) if kind == "caddy"
+        ));
+    }
+
+    #[test]
+    fn every_primitive_requires_its_matching_capability() {
+        let cases = [
+            (
+                "images.pull",
+                serde_json::json!({
+                    "type": "images.pull",
+                    "reference": "docker.io/library/nginx:alpine"
+                }),
+            ),
+            ("images.list", serde_json::json!({ "type": "images.list" })),
+            (
+                "images.delete",
+                serde_json::json!({
+                    "type": "images.delete",
+                    "reference": "docker.io/library/nginx:alpine"
+                }),
+            ),
+            (
+                "containers.create",
+                serde_json::json!({
+                    "type": "containers.create",
+                    "name": "web",
+                    "image": "docker.io/library/nginx:alpine"
+                }),
+            ),
+            (
+                "containers.start",
+                serde_json::json!({ "type": "containers.start", "id": "abc" }),
+            ),
+            (
+                "containers.stop",
+                serde_json::json!({ "type": "containers.stop", "id": "abc" }),
+            ),
+            (
+                "containers.restart",
+                serde_json::json!({ "type": "containers.restart", "id": "abc" }),
+            ),
+            (
+                "containers.delete",
+                serde_json::json!({ "type": "containers.delete", "id": "abc" }),
+            ),
+            (
+                "containers.inspect",
+                serde_json::json!({ "type": "containers.inspect", "id": "abc" }),
+            ),
+            (
+                "containers.list",
+                serde_json::json!({ "type": "containers.list" }),
+            ),
+            (
+                "containers.logs",
+                serde_json::json!({ "type": "containers.logs", "id": "abc" }),
+            ),
+            (
+                "containers.exec",
+                serde_json::json!({
+                    "type": "containers.exec",
+                    "id": "abc",
+                    "command": ["echo", "ok"]
+                }),
+            ),
+            (
+                "containers.healthcheck.run",
+                serde_json::json!({ "type": "containers.healthcheck.run", "id": "abc" }),
+            ),
+            (
+                "ingress.apply",
+                serde_json::json!({
+                    "type": "ingress.apply",
+                    "kind": "caddy",
+                    "config": "example.com { respond \"ok\" }"
+                }),
+            ),
+            (
+                "ingress.stop",
+                serde_json::json!({ "type": "ingress.stop", "kind": "caddy" }),
+            ),
+        ];
+
+        for (capability, command) in cases {
+            let streams = Streams::new();
+            let _rx = insert_host(&streams, "H", &["coold", capability]);
+            let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
+                "host_id": "H",
+                "request_id": "r1",
+                "command": command,
+            }))
+            .expect("valid dispatch envelope");
+
+            assert!(
+                matches!(route_coold(&streams, env), RouteOutcome::SendCoold { .. }),
+                "expected {capability} to allow dispatch"
+            );
+        }
     }
 }

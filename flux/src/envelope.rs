@@ -100,16 +100,22 @@ pub enum CommandPayload {
     ContainersExec { id: String, command: Vec<String> },
     #[serde(rename = "containers.healthcheck.run")]
     ContainersHealthcheckRun { id: String },
-    #[serde(rename = "apply_caddy_ingress")]
-    ApplyCaddyIngress {
-        caddyfile: String,
+    #[serde(rename = "ingress.apply", alias = "apply_caddy_ingress")]
+    ApplyIngress {
+        #[serde(default = "default_ingress_kind")]
+        kind: String,
+        #[serde(alias = "caddyfile")]
+        config: String,
         #[serde(default)]
-        apps: Vec<CaddyAppIngressFile>,
+        apps: Vec<IngressAppConfig>,
         #[serde(default = "default_caddy_mesh_network")]
         mesh_network: String,
     },
-    #[serde(rename = "stop_caddy_ingress")]
-    StopCaddyIngress,
+    #[serde(rename = "ingress.stop", alias = "stop_caddy_ingress")]
+    StopIngress {
+        #[serde(default = "default_ingress_kind")]
+        kind: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,9 +131,14 @@ fn default_logs_stdout() -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CaddyAppIngressFile {
+pub struct IngressAppConfig {
     pub name: String,
-    pub caddyfile: String,
+    #[serde(alias = "caddyfile")]
+    pub config: String,
+}
+
+fn default_ingress_kind() -> String {
+    "caddy".into()
 }
 
 fn default_caddy_mesh_network() -> String {
@@ -222,10 +233,10 @@ impl ResponseBody {
             Some(Body::ContainersHealthcheckRun(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
-            Some(Body::ApplyCaddyIngress(r)) => Some(ResponseBody::Ok {
+            Some(Body::IngressApply(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
-            Some(Body::StopCaddyIngress(r)) => Some(ResponseBody::Ok {
+            Some(Body::IngressStop(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {

@@ -7,20 +7,25 @@ mod routing;
 mod state;
 mod unix_bridge;
 
-use anyhow::Result;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use tracing::info;
+use tracing_subscriber::fmt::writer::MakeWriterExt;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use crate::config::{Config, FLUX_LOG_FILE_PATH};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = Config::load().await?;
-    init_tracing(&config.log_level);
+    let log_file_path = Path::new(FLUX_LOG_FILE_PATH);
+    let _log_guard = init_tracing(&config.log_level, log_file_path)?;
 
     info!(
         grpc_bind = %config.grpc_bind,
         uds_path = %config.unix_socket_path.display(),
+        log_file_path = %log_file_path.display(),
         "flux starting",
     );
 
@@ -37,13 +42,34 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(level: &str) {
+fn init_tracing(
+    level: &str,
+    log_file_path: &Path,
+) -> Result<tracing_appender::non_blocking::WorkerGuard> {
     let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let log_dir = log_file_path
+        .parent()
+        .context("flux log file path must include a parent directory")?;
+    let log_file_name = log_file_path
+        .file_name()
+        .context("flux log file path must include a file name")?;
+
+    std::fs::create_dir_all(log_dir)
+        .with_context(|| format!("create flux log directory {}", log_dir.display()))?;
+
+    let file_appender = tracing_appender::rolling::never(log_dir, log_file_name);
+    let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+    let writer = std::io::stdout.and(file_writer);
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
+        .with_writer(writer)
         .with_target(false)
         .compact()
         .init();
+
+    Ok(guard)
 }
 
 mod grpc_server {
@@ -110,7 +136,9 @@ mod grpc_server {
     }
 
     fn is_coold_primitive(capability: &str) -> bool {
-        capability.starts_with("images.") || capability.starts_with("containers.")
+        capability.starts_with("images.")
+            || capability.starts_with("containers.")
+            || capability.starts_with("ingress.")
     }
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
