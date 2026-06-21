@@ -125,61 +125,9 @@ pub struct Config {
     #[arg(long, env = "COOLIFY_COOLD_DNS_UPSTREAM", default_value = "1.1.1.1:53")]
     pub dns_upstream: SocketAddr,
 
-    /// Bind address for the firewall REST API (e.g. `100.64.0.5:8443`).
-    /// When unset, the API server is disabled. In production set this to
-    /// `<host_mgmt_ip>:8443` so the API is reachable only over the wg0
-    /// management overlay and never exposed on a public interface.
-    #[arg(long, env = "COOLIFY_COOLD_API_BIND")]
-    pub api_bind: Option<SocketAddr>,
-
-    /// Path to a file containing the API bearer token. When unset, the API
-    /// refuses to start (no anonymous access). The file should be root-owned
-    /// and mode 0600; contents are trimmed of leading/trailing whitespace.
-    #[arg(long, env = "COOLIFY_COOLD_API_TOKEN_FILE")]
-    pub api_token_file: Option<PathBuf>,
-
-    /// PEM-encoded TLS certificate chain for the API. When both cert and key
-    /// are set the API serves HTTPS; otherwise it serves plain HTTP (intended
-    /// only for dev/alpha on a trusted overlay).
-    #[arg(long, env = "COOLIFY_COOLD_TLS_CERT")]
-    pub tls_cert: Option<PathBuf>,
-
-    /// PEM-encoded TLS private key for the API.
-    #[arg(long, env = "COOLIFY_COOLD_TLS_KEY")]
-    pub tls_key: Option<PathBuf>,
-
-    /// Path where coold snapshots the COOLIFY-ALLOW chain as an
-    /// iptables-restore fragment. `coolify-mesh-allow.service` restores this
-    /// on boot via `iptables-restore --noflush`.
-    #[arg(
-        long,
-        env = "COOLIFY_COOLD_RULES_PATH",
-        default_value = "/etc/coolify/allow.rules"
-    )]
-    pub rules_path: PathBuf,
-
-    /// Path where coold writes the nft bridge-family allow snapshot.
-    /// The firewall systemd unit restores this on start/restart via
-    /// `nft -f /etc/coolify/allow.nft`. coold writes it on every rule mutate.
-    #[arg(
-        long,
-        env = "COOLIFY_COOLD_BRIDGE_RULES_PATH",
-        default_value = "/etc/coolify/allow.nft"
-    )]
-    pub bridge_rules_path: PathBuf,
-
-    /// Name of the iptables chain coold owns. Must match the chain created
-    /// by `coolify init --default-deny` and jumped to from COOLIFY-INTRA.
-    #[arg(
-        long,
-        env = "COOLIFY_COOLD_CHAIN_NAME",
-        default_value = "COOLIFY-ALLOW"
-    )]
-    pub chain_name: String,
-
     /// Flux gRPC URL (e.g. `http://127.0.0.1:6443` for h2c or
     /// `https://central.example.com:6443` for TLS). When unset, the gRPC
-    /// transport is disabled and coold runs in REST-only / local mode.
+    /// transport is disabled and coold runs local background tasks only.
     #[arg(long, env = "COOLIFY_COOLD_FLUX_URL")]
     pub flux_url: Option<String>,
 

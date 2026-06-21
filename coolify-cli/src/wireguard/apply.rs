@@ -561,8 +561,7 @@ async fn phase3<R: Runner>(
             ActionType::InstallCooldService,
             "",
             format!(
-                "{} && rm -f /etc/systemd/resolved.conf.d/coolify-internal.conf && {} && {} && {} && systemctl daemon-reload && systemctl enable --now {} {} coold",
-                services::coold::ensure_api_token_command(),
+                "rm -f /etc/systemd/resolved.conf.d/coolify-internal.conf && {} && {} && {} && systemctl daemon-reload && systemctl enable --now {} {} coold",
                 heredoc(
                     "/etc/systemd/system/coolify-mesh-dns-anchor.service",
                     &services::coold::mesh_dns_anchor_unit(&ns),

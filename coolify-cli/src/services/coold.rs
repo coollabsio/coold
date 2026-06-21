@@ -1,8 +1,6 @@
 use std::net::Ipv4Addr;
 
 pub const DEFAULT_COOLD_DNS_ZONE: &str = "coolify.internal";
-pub const COOLIFY_COOLD_API_PORT: u16 = 8443;
-pub const COOLIFY_COOLD_API_TOKEN_PATH: &str = "/etc/coolify/api-token";
 pub const MESH_DNS_ANCHOR_SERVICE: &str = "coolify-mesh-dns-anchor.service";
 pub const MESH_DNS_RESOLVER_SERVICE: &str = "coolify-mesh-dns-resolver.service";
 pub const MESH_DNS_ANCHOR_IMAGE: &str = "docker.io/library/alpine:3.20";
@@ -51,9 +49,6 @@ pub fn service_unit(
             DEFAULT_COOLD_DNS_ZONE
         )
     };
-    let api_env = format!(
-        "Environment=COOLIFY_COOLD_API_BIND={mgmt_ip}:{COOLIFY_COOLD_API_PORT}\nEnvironment=COOLIFY_COOLD_API_TOKEN_FILE={COOLIFY_COOLD_API_TOKEN_PATH}\n"
-    );
     let flux_env = flux
         .map(|s| {
             format!(
@@ -100,7 +95,7 @@ pub fn service_unit(
         format!(" {MESH_DNS_ANCHOR_SERVICE} {MESH_DNS_RESOLVER_SERVICE}")
     };
     format!(
-        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service{mesh_dns_units}\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service{mesh_dns_units}\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{api_env}{flux_env}{builder_env}{builder_pre}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Coolify host agent\nWants=corrosion.service{mesh_dns_units}\nAfter=corrosion.service network-online.target podman.socket coolify-mesh-fw.service{mesh_dns_units}\n\n[Service]\nEnvironment=COOLIFY_COOLD_HOST_MGMT_IP={mgmt_ip}\n{ns_env}{flux_env}{builder_env}{builder_pre}ExecStart=/usr/local/bin/coold\nAmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW\nRestart=on-failure\nRestartSec=2s\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -176,12 +171,6 @@ echo '{version}' > /usr/local/bin/coold.version"#
     )
 }
 
-pub fn ensure_api_token_command() -> String {
-    format!(
-        "mkdir -p /etc/coolify && if [ ! -s {COOLIFY_COOLD_API_TOKEN_PATH} ]; then openssl rand -hex 32 > {COOLIFY_COOLD_API_TOKEN_PATH}.tmp && chmod 0600 {COOLIFY_COOLD_API_TOKEN_PATH}.tmp && mv {COOLIFY_COOLD_API_TOKEN_PATH}.tmp {COOLIFY_COOLD_API_TOKEN_PATH}; fi"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn service_unit_embeds_mgmt_ip_namespaces_and_api() {
+    fn service_unit_embeds_mgmt_ip_and_namespaces() {
         let got = service_unit(
             "100.64.0.5".parse().unwrap(),
             &[
@@ -237,8 +226,6 @@ mod tests {
             "Environment=COOLIFY_COOLD_HOST_MGMT_IP=100.64.0.5",
             "Environment=COOLIFY_COOLD_NAMESPACES=default:coolify-default-mesh:10.210.7.1,alpha:coolify-alpha-mesh:10.210.8.1",
             "Environment=COOLIFY_COOLD_DNS_ZONE=coolify.internal",
-            "Environment=COOLIFY_COOLD_API_BIND=100.64.0.5:8443",
-            "Environment=COOLIFY_COOLD_API_TOKEN_FILE=/etc/coolify/api-token",
             "AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN CAP_NET_RAW",
             "Wants=corrosion.service coolify-mesh-dns-anchor.service coolify-mesh-dns-resolver.service",
             "After=corrosion.service network-online.target podman.socket coolify-mesh-fw.service coolify-mesh-dns-anchor.service coolify-mesh-dns-resolver.service",

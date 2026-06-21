@@ -2,7 +2,6 @@ mod builder;
 mod config;
 mod corrosion;
 mod dns;
-mod firewall;
 mod grpc;
 mod host_infra;
 mod mesh_dns_anchor;

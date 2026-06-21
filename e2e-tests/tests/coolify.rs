@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use e2e_tests::hetzner::EphemeralCluster;
 use e2e_tests::install::{
-    coold_token, local_coolify, podman_ping, podman_pull, run_container, ssh_ping, unit_active,
-    wait_for, wg0_ip, wg_peers_handshaken, InstallEnv, NET, TEST_IMAGE,
+    local_coolify, podman_ping, podman_pull, run_container, ssh_ping, unit_active, wait_for,
+    wg0_ip, wg_peers_handshaken, InstallEnv, NET, TEST_IMAGE,
 };
 
 const MGMT_POOL: &str = "100.64.0.0/16";
@@ -252,97 +252,4 @@ fn coolify_extend_adds_third_host() {
     step("4/4 verify third host services");
     assert_core_units(&cfg.ssh_key, &host_c);
     assert_default_deny_scaffold(&cfg.ssh_key, &host_c);
-}
-
-#[test]
-#[ignore = "requires HETZNER_TOKEN; provisions + destroys a Hetzner VM"]
-fn coolify_firewall_allow_list_revoke() {
-    e2e_tests::set_tag("ctl-fw");
-    let cfg = InstallEnv::from_env();
-    let cluster = EphemeralCluster::provision(1, "ctl-fw");
-    let host = cluster.hosts()[0].ipv4.clone();
-
-    step("1/5 bootstrap single host");
-    local_coolify(
-        &cfg.coolify_bin,
-        &bootstrap_args(&host, &host, &cfg.ssh_key),
-    )
-    .expect("bootstrap");
-
-    step("2/5 create two containers and verify blocked");
-    podman_pull(&cfg.ssh_key, &host, TEST_IMAGE);
-    let ip_a = run_container(&cfg.ssh_key, &host, "fw-a", NET, TEST_IMAGE);
-    let ip_b = run_container(&cfg.ssh_key, &host, "fw-b", NET, TEST_IMAGE);
-    assert!(!podman_ping(&cfg.ssh_key, &host, "fw-a", &ip_b));
-
-    step("3/5 allow both directions through coolify firewall");
-    let common = [
-        "--nodes",
-        &host,
-        "--ssh-user",
-        "root",
-        "--ssh-key",
-        &cfg.ssh_key,
-    ];
-    local_coolify(
-        &cfg.coolify_bin,
-        &[
-            "firewall", "allow", "--from", &ip_a, "--to", &ip_b, common[0], common[1], common[2],
-            common[3], common[4], common[5],
-        ],
-    )
-    .expect("allow a->b");
-    local_coolify(
-        &cfg.coolify_bin,
-        &[
-            "firewall", "allow", "--from", &ip_b, "--to", &ip_a, common[0], common[1], common[2],
-            common[3], common[4], common[5],
-        ],
-    )
-    .expect("allow b->a");
-    assert!(wait_for(
-        || podman_ping(&cfg.ssh_key, &host, "fw-a", &ip_b),
-        Duration::from_secs(5)
-    ));
-
-    step("4/5 list rules through coolify firewall");
-    let listed = local_coolify(
-        &cfg.coolify_bin,
-        &[
-            "firewall", "list", common[0], common[1], common[2], common[3], common[4], common[5],
-        ],
-    )
-    .expect("firewall list");
-    assert!(
-        listed.contains(&ip_a) && listed.contains(&ip_b),
-        "list missing container IPs: {listed}"
-    );
-
-    step("5/5 revoke by computed ids and verify blocked again");
-    let token = coold_token(&cfg.ssh_key, &host);
-    assert!(
-        !token.is_empty(),
-        "coold token should exist after bootstrap"
-    );
-    // Revoke through tuple form so the CLI computes the same namespace-scoped rule id.
-    local_coolify(
-        &cfg.coolify_bin,
-        &[
-            "firewall", "revoke", "--from", &ip_a, "--to", &ip_b, common[0], common[1], common[2],
-            common[3], common[4], common[5],
-        ],
-    )
-    .expect("revoke a->b");
-    local_coolify(
-        &cfg.coolify_bin,
-        &[
-            "firewall", "revoke", "--from", &ip_b, "--to", &ip_a, common[0], common[1], common[2],
-            common[3], common[4], common[5],
-        ],
-    )
-    .expect("revoke b->a");
-    assert!(wait_for(
-        || !podman_ping(&cfg.ssh_key, &host, "fw-a", &ip_b),
-        Duration::from_secs(5)
-    ));
 }

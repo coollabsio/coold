@@ -1,5 +1,5 @@
 //! Install + networking e2e. Provisions Hetzner VMs, runs `coolify init
-//! bootstrap`, asserts wg0 / podman bridge / firewall default-deny / coold API,
+//! bootstrap`, asserts wg0 / podman bridge / firewall default-deny,
 //! then destroys VMs (RAII via [`EphemeralCluster`]).
 //!
 //! All `#[ignore]` — run with:
@@ -15,9 +15,8 @@ use std::time::Duration;
 
 use e2e_tests::hetzner::EphemeralCluster;
 use e2e_tests::install::{
-    coold_allow, coold_revoke, coold_token, local_coolify, podman_ping, podman_pull, run_container,
-    ssh, ssh_ping, unit_active, wait_for, wg0_ip, wg_peers_handshaken, InstallEnv, NAMESPACE, NET,
-    TEST_IMAGE,
+    local_coolify, podman_ping, podman_pull, run_container, ssh, ssh_ping, unit_active, wait_for,
+    wg0_ip, wg_peers_handshaken, InstallEnv, NET, TEST_IMAGE,
 };
 
 const MGMT_POOL: &str = "100.64.0.0/16";
@@ -232,7 +231,7 @@ fn install_single_host() {
     ok("init bootstrap returned success");
 
     // 2. wg0 up with expected pool prefix.
-    step("2/8  verify wg0 address in mgmt pool");
+    step("2/6  verify wg0 address in mgmt pool");
     let mgmt = wg0_ip(&cfg.ssh_key, &host);
     assert!(
         mgmt.starts_with("100.64."),
@@ -252,54 +251,24 @@ fn install_single_host() {
     assert_central_units(&cfg.ssh_key, &host);
 
     // 4. Default-deny scaffold installed (both families).
-    step("4/8  verify default-deny firewall scaffold");
+    step("4/6  verify default-deny firewall scaffold");
     assert_default_deny_scaffold(&cfg.ssh_key, &host);
 
     // 5. Two containers on the same namespace bridge.
-    step("5/8  start two alpine containers on coolify-default-mesh");
+    step("5/6  start two alpine containers on coolify-default-mesh");
     podman_pull(&cfg.ssh_key, &host, TEST_IMAGE);
     let ip_a = run_container(&cfg.ssh_key, &host, "e2e-a", NET, TEST_IMAGE);
     let ip_b = run_container(&cfg.ssh_key, &host, "e2e-b", NET, TEST_IMAGE);
     ok(&format!("e2e-a={ip_a}  e2e-b={ip_b}"));
 
     // 6. Intra-host default-deny blocks (nft bridge coolify_intra).
-    step("6/8  ping e2e-a → e2e-b should be BLOCKED (default-deny)");
+    step("6/6  ping e2e-a → e2e-b should be BLOCKED (default-deny)");
     assert!(
         !podman_ping(&cfg.ssh_key, &host, "e2e-a", &ip_b),
         "intra-host default-deny failed to block e2e-a → {ip_b}"
     );
     ok(&format!("ping blocked as expected ({ip_a} → {ip_b})"));
 
-    // 7. Allow via coold API. ICMP reply traverses the reverse direction
-    //    through the same intra chain, so we install both halves.
-    step("7/8  POST coold API allow {a→b, b→a}, expect ping to UNBLOCK");
-    let token = coold_token(&cfg.ssh_key, &host);
-    let body_ab = format!(r#"{{"src":"{ip_a}","dst":"{ip_b}","namespace":"{NAMESPACE}"}}"#);
-    let body_ba = format!(r#"{{"src":"{ip_b}","dst":"{ip_a}","namespace":"{NAMESPACE}"}}"#);
-    let id_ab = coold_allow(&cfg.ssh_key, &host, &mgmt, &token, &body_ab);
-    let id_ba = coold_allow(&cfg.ssh_key, &host, &mgmt, &token, &body_ba);
-    ok(&format!("allow id a→b={id_ab}  b→a={id_ba}"));
-    assert!(
-        wait_for(
-            || podman_ping(&cfg.ssh_key, &host, "e2e-a", &ip_b),
-            Duration::from_secs(5),
-        ),
-        "allow rules did not unblock e2e-a → {ip_b} within 5s"
-    );
-    ok(&format!("ping now succeeds ({ip_a} → {ip_b})"));
-
-    // 8. Revoke → blocked again.
-    step("8/8  DELETE both allow rules, expect ping to RE-BLOCK");
-    coold_revoke(&cfg.ssh_key, &host, &mgmt, &token, &id_ab);
-    coold_revoke(&cfg.ssh_key, &host, &mgmt, &token, &id_ba);
-    assert!(
-        wait_for(
-            || !podman_ping(&cfg.ssh_key, &host, "e2e-a", &ip_b),
-            Duration::from_secs(5),
-        ),
-        "revoke did not re-block e2e-a → {ip_b} within 5s"
-    );
-    ok(&format!("ping blocked after revoke ({ip_a} → {ip_b})"));
     e2e_tests::log_line("═══ install_single_host PASS ═══");
     // VM torn down automatically via EphemeralCluster::drop.
 }
@@ -341,7 +310,7 @@ fn install_two_hosts() {
     ok("init bootstrap returned success");
 
     // 2. wg0 addresses on both.
-    step("2/9  verify wg0 addresses on both hosts are distinct + in mgmt pool");
+    step("2/7  verify wg0 addresses on both hosts are distinct + in mgmt pool");
     let mgmt_a = wg0_ip(&cfg.ssh_key, &host_a);
     let mgmt_b = wg0_ip(&cfg.ssh_key, &host_b);
     assert!(mgmt_a.starts_with("100.64."), "hostA wg0 = {mgmt_a}");
@@ -370,7 +339,7 @@ fn install_two_hosts() {
     ok("hostB has non-zero latest-handshake timestamp");
 
     // 4. Mgmt-to-mgmt ping both directions (wg0 up and routing correct).
-    step("4/9  mgmt-to-mgmt ping over wg0, both directions");
+    step("4/7  mgmt-to-mgmt ping over wg0, both directions");
     assert!(
         ssh_ping(&cfg.ssh_key, &host_a, &mgmt_b),
         "hostA cannot ping hostB mgmt {mgmt_b}"
@@ -383,7 +352,7 @@ fn install_two_hosts() {
     ok(&format!("hostB → {mgmt_a} OK"));
 
     // 5. Core coold stack on both, central + builder only on hostA.
-    step("5/9  verify systemd units + firewall scaffold on both hosts");
+    step("5/7  verify systemd units + firewall scaffold on both hosts");
     for h in &[&host_a, &host_b] {
         for unit in CORE_UNITS {
             assert!(
@@ -410,52 +379,13 @@ fn install_two_hosts() {
 
     // 7. Cross-host default-deny blocks (COOLIFY-INTRA on both hosts drops
     //    the forward path).
-    step("7/9  cross-host ping e2e-a → e2e-b should be BLOCKED (COOLIFY-INTRA)");
+    step("7/7  cross-host ping e2e-a → e2e-b should be BLOCKED (COOLIFY-INTRA)");
     assert!(
         !podman_ping(&cfg.ssh_key, &host_a, "e2e-a", &ip_b),
         "cross-host default-deny failed to block e2e-a → {ip_b}"
     );
     ok(&format!("ping blocked as expected ({ip_a} → {ip_b})"));
 
-    // 8. Allow rules. Each host enforces FORWARD independently, so the
-    //    rule must live on every host that sees the packet. For a→b ping +
-    //    reply we need 4 rules total: {src=a,dst=b}, {src=b,dst=a} on both
-    //    host_a and host_b. Tokens are per-host.
-    step("8/9  POST 4 coold allow rules (A+B × a→b,b→a), expect ping to UNBLOCK");
-    let token_a = coold_token(&cfg.ssh_key, &host_a);
-    let token_b = coold_token(&cfg.ssh_key, &host_b);
-    let body_ab = format!(r#"{{"src":"{ip_a}","dst":"{ip_b}","namespace":"{NAMESPACE}"}}"#);
-    let body_ba = format!(r#"{{"src":"{ip_b}","dst":"{ip_a}","namespace":"{NAMESPACE}"}}"#);
-    let id_a_ab = coold_allow(&cfg.ssh_key, &host_a, &mgmt_a, &token_a, &body_ab);
-    let id_a_ba = coold_allow(&cfg.ssh_key, &host_a, &mgmt_a, &token_a, &body_ba);
-    let id_b_ab = coold_allow(&cfg.ssh_key, &host_b, &mgmt_b, &token_b, &body_ab);
-    let id_b_ba = coold_allow(&cfg.ssh_key, &host_b, &mgmt_b, &token_b, &body_ba);
-    ok(&format!(
-        "allow A:{id_a_ab},{id_a_ba}  B:{id_b_ab},{id_b_ba}"
-    ));
-    assert!(
-        wait_for(
-            || podman_ping(&cfg.ssh_key, &host_a, "e2e-a", &ip_b),
-            Duration::from_secs(10),
-        ),
-        "cross-host allow did not unblock e2e-a → {ip_b} within 10s"
-    );
-    ok(&format!("ping now succeeds ({ip_a} → {ip_b})"));
-
-    // 9. Revoke all 4 → blocked again.
-    step("9/9  DELETE all 4 allow rules, expect ping to RE-BLOCK");
-    coold_revoke(&cfg.ssh_key, &host_a, &mgmt_a, &token_a, &id_a_ab);
-    coold_revoke(&cfg.ssh_key, &host_a, &mgmt_a, &token_a, &id_a_ba);
-    coold_revoke(&cfg.ssh_key, &host_b, &mgmt_b, &token_b, &id_b_ab);
-    coold_revoke(&cfg.ssh_key, &host_b, &mgmt_b, &token_b, &id_b_ba);
-    assert!(
-        wait_for(
-            || !podman_ping(&cfg.ssh_key, &host_a, "e2e-a", &ip_b),
-            Duration::from_secs(10),
-        ),
-        "cross-host revoke did not re-block e2e-a → {ip_b} within 10s"
-    );
-    ok(&format!("ping blocked after revoke ({ip_a} → {ip_b})"));
     e2e_tests::log_line("═══ install_two_hosts PASS ═══");
     // Both VMs torn down automatically via EphemeralCluster::drop.
 }

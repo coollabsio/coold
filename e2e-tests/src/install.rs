@@ -8,7 +8,6 @@
 //! All SSH calls use [`ephemeral_ssh_args`](crate::hetzner::ephemeral_ssh_args)
 //! — known_hosts pinning is disabled so reused Hetzner IPs don't collide.
 
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -174,53 +173,6 @@ pub fn ssh_ping(ssh_key: &str, host: &str, target_ip: &str) -> bool {
     )
     .map(|s| s.trim() == "Y")
     .unwrap_or(false)
-}
-
-pub fn coold_token(ssh_key: &str, host: &str) -> String {
-    ssh(ssh_key, host, "cat /etc/coolify/api-token")
-        .unwrap_or_else(|e| panic!("read api-token on {host}: {e}"))
-        .trim()
-        .to_string()
-}
-
-/// POST a rule to the coold API (plain HTTP on wg0:8443). Returned rule
-/// JSON's `id` is parsed and returned.
-pub fn coold_allow(
-    ssh_key: &str,
-    host: &str,
-    mgmt_ip: &str,
-    token: &str,
-    body_json: &str,
-) -> String {
-    // curl runs on the host so the :8443 socket bound to wg0 is reachable.
-    let cmd = format!(
-        "curl -fsS -XPOST \
-         -H 'Authorization: Bearer {token}' \
-         -H 'Content-Type: application/json' \
-         http://{mgmt_ip}:8443/api/v1/firewall/allow \
-         -d '{body_json}'"
-    );
-    let out = ssh(ssh_key, host, &cmd).unwrap_or_else(|e| panic!("coold_allow on {host}: {e}"));
-    let v: serde_json::Value = serde_json::from_str(out.trim())
-        .unwrap_or_else(|e| panic!("parse allow response {out:?}: {e}"));
-    v["id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no id in allow response: {out}"))
-        .to_string()
-}
-
-pub fn coold_revoke(ssh_key: &str, host: &str, mgmt_ip: &str, token: &str, id: &str) {
-    let cmd = format!(
-        "curl -fsS -XDELETE \
-         -H 'Authorization: Bearer {token}' \
-         http://{mgmt_ip}:8443/api/v1/firewall/allow/{id}"
-    );
-    ssh(ssh_key, host, &cmd).unwrap_or_else(|e| panic!("coold_revoke {id} on {host}: {e}"));
-}
-
-/// Default path where the CLI writes the api bearer token on central hosts.
-pub fn api_token_path() -> PathBuf {
-    PathBuf::from("/etc/coolify/api-token")
 }
 
 /// Poll `cond` at 1s intervals until it returns true or `timeout` elapses.

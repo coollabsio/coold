@@ -44,80 +44,72 @@ scheduling, rollback, ingress templating, RBAC, audit.
 
 ## 3. Wire surface (enumerable)
 
-coold exposes the **same endpoint set** on both transports: the outbound stream
-(from central) and the local REST listener on wg0 mgmt IP (for intra-mesh
-callers). The list is closed — new verbs require a coold release, not a
-passthrough.
+coold exposes a closed gRPC primitive set over the outbound Flux stream. New
+verbs require a coold/protobuf release; there is no raw Podman passthrough and
+no host-local control surface.
 
 ```
 # Images
-POST   /api/v1/images/pull           {ref, auth?}            -> {digest}
-GET    /api/v1/images                                         -> [{ref, digest, size}]
-DELETE /api/v1/images/{ref}
+POST   images/pull           {ref, auth?}            -> {digest}
+GET    images                                         -> [{ref, digest, size}]
+DELETE images/{ref}
 
 # Containers (filtered podman surface)
-POST   /api/v1/containers            <create spec>            -> {id}
-POST   /api/v1/containers/{id}/start
-POST   /api/v1/containers/{id}/stop          {timeout?}
-POST   /api/v1/containers/{id}/restart
-DELETE /api/v1/containers/{id}                {force?}
-GET    /api/v1/containers/{id}                (inspect)
-GET    /api/v1/containers/{id}/logs?follow=true               (streamed)
-POST   /api/v1/containers/{id}/exec           {cmd, tty?}     (streamed)
-POST   /api/v1/containers/{id}/healthcheck/run
+POST   containers            <create spec>            -> {id}
+POST   containers/{id}/start
+POST   containers/{id}/stop          {timeout?}
+POST   containers/{id}/restart
+DELETE containers/{id}                {force?}
+GET    containers/{id}                (inspect)
+GET    containers/{id}/logs?follow=true               (streamed)
+POST   containers/{id}/exec           {cmd, tty?}     (streamed)
+POST   containers/{id}/healthcheck/run
 
 # Volumes
-POST   /api/v1/volumes               {name, driver, labels}
-DELETE /api/v1/volumes/{name}
-GET    /api/v1/volumes/{name}
+POST   volumes               {name, driver, labels}
+DELETE volumes/{name}
+GET    volumes/{name}
 
 # Networks (bootstrap creates coolify-mesh; per-app nets created here)
-POST   /api/v1/networks              {name, driver, options, labels}
-DELETE /api/v1/networks/{name}
-GET    /api/v1/networks
+POST   networks              {name, driver, options, labels}
+DELETE networks/{name}
+GET    networks
 
 # Firewall (coold = sole writer; dual-plane: iptables + nft bridge)
-POST   /api/v1/firewall/allow            {namespace, src, dst, proto?, port?}  -> {id}
-DELETE /api/v1/firewall/allow/{id}
-GET    /api/v1/firewall/allow[?namespace=X]
-POST   /api/v1/firewall/allow/bulk       {add:[...], remove:[id,...]}          -> {ok}
-POST   /api/v1/firewall/reconcile        -> {ok}  # flush + reload both snapshots
+firewall.allow            {namespace, src, dst, proto?, port?}  -> {id}
+firewall.revoke           {id}
+firewall.list             {?namespace}
+firewall.reconcile        {}  # flush + reload both snapshots
 
 # Service endpoints (Corrosion writer; central registers on deploy)
-POST   /api/v1/services/register
-DELETE /api/v1/services/{id}/endpoints/{container_id}
-GET    /api/v1/services/{id}/endpoints
+services.register
+services.unregister
+services.endpoints
 
 # DNS (diagnostics)
-GET    /api/v1/dns/lookup/{name}
-GET    /api/v1/dns/stats
+dns.lookup
+dns.stats
 
 # Host facts (read-only; central scrapes for observability + scheduling)
-GET    /api/v1/host/info             (podman info, kernel, wg state, load)
-GET    /api/v1/host/containers       (podman ps -a)
-GET    /api/v1/host/stats            (podman stats snapshot)
+host.info             (podman info, kernel, wg state, load)
+host.containers       (podman ps -a)
+host.stats            (podman stats snapshot)
 ```
 
-This list must stay byte-identical to the wire-surface block in
-`coolify` docs and command handlers. If you add or change a verb here, update
-the v5 CLI code in `coolify-cli/` too.
+This list must stay aligned with the protobuf wire surface and Coolify docs. If you add or change a verb here, update the proto, Flux routing, coold handlers, and Coolify client code together.
 
 ## 4. Transports
 
-coold speaks two transports, **same endpoint set on both**:
+coold speaks one control transport:
 
-- **Outbound stream (primary)**: coold dials
+- **Outbound stream**: coold dials
   `grpcs://<central-host>:443/v1/agent` on start, presenting its per-host JWT.
   Central routes commands to it by host id over the open stream. gRPC bidi +
   Protobuf is the alpha decision — typed schemas + native server-streaming for
   logs/exec. WSS over :443 remains the documented fallback if gRPC-through-
   proxy issues surface. Same code path for self-hosted and cloud SaaS.
-- **Local REST on wg0 mgmt IP (`100.64.0.X:8443`)**: intra-mesh callers only
-  (`coolify firewall` via SSH-bounce, peer coolds, optional
-  per-customer gateway). Bearer-token authn on every request.
-- **No inbound from central**: central never dials coold. All mutations from
-  central arrive over the coold-initiated stream; no `COOLIFY-ALLOW` rule for
-  "central → host:8443" is needed. Works through NAT / corp firewalls.
+- **No inbound control API**: central never dials coold. All mutations arrive
+over the coold-initiated stream. Works through NAT / corp firewalls.
 - **L4 LB + keepalive**: any load balancer between coold and central must be
   L4 (TCP pass-through). gRPC rides HTTP/2 long-lived streams; L7 LBs
   round-robin per-request and break the transport. Both sides send HTTP/2
@@ -259,7 +251,7 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
     `bridge-nf-call-iptables=1`. nft bridge-family hooks catch same-subnet
     traffic and jump to the same `coolify_allow` chain.
 - **coold DNS binds each namespace bridge gateway IP only**
-  (`10.210.<ns>.1:53`); never `0.0.0.0`. REST API binds the wg0 mgmt IP only.
+  (`10.210.<ns>.1:53`); never `0.0.0.0`. coold exposes no local control listener.
   Separate concerns, separate sockets.
 
 ## 10. Volumes (v5 alpha)
@@ -307,8 +299,7 @@ Every frame = one verb from §3. coold never sees "deploy app X v2".
 
 ## 13. Security boundary
 
-- **Authn**: per-host static bearer token (local REST, `/etc/coolify/api-token`
-  mode 0600) + per-host JWT (outbound stream, issued at enrollment).
+- **Authn**: per-host JWT for the outbound stream, issued at enrollment.
 - **No secret storage**: secrets enter via `POST /containers` env/mounts at
   deploy time; coold passes through and forgets.
 - **No business audit**: coold keeps an ops/debug request log (request id,
@@ -475,9 +466,9 @@ assignment can return private/WireGuard flux URLs instead.
 Fluxs in assignment mode report ownership back to Laravel:
 
 ```
-flux -> POST /api/v1/internal/fluxs/heartbeat
-flux -> POST /api/v1/internal/agent-connections/upsert
-flux -> POST /api/v1/internal/agent-connections/disconnect
+flux -> POST internal/fluxs/heartbeat
+flux -> POST internal/agent-connections/upsert
+flux -> POST internal/agent-connections/disconnect
 ```
 
 Laravel stores `host_id -> flux_id` and dispatches to the owning
@@ -755,7 +746,7 @@ exit or by coold's `resume_or_reap` on next start).
 ## 18. Cross-references
 
 - Bootstrap + CLI: `coolify-cli/` in this workspace.
-- `coolify firewall`: SSH-bounced REST client of local coold.
+- Runtime firewall changes: future gRPC primitives through Flux.
 - Wire surface + transport: §3 and §4 here are the source of truth for `coolify` command behavior.
 
 

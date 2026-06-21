@@ -67,11 +67,6 @@ pub async fn run(config: Config) -> Result<()> {
         tokio::spawn(async move { crate::dns::run(config, corrosion).await })
     };
 
-    let firewall_handle = {
-        let config = ctx.config.clone();
-        tokio::spawn(async move { crate::firewall::run(config).await })
-    };
-
     let grpc_handle = {
         let config = ctx.config.clone();
         let podman = ctx.podman.clone();
@@ -87,7 +82,6 @@ pub async fn run(config: Config) -> Result<()> {
         res = reconcile_handle => propagate("reconcile", res)?,
         res = host_infra_handle => propagate("host-infra", res)?,
         res = dns_handle       => propagate("dns",       res)?,
-        res = firewall_handle  => propagate("firewall",  res)?,
         res = grpc_handle      => propagate("grpc",      res)?,
         _ = tokio::signal::ctrl_c() => info!("ctrl-c received, shutting down"),
     }

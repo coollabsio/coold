@@ -2,7 +2,7 @@
 
 `coolify` is the Rust CLI for **Coolify v5 cluster operations** that live with
 `coold`: WireGuard mesh bootstrap, Podman mesh networks, coold/corrosion
-installation, builder capability setup, and SSH-bounced firewall control.
+installation, and builder capability setup.
 
 It intentionally does **not** migrate Coolify v4 CLI features such as contexts,
 projects, resources, deployments, private keys, or v4 API helpers. The shipped binary is named `coolify` because this is the user-facing
@@ -18,10 +18,6 @@ Included:
 - `init extend` — add new nodes while only peer-refreshing existing mesh hosts.
 - `init upgrade` — bump coold/corrosion/builder binaries without
   changing mesh topology.
-- `firewall containers` — discover Podman containers attached to v5 mesh
-  networks.
-- `firewall list` / `allow` / `revoke` — mutate coold's wg0-local firewall REST
-  API via SSH bounce.
 
 Excluded:
 
@@ -66,7 +62,6 @@ rename. `--new-hosts` remains an alias for `--new-nodes`.
 Mesh defaults:
 
 ```bash
---namespace default             Single namespace for firewall commands.
 --namespaces default            Comma-separated namespaces for init commands.
 --container-pool 10.210.0.0/16  Per-host Podman subnet pool.
 --container-prefix 24           Per-host subnet prefix.
@@ -167,109 +162,8 @@ coolify init upgrade \
 Upgrade mode keeps version bumps and service-unit rewrites, but skips topology
 changes. Use `init extend` for peer or node-list changes.
 
-## Firewall commands
+## Runtime mutations
 
-Firewall commands SSH to each target host, discover coold's wg0 management IP,
-read `/etc/coolify/api-token` unless a token override is provided, then call
-coold's local REST API.
-
-Token and port overrides:
-
-```bash
---coold-token TOKEN       Per-command bearer token override.
-COOLIFY_COOLD_TOKEN=...   Environment bearer token override.
---coold-port 8443         Defaults to 8443.
-```
-
-List mesh containers:
-
-```bash
-coolify firewall containers \
-  --nodes 203.0.113.10,203.0.113.11 \
-  --namespace default \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-List allow rules:
-
-```bash
-coolify firewall list \
-  --nodes 203.0.113.10,203.0.113.11 \
-  --namespace default \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-Allow traffic from one container IP to another:
-
-```bash
-coolify firewall allow \
-  --nodes 203.0.113.11 \
-  --namespace default \
-  --from 10.210.0.10 \
-  --to 10.210.1.20 \
-  --proto tcp \
-  --port 80 \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-Allow all protocols between two container IPs by omitting `--port`:
-
-```bash
-coolify firewall allow \
-  --nodes 203.0.113.11 \
-  --from 10.210.0.10 \
-  --to 10.210.1.20 \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-Revoke by ID:
-
-```bash
-coolify firewall revoke \
-  --nodes 203.0.113.11 \
-  --id abc123def456 \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-Or revoke by the same tuple used for allow:
-
-```bash
-coolify firewall revoke \
-  --nodes 203.0.113.11 \
-  --from 10.210.0.10 \
-  --to 10.210.1.20 \
-  --proto tcp \
-  --port 80 \
-  --ssh-key ~/.ssh/coolify-v5
-```
-
-Rule IDs are `sha256("namespace|src|dst|proto|port")[:12]`, with an empty
-namespace treated as `default`, matching coold and the retired Go v5 cluster CLI
-surface.
-
-## Hetzner e2e tests
-
-The live e2e tests are ignored by default because they create paid Hetzner VMs.
-Build the binary first:
-
-```bash
-rtk cargo build -p coolify-cli
-```
-
-Run manually only when you want live provisioning:
-
-```bash
-HETZNER_TOKEN=... \
-SSH_KEY=~/.ssh/coolify-v5 \
-COOLIFY_CLI_BIN=target/debug/coolify \
-rtk cargo test -p e2e-tests --test coolify -- --ignored --nocapture --test-threads=1
-```
-
-Optional environment:
-
-```bash
-HETZNER_PROJECT=...
-```
-
-The ignored tests cover single-host bootstrap, two-host bootstrap, extend with a
-third host, and firewall allow/list/revoke behavior.
+The CLI currently owns cluster bootstrap/extend/upgrade only. Runtime mutations
+should flow through Coolify → Flux → coold gRPC primitives, not through a local
+host-local API. Firewall CLI commands were removed with that surface.

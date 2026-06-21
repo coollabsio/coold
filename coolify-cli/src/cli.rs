@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::commands::{firewall, init};
+use crate::commands::init;
 
 #[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
 pub enum OutputFormat {
@@ -27,8 +27,6 @@ pub struct Cli {
 pub enum Commands {
     #[command(subcommand)]
     Init(init::InitCommand),
-    #[command(subcommand)]
-    Firewall(firewall::FirewallCommand),
 }
 
 pub async fn run() -> anyhow::Result<()> {
@@ -43,6 +41,5 @@ pub async fn run() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Init(cmd) => init::run(cmd, cli.format).await,
-        Commands::Firewall(cmd) => firewall::run(cmd, cli.format).await,
     }
 }
