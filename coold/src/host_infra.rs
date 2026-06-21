@@ -17,4 +17,5 @@ pub async fn run(config: Config) -> Result<()> {
 async fn reconcile_once(config: &Config) {
     debug!("host infrastructure reconcile tick");
     crate::mesh_dns_anchor::reconcile(config).await;
+    crate::mesh_dns_resolver::reconcile(config).await;
 }

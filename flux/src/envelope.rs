@@ -54,6 +54,10 @@ pub enum CommandPayload {
         #[serde(default)]
         dns: Vec<String>,
         #[serde(default)]
+        dns_search: Vec<String>,
+        #[serde(default)]
+        network_aliases: Vec<String>,
+        #[serde(default)]
         restart_policy: String,
         #[serde(default)]
         privileged: bool,

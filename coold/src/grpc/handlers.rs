@@ -99,13 +99,18 @@ pub async fn handle(
                     })
                     .collect(),
                 dns: req.dns,
+                dns_search: req.dns_search,
+                network_aliases: req.network_aliases,
                 restart_policy: req.restart_policy,
                 privileged: req.privileged,
                 network_mode: req.network_mode,
                 capabilities: req.capabilities,
             };
-            let body = match podman.create_container(input).await {
-                Ok(id) => response::Body::ContainersCreate(ContainersCreateResp { id }),
+            let body = match apply_mesh_dns_defaults(input).await {
+                Ok(input) => match podman.create_container(input).await {
+                    Ok(id) => response::Body::ContainersCreate(ContainersCreateResp { id }),
+                    Err(e) => error_body(e),
+                },
                 Err(e) => error_body(e),
             };
             send_response(
@@ -375,6 +380,37 @@ async fn send_response(tx: &mpsc::Sender<ClientMsg>, response: Response) {
     if let Err(e) = tx.send(msg).await {
         warn!(%request_id, error = %e, "failed to enqueue response");
     }
+}
+
+async fn apply_mesh_dns_defaults(mut input: CreateContainerInput) -> Result<CreateContainerInput> {
+    let Some(network) = input
+        .networks
+        .iter()
+        .find(|network| network.starts_with("coolify-") && network.ends_with("-mesh"))
+        .cloned()
+    else {
+        return Ok(input);
+    };
+
+    if input.dns.is_empty() {
+        input.dns = vec![mesh_network_gateway(&network).await?];
+    }
+
+    if input.dns_search.is_empty() {
+        input.dns_search = vec![mesh_dns_search_domain(&network)?];
+    }
+
+    Ok(input)
+}
+
+fn mesh_dns_search_domain(mesh_network: &str) -> Result<String> {
+    let namespace = mesh_network
+        .strip_prefix("coolify-")
+        .and_then(|value| value.strip_suffix("-mesh"))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("invalid mesh network name"))?;
+
+    Ok(format!("{namespace}.coolify.internal"))
 }
 
 async fn apply_ingress(
@@ -1216,6 +1252,15 @@ mod tests {
         assert!(!args
             .windows(2)
             .any(|window| window == ["-p", "443:443/udp"]));
+    }
+
+    #[test]
+    fn derives_mesh_dns_search_domain_from_network_name() {
+        assert_eq!(
+            mesh_dns_search_domain("coolify-default-mesh").unwrap(),
+            "default.coolify.internal"
+        );
+        assert!(mesh_dns_search_domain("host").is_err());
     }
 
     #[test]

@@ -105,6 +105,8 @@ pub struct ContainerCreateSpec {
     pub port_mappings: Vec<PortMappingSpec>,
     #[serde(rename = "dns_server", skip_serializing_if = "Vec::is_empty")]
     pub dns_servers: Vec<String>,
+    #[serde(rename = "dns_search", skip_serializing_if = "Vec::is_empty")]
+    pub dns_search: Vec<String>,
     #[serde(rename = "restart_policy", skip_serializing_if = "Option::is_none")]
     pub restart_policy: Option<String>,
 }

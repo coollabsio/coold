@@ -126,6 +126,8 @@ message ContainersCreateReq {
     repeated PortMapping ports = 7;
     repeated string dns = 8;
     string restart_policy = 9;
+    repeated string dns_search = 10;
+    repeated string network_aliases = 11;
 
     bool privileged = 20;
     string network_mode = 21;

@@ -98,7 +98,7 @@ pub fn mesh_dns_resolver_unit(namespaces: &[CooldNamespace]) -> String {
         .join("; ");
 
     format!(
-        "[Unit]\nDescription=Configure Coolify mesh DNS resolver\nAfter=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\nWants=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/bin/sh -eu -c 'command -v resolvectl >/dev/null 2>&1 || exit 0; {commands}'\n\n[Install]\nWantedBy=multi-user.target\n"
+        "[Unit]\nDescription=Configure Coolify mesh DNS resolver\nAfter=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\nWants=systemd-resolved.service {MESH_DNS_ANCHOR_SERVICE}\n\n[Service]\nType=oneshot\nExecStart=/bin/sh -eu -c 'command -v resolvectl >/dev/null 2>&1 || exit 0; {commands}'\n\n[Install]\nWantedBy=multi-user.target\n"
     )
 }
 
@@ -232,6 +232,17 @@ mod tests {
         ] {
             assert!(got.contains(want), "missing {want} in:\n{got}");
         }
+    }
+
+    #[test]
+    fn mesh_dns_resolver_unit_does_not_mask_resolved_link_drift() {
+        let got = mesh_dns_resolver_unit(&[CooldNamespace {
+            name: "default".into(),
+            network: "coolify-default-mesh".into(),
+            bridge_gateway: "10.210.0.1".parse().unwrap(),
+        }]);
+
+        assert!(!got.contains("RemainAfterExit=yes"));
     }
 
     #[test]

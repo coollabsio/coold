@@ -4,6 +4,7 @@ mod dns;
 mod grpc;
 mod host_infra;
 mod mesh_dns_anchor;
+mod mesh_dns_resolver;
 mod model;
 mod podman;
 mod sync;

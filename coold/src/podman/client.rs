@@ -38,6 +38,8 @@ pub struct CreateContainerInput {
     pub volumes: Vec<String>,
     pub ports: Vec<CreatePortMapping>,
     pub dns: Vec<String>,
+    pub dns_search: Vec<String>,
+    pub network_aliases: Vec<String>,
     pub restart_policy: String,
     pub privileged: bool,
     pub network_mode: String,
@@ -319,10 +321,19 @@ fn create_spec(input: CreateContainerInput) -> ContainerCreateSpec {
             Some((key.to_string(), value.to_string()))
         })
         .collect::<HashMap<_, _>>();
+    let network_aliases = input.network_aliases.clone();
     let networks = input
         .networks
         .into_iter()
-        .map(|network| (network, json!({})))
+        .map(|network| {
+            let value = if network_aliases.is_empty() {
+                json!({})
+            } else {
+                json!({ "aliases": network_aliases.clone() })
+            };
+
+            (network, value)
+        })
         .collect::<HashMap<_, _>>();
     let mounts = input
         .volumes
@@ -360,6 +371,7 @@ fn create_spec(input: CreateContainerInput) -> ContainerCreateSpec {
         mounts,
         port_mappings,
         dns_servers: input.dns,
+        dns_search: input.dns_search,
         restart_policy: if input.restart_policy.is_empty() {
             None
         } else {
@@ -425,11 +437,28 @@ mod tests {
             volumes: vec![],
             ports: vec![],
             dns: vec![],
+            dns_search: vec![],
+            network_aliases: vec![],
             restart_policy: String::new(),
             privileged: false,
             network_mode: String::new(),
             capabilities: vec![],
         }
+    }
+
+    #[test]
+    fn create_spec_includes_network_aliases_and_dns_search_domains() {
+        let mut input = base_input();
+        input.network_aliases = vec!["coolify-v5-nginx-test".into()];
+        input.dns = vec!["10.210.0.1".into()];
+        input.dns_search = vec!["default.coolify.internal".into()];
+
+        let spec = create_spec(input);
+        let network = spec.networks.get("coolify-default-mesh").unwrap();
+
+        assert_eq!(network["aliases"][0], "coolify-v5-nginx-test");
+        assert_eq!(spec.dns_servers, vec!["10.210.0.1"]);
+        assert_eq!(spec.dns_search, vec!["default.coolify.internal"]);
     }
 
     #[test]

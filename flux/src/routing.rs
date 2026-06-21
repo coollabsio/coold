@@ -57,6 +57,8 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
             volumes,
             ports,
             dns,
+            dns_search,
+            network_aliases,
             restart_policy,
             privileged,
             network_mode,
@@ -78,6 +80,8 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
                 })
                 .collect(),
             dns,
+            dns_search,
+            network_aliases,
             restart_policy,
             privileged,
             network_mode,
@@ -404,10 +408,14 @@ mod tests {
                     "protocol": "tcp"
                 }],
                 "dns": ["10.210.0.1"],
+                "dns_search": ["default.coolify.internal"],
+                "network_aliases": ["coolify-v5-nginx-test"],
                 "restart_policy": "unless-stopped"
             })),
-            server_msg::Command::ContainersCreate(ContainersCreateReq { name, image, ports, .. })
+            server_msg::Command::ContainersCreate(ContainersCreateReq { name, image, ports, dns_search, network_aliases, .. })
                 if name == "web"
+                    && dns_search == vec!["default.coolify.internal"]
+                    && network_aliases == vec!["coolify-v5-nginx-test"]
                     && image == "docker.io/library/nginx:alpine"
                     && ports.len() == 1
                     && ports[0].container_port == 80
