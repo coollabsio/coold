@@ -121,30 +121,35 @@ mod grpc_server {
             == Some("1")
     }
 
-    fn advertised_capability_not_granted<'a>(
-        advertised: &'a [String],
-        jwt_caps: &[String],
-    ) -> Option<&'a str> {
-        advertised
-            .iter()
-            .map(String::as_str)
-            .find(|capability| !jwt_caps.iter().any(|jwt_cap| jwt_cap == capability))
+    fn capability_profile_authorizes_all(capability: &str) -> bool {
+        matches!(capability, "*" | "host-agent:dev" | "host-agent:default")
     }
 
-    fn validate_advertised_capabilities(
-        advertised: &[String],
-        jwt_caps: &[String],
-    ) -> Result<(), Status> {
-        if let Some(missing) = advertised_capability_not_granted(advertised, jwt_caps) {
-            warn!(
-                missing_cap = %missing,
-                jwt_caps = ?jwt_caps,
-                "host advertised a capability not granted in JWT; rejecting stream",
-            );
-            return Err(Status::permission_denied("invalid capabilities"));
+    fn effective_capabilities(advertised: &[String], jwt_caps: &[String]) -> Vec<String> {
+        if jwt_caps
+            .iter()
+            .any(|capability| capability_profile_authorizes_all(capability))
+        {
+            return advertised.to_vec();
         }
 
-        Ok(())
+        advertised
+            .iter()
+            .filter(|capability| jwt_caps.iter().any(|jwt_cap| jwt_cap == *capability))
+            .cloned()
+            .collect()
+    }
+
+    fn missing_capabilities(advertised: &[String], effective: &[String]) -> Vec<String> {
+        advertised
+            .iter()
+            .filter(|capability| {
+                !effective
+                    .iter()
+                    .any(|effective_cap| effective_cap == *capability)
+            })
+            .cloned()
+            .collect()
     }
 
     pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
@@ -241,20 +246,33 @@ mod grpc_server {
                 }
             };
 
-            info!(
-                %host_id,
-                version = %hello.coold_version,
-                capabilities = ?hello.capabilities,
-                "coold stream connected"
-            );
-            validate_advertised_capabilities(&hello.capabilities, &jwt_caps)?;
+            let effective_caps = effective_capabilities(&hello.capabilities, &jwt_caps);
+            let missing_caps = missing_capabilities(&hello.capabilities, &effective_caps);
+
+            if missing_caps.is_empty() {
+                info!(
+                    %host_id,
+                    version = %hello.coold_version,
+                    capabilities = ?effective_caps,
+                    "coold stream connected"
+                );
+            } else {
+                warn!(
+                    %host_id,
+                    version = %hello.coold_version,
+                    effective_capabilities = ?effective_caps,
+                    unauthorized_capabilities = ?missing_caps,
+                    "coold stream connected with unauthorized advertised capabilities"
+                );
+            }
 
             let (cmd_tx, cmd_rx) = mpsc::channel::<ServerMsg>(64);
             self.streams.insert(
                 host_id.clone(),
                 StreamHandle {
                     tx: cmd_tx,
-                    caps: hello.capabilities.clone(),
+                    caps: effective_caps.clone(),
+                    advertised_caps: hello.capabilities.clone(),
                 },
             );
 
@@ -278,7 +296,7 @@ mod grpc_server {
             }
             if let Some(registry) = registry.clone() {
                 let host_id = host_id.clone();
-                let capabilities = hello.capabilities.clone();
+                let capabilities = effective_caps.clone();
                 let coold_version = hello.coold_version.clone();
                 tokio::spawn(async move {
                     if let Err(e) = registry
@@ -406,7 +424,9 @@ mod grpc_server {
 
     #[cfg(test)]
     mod tests {
-        use super::{advertised_capability_not_granted, coold_status_update, validate_bind};
+        use super::{
+            coold_status_update, effective_capabilities, missing_capabilities, validate_bind,
+        };
         use std::net::SocketAddr;
 
         fn parse(s: &str) -> SocketAddr {
@@ -446,14 +466,23 @@ mod grpc_server {
         }
 
         #[test]
-        fn invalid_hello_capabilities_are_rejected_before_stream_opens() {
-            let advertised = vec!["containers.list".to_string(), "ingress.apply".to_string()];
+        fn missing_hello_capabilities_are_degraded_not_rejected() {
+            let advertised = vec!["containers.list".to_string(), "coold.logs".to_string()];
             let jwt_caps = vec!["containers.list".to_string()];
 
-            let err = super::validate_advertised_capabilities(&advertised, &jwt_caps).unwrap_err();
+            let effective = super::effective_capabilities(&advertised, &jwt_caps);
 
-            assert_eq!(err.code(), tonic::Code::PermissionDenied);
-            assert_eq!(err.message(), "invalid capabilities");
+            assert_eq!(effective, vec!["containers.list"]);
+        }
+
+        #[test]
+        fn wildcard_host_token_authorizes_all_advertised_capabilities() {
+            let advertised = vec!["containers.list".to_string(), "coold.logs".to_string()];
+            let jwt_caps = vec!["*".to_string()];
+
+            let effective = super::effective_capabilities(&advertised, &jwt_caps);
+
+            assert_eq!(effective, advertised);
         }
 
         #[test]
@@ -461,20 +490,19 @@ mod grpc_server {
             let advertised = vec!["containers.list".to_string(), "ingress.apply".to_string()];
             let jwt_caps = vec!["containers.list".to_string(), "ingress.apply".to_string()];
 
-            assert_eq!(
-                advertised_capability_not_granted(&advertised, &jwt_caps),
-                None
-            );
+            assert_eq!(effective_capabilities(&advertised, &jwt_caps), advertised);
         }
 
         #[test]
-        fn missing_capability_is_rejected() {
+        fn missing_capability_is_left_out_of_effective_capabilities() {
             let advertised = vec!["containers.list".to_string(), "ingress.apply".to_string()];
             let jwt_caps = vec!["containers.list".to_string()];
+            let effective = effective_capabilities(&advertised, &jwt_caps);
 
+            assert_eq!(effective, vec!["containers.list"]);
             assert_eq!(
-                advertised_capability_not_granted(&advertised, &jwt_caps),
-                Some("ingress.apply")
+                missing_capabilities(&advertised, &effective),
+                vec!["ingress.apply"]
             );
         }
 

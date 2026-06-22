@@ -15,11 +15,13 @@ use crate::envelope::{ResponseBody, StreamInventoryItem};
 pub struct StreamHandle {
     pub tx: mpsc::Sender<ServerMsg>,
     pub caps: Vec<String>,
+    pub advertised_caps: Vec<String>,
 }
 
 struct StreamEntry {
     tx: mpsc::Sender<ServerMsg>,
     caps: Vec<String>,
+    advertised_caps: Vec<String>,
     last_seen_at: Instant,
     reachable: bool,
 }
@@ -39,6 +41,7 @@ impl Streams {
             StreamEntry {
                 tx: handle.tx,
                 caps: handle.caps,
+                advertised_caps: handle.advertised_caps,
                 last_seen_at: Instant::now(),
                 reachable: true,
             },
@@ -59,6 +62,7 @@ impl Streams {
         self.0.get(host_id).map(|e| StreamHandle {
             tx: e.value().tx.clone(),
             caps: e.value().caps.clone(),
+            advertised_caps: e.value().advertised_caps.clone(),
         })
     }
 
@@ -491,6 +495,7 @@ mod stream_snapshot_tests {
             StreamHandle {
                 tx: tx.clone(),
                 caps: vec!["containers.list".into(), "containers.list".into()],
+                advertised_caps: vec!["containers.list".into(), "containers.list".into()],
             },
         );
         streams.insert(
@@ -498,6 +503,7 @@ mod stream_snapshot_tests {
             StreamHandle {
                 tx,
                 caps: vec!["containers.list".into()],
+                advertised_caps: vec!["containers.list".into()],
             },
         );
         let got = streams.snapshot();
@@ -517,6 +523,7 @@ mod stream_snapshot_tests {
             StreamHandle {
                 tx,
                 caps: vec!["containers.list".into()],
+                advertised_caps: vec!["containers.list".into()],
             },
         );
 

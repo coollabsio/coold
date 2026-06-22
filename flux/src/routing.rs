@@ -20,7 +20,7 @@ use crate::state::Streams;
 #[derive(Debug)]
 pub enum RouteOutcome {
     SendCoold { host_id: String, msg: ServerMsg },
-    PushError { code: u32, message: &'static str },
+    PushError { code: u32, message: String },
 }
 
 /// Route a coold command envelope to its pinned target host.
@@ -28,15 +28,28 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
     let Some(stream) = streams.get(&env.host_id) else {
         return RouteOutcome::PushError {
             code: 404,
-            message: "host not connected",
+            message: "host not connected".into(),
         };
     };
 
     let required_capability = required_capability(&env.command);
     if !stream.caps.iter().any(|cap| cap == required_capability) {
+        if stream
+            .advertised_caps
+            .iter()
+            .any(|cap| cap == required_capability)
+        {
+            return RouteOutcome::PushError {
+                code: 403,
+                message: format!(
+                    "capability {required_capability} is not authorized for this host token"
+                ),
+            };
+        }
+
         return RouteOutcome::PushError {
             code: 501,
-            message: "primitive not supported by host",
+            message: format!("primitive {required_capability} is not supported by host"),
         };
     }
 
@@ -225,6 +238,7 @@ mod tests {
             StreamHandle {
                 tx,
                 caps: caps.iter().map(|c| c.to_string()).collect(),
+                advertised_caps: caps.iter().map(|c| c.to_string()).collect(),
             },
         );
         rx
@@ -268,7 +282,44 @@ mod tests {
         match out {
             RouteOutcome::PushError { code, message } => {
                 assert_eq!(code, 501);
-                assert_eq!(message, "primitive not supported by host");
+                assert_eq!(
+                    message,
+                    "primitive containers.list is not supported by host"
+                );
+            }
+            other => panic!("expected PushError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn route_coold_reports_unauthorized_capability_when_host_advertised_it() {
+        let streams = Streams::new();
+        let (tx, _rx) = mpsc::channel::<ServerMsg>(16);
+        streams.insert(
+            "H".into(),
+            StreamHandle {
+                tx,
+                caps: vec!["containers.list".into()],
+                advertised_caps: vec!["containers.list".into(), "coold.logs".into()],
+            },
+        );
+
+        let out = route_coold(
+            &streams,
+            DispatchEnvelope {
+                host_id: "H".into(),
+                request_id: "r1".into(),
+                command: CommandPayload::CooldLogs { tail: 200 },
+            },
+        );
+
+        match out {
+            RouteOutcome::PushError { code, message } => {
+                assert_eq!(code, 403);
+                assert_eq!(
+                    message,
+                    "capability coold.logs is not authorized for this host token"
+                );
             }
             other => panic!("expected PushError, got {other:?}"),
         }

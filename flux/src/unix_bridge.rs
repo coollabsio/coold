@@ -184,7 +184,7 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
         }
         RouteOutcome::PushError { code, message } => {
             warn!(%request_id, %host_id, %code, %message, "coold dispatch rejected");
-            coold_err(&request_id, code, message)
+            coold_err(&request_id, code, &message)
         }
     }
 }
