@@ -27,6 +27,9 @@ pub async fn handle(
     corrosion: &CorrosionClient,
     tx: mpsc::Sender<ClientMsg>,
 ) {
+    let command_type = command_type(&command);
+    info!(%request_id, %command_type, "coold command received");
+
     match command {
         server_msg::Command::Ping(_) => {
             debug!(%request_id, "ping command reached handler after fast-path; ignoring");
@@ -408,11 +411,71 @@ fn error_body(error: anyhow::Error) -> response::Body {
 
 async fn send_response(tx: &mpsc::Sender<ClientMsg>, response: Response) {
     let request_id = response.request_id.clone();
+    let response_type = response_body_type(response.body.as_ref());
     let msg = ClientMsg {
         payload: Some(client_msg::Payload::Response(response)),
     };
+
+    info!(%request_id, %response_type, "coold response enqueueing");
     if let Err(e) = tx.send(msg).await {
-        warn!(%request_id, error = %e, "failed to enqueue response");
+        warn!(%request_id, %response_type, error = %e, "failed to enqueue response");
+    } else {
+        info!(%request_id, %response_type, "coold response enqueued");
+    }
+}
+
+fn command_type(command: &server_msg::Command) -> &'static str {
+    match command {
+        server_msg::Command::Ping(_) => "ping",
+        server_msg::Command::ImagesPull(_) => "images.pull",
+        server_msg::Command::ImagesList(_) => "images.list",
+        server_msg::Command::ImagesDelete(_) => "images.delete",
+        server_msg::Command::ContainersCreate(_) => "containers.create",
+        server_msg::Command::ContainersStart(_) => "containers.start",
+        server_msg::Command::ContainersStop(_) => "containers.stop",
+        server_msg::Command::ContainersRestart(_) => "containers.restart",
+        server_msg::Command::ContainersDelete(_) => "containers.delete",
+        server_msg::Command::ContainersInspect(_) => "containers.inspect",
+        server_msg::Command::ContainersList(_) => "containers.list",
+        server_msg::Command::ContainersLogs(_) => "containers.logs",
+        server_msg::Command::ContainersExec(_) => "containers.exec",
+        server_msg::Command::ContainersHealthcheckRun(_) => "containers.healthcheck.run",
+        server_msg::Command::IngressApply(_) => "ingress.apply",
+        server_msg::Command::IngressStop(_) => "ingress.stop",
+        server_msg::Command::FirewallAllow(_) => "firewall.allow",
+        server_msg::Command::FirewallRevoke(_) => "firewall.revoke",
+        server_msg::Command::FirewallList(_) => "firewall.list",
+        server_msg::Command::FirewallReconcile(_) => "firewall.reconcile",
+        server_msg::Command::CooldLogs(_) => "coold.logs",
+        server_msg::Command::CorrosionTables(_) => "corrosion.tables",
+    }
+}
+
+fn response_body_type(body: Option<&response::Body>) -> &'static str {
+    match body {
+        Some(response::Body::ImagesPull(_)) => "images.pull",
+        Some(response::Body::ImagesList(_)) => "images.list",
+        Some(response::Body::ImagesDelete(_)) => "images.delete",
+        Some(response::Body::ContainersCreate(_)) => "containers.create",
+        Some(response::Body::ContainersStart(_)) => "containers.start",
+        Some(response::Body::ContainersStop(_)) => "containers.stop",
+        Some(response::Body::ContainersRestart(_)) => "containers.restart",
+        Some(response::Body::ContainersDelete(_)) => "containers.delete",
+        Some(response::Body::ContainersInspect(_)) => "containers.inspect",
+        Some(response::Body::ContainersList(_)) => "containers.list",
+        Some(response::Body::ContainersLogs(_)) => "containers.logs",
+        Some(response::Body::ContainersExec(_)) => "containers.exec",
+        Some(response::Body::ContainersHealthcheckRun(_)) => "containers.healthcheck.run",
+        Some(response::Body::IngressApply(_)) => "ingress.apply",
+        Some(response::Body::IngressStop(_)) => "ingress.stop",
+        Some(response::Body::FirewallAllow(_)) => "firewall.allow",
+        Some(response::Body::FirewallRevoke(_)) => "firewall.revoke",
+        Some(response::Body::FirewallList(_)) => "firewall.list",
+        Some(response::Body::FirewallReconcile(_)) => "firewall.reconcile",
+        Some(response::Body::CooldLogs(_)) => "coold.logs",
+        Some(response::Body::CorrosionTables(_)) => "corrosion.tables",
+        Some(response::Body::Error(_)) => "error",
+        None => "none",
     }
 }
 

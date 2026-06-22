@@ -151,6 +151,34 @@ pub enum CommandPayload {
     },
 }
 
+impl CommandPayload {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ImagesPull { .. } => "images.pull",
+            Self::ImagesList => "images.list",
+            Self::ImagesDelete { .. } => "images.delete",
+            Self::ContainersCreate { .. } => "containers.create",
+            Self::ContainersStart { .. } => "containers.start",
+            Self::ContainersStop { .. } => "containers.stop",
+            Self::ContainersRestart { .. } => "containers.restart",
+            Self::ContainersDelete { .. } => "containers.delete",
+            Self::ContainersInspect { .. } => "containers.inspect",
+            Self::ContainersList => "containers.list",
+            Self::ContainersLogs { .. } => "containers.logs",
+            Self::ContainersExec { .. } => "containers.exec",
+            Self::ContainersHealthcheckRun { .. } => "containers.healthcheck.run",
+            Self::ApplyIngress { .. } => "ingress.apply",
+            Self::StopIngress { .. } => "ingress.stop",
+            Self::FirewallAllow { .. } => "firewall.allow",
+            Self::FirewallRevoke { .. } => "firewall.revoke",
+            Self::FirewallList { .. } => "firewall.list",
+            Self::FirewallReconcile => "firewall.reconcile",
+            Self::CooldLogs { .. } => "coold.logs",
+            Self::CorrosionTables { .. } => "corrosion.tables",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PortMapping {
     pub host_ip: String,

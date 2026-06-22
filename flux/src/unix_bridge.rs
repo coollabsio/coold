@@ -143,6 +143,9 @@ async fn stream_inventory(State(st): State<AppState>) -> impl IntoResponse {
 async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnvelope>) -> Response {
     let request_id = env.request_id.clone();
     let host_id = env.host_id.clone();
+    let command_type = env.command.kind();
+
+    info!(%request_id, %host_id, %command_type, "coold dispatch received");
 
     match route_coold(&st.streams, env) {
         RouteOutcome::SendCoold {
@@ -177,10 +180,13 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
             };
             if tx.send(msg).await.is_err() {
                 st.pending.remove(&request_id);
+                warn!(%request_id, host_id = %target, %command_type, "coold dispatch stream send failed");
                 return coold_err(&request_id, 503, "host stream send failed");
             }
 
-            await_coold(&request_id, rx, st.dispatch_timeout).await
+            info!(%request_id, host_id = %target, %command_type, "coold dispatch forwarded to stream");
+
+            await_coold(&request_id, &target, command_type, rx, st.dispatch_timeout).await
         }
         RouteOutcome::PushError { code, message } => {
             warn!(%request_id, %host_id, %code, %message, "coold dispatch rejected");
@@ -191,19 +197,30 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
 
 async fn await_coold(
     request_id: &str,
+    host_id: &str,
+    command_type: &str,
     rx: oneshot::Receiver<ResponseData>,
     timeout: Duration,
 ) -> Response {
     match tokio::time::timeout(timeout, rx).await {
-        Ok(Ok(ResponseData::Coold(body))) => Json(ResponseEnvelope {
-            request_id: request_id.to_owned(),
-            body,
-        })
-        .into_response(),
+        Ok(Ok(ResponseData::Coold(body))) => {
+            info!(%request_id, %host_id, %command_type, "coold dispatch response returned to caller");
+            Json(ResponseEnvelope {
+                request_id: request_id.to_owned(),
+                body,
+            })
+            .into_response()
+        }
         // Sink dropped without a value (sweeper evicted on timeout, or the
         // entry was removed by a send-failure path above).
-        Ok(Err(_)) => coold_err(request_id, 504, "dispatch timeout"),
-        Err(_) => coold_err(request_id, 504, "dispatch timeout"),
+        Ok(Err(_)) => {
+            warn!(%request_id, %host_id, %command_type, "coold dispatch response sink dropped");
+            coold_err(request_id, 504, "dispatch timeout")
+        }
+        Err(_) => {
+            warn!(%request_id, %host_id, %command_type, "coold dispatch await timed out");
+            coold_err(request_id, 504, "dispatch timeout")
+        }
     }
 }
 

@@ -85,7 +85,7 @@ mod grpc_server {
 
     use coolify_proto::agent::v1::{
         agent_server::{Agent, AgentServer},
-        client_msg, ClientMsg, ServerMsg,
+        client_msg, response, ClientMsg, ServerMsg,
     };
 
     use crate::{
@@ -319,7 +319,7 @@ mod grpc_server {
                         Ok(ClientMsg {
                             payload: Some(client_msg::Payload::Response(resp)),
                         }) => {
-                            deliver_response(&pending, resp);
+                            deliver_response(&pending, &host_id_clone, resp);
                         }
                         Ok(ClientMsg {
                             payload: Some(client_msg::Payload::ResourceStatusUpdate(update)),
@@ -384,12 +384,19 @@ mod grpc_server {
 
     /// Map a coold gRPC `Response` to `ResponseData` and hand it to the
     /// pending entry. Unknown request_id → drop.
-    fn deliver_response(pending: &Pending, resp: coolify_proto::agent::v1::Response) {
+    fn deliver_response(
+        pending: &Pending,
+        host_id: &str,
+        resp: coolify_proto::agent::v1::Response,
+    ) {
         let request_id = resp.request_id.clone();
+        let response_type = response_body_type(resp.body.as_ref());
+        info!(%request_id, %host_id, %response_type, "coold response received from stream");
+
         let kind = match pending.get(&request_id) {
             Some(e) => e.kind,
             None => {
-                warn!(%request_id, "response for unknown request_id; dropping");
+                warn!(%request_id, %host_id, %response_type, "response for unknown request_id; dropping");
                 return;
             }
         };
@@ -399,12 +406,41 @@ mod grpc_server {
             body: resp.body,
         };
         let Some(body) = ResponseBody::try_from_proto(resp) else {
-            warn!(%request_id, ?kind, "unsupported response body; dropping");
+            warn!(%request_id, %host_id, %response_type, ?kind, "unsupported response body; dropping");
             return;
         };
         let data = ResponseData::Coold(body);
 
         pending.deliver(&request_id, data);
+        info!(%request_id, %host_id, %response_type, ?kind, "coold response delivered to pending dispatch");
+    }
+
+    fn response_body_type(body: Option<&response::Body>) -> &'static str {
+        match body {
+            Some(response::Body::ImagesPull(_)) => "images.pull",
+            Some(response::Body::ImagesList(_)) => "images.list",
+            Some(response::Body::ImagesDelete(_)) => "images.delete",
+            Some(response::Body::ContainersCreate(_)) => "containers.create",
+            Some(response::Body::ContainersStart(_)) => "containers.start",
+            Some(response::Body::ContainersStop(_)) => "containers.stop",
+            Some(response::Body::ContainersRestart(_)) => "containers.restart",
+            Some(response::Body::ContainersDelete(_)) => "containers.delete",
+            Some(response::Body::ContainersInspect(_)) => "containers.inspect",
+            Some(response::Body::ContainersList(_)) => "containers.list",
+            Some(response::Body::ContainersLogs(_)) => "containers.logs",
+            Some(response::Body::ContainersExec(_)) => "containers.exec",
+            Some(response::Body::ContainersHealthcheckRun(_)) => "containers.healthcheck.run",
+            Some(response::Body::IngressApply(_)) => "ingress.apply",
+            Some(response::Body::IngressStop(_)) => "ingress.stop",
+            Some(response::Body::FirewallAllow(_)) => "firewall.allow",
+            Some(response::Body::FirewallRevoke(_)) => "firewall.revoke",
+            Some(response::Body::FirewallList(_)) => "firewall.list",
+            Some(response::Body::FirewallReconcile(_)) => "firewall.reconcile",
+            Some(response::Body::CooldLogs(_)) => "coold.logs",
+            Some(response::Body::CorrosionTables(_)) => "corrosion.tables",
+            Some(response::Body::Error(_)) => "error",
+            None => "none",
+        }
     }
 
     pub(super) fn coold_status_update(
