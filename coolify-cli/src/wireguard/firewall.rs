@@ -16,6 +16,7 @@ pub fn firewall_service_unit(
     let mut b = format!("[Unit]\nDescription=Coolify mesh firewall rules\nAfter=wg-quick@{iface}.service network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\n\n");
     for sn in container_subnets {
         b.push_str(&format!("ExecStart=/bin/sh -c \"/usr/sbin/iptables -t nat -C POSTROUTING -s {sn} -o {iface} -j RETURN 2>/dev/null || /usr/sbin/iptables -t nat -I POSTROUTING -s {sn} -o {iface} -j RETURN\"\n"));
+        b.push_str(&format!("ExecStart=/bin/sh -c \"nft list chain inet netavark POSTROUTING >/dev/null 2>&1 && (nft list chain inet netavark POSTROUTING | grep -F 'ip saddr {sn} oifname \\\"{iface}\\\" accept' >/dev/null 2>&1 || nft insert rule inet netavark POSTROUTING ip saddr {sn} oifname \\\"{iface}\\\" accept) || true\"\n"));
     }
     if default_deny {
         b.push_str("# Remove blanket ACCEPT from prior mode-A run.\n");
@@ -60,4 +61,30 @@ pub fn install_firewall_command(
     }
     cmd.push_str(&format!("systemctl daemon-reload && systemctl enable {FIREWALL_SERVICE_NAME} && systemctl restart {FIREWALL_SERVICE_NAME}"));
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn firewall_service_unit_prevents_netavark_masquerade_to_wireguard() {
+        let unit = firewall_service_unit(
+            "wg0",
+            &["default".into()],
+            &["10.210.1.0/24".parse().unwrap()],
+            true,
+        );
+
+        assert!(unit.contains("iptables -t nat -C POSTROUTING -s 10.210.1.0/24 -o wg0 -j RETURN"));
+        assert!(unit.contains("nft insert rule inet netavark POSTROUTING ip saddr 10.210.1.0/24 oifname \\\"wg0\\\" accept"));
+    }
+
+    #[test]
+    fn bridge_scaffold_jumps_source_and_destination_container_subnets_to_default_deny() {
+        let scaffold = render_bridge_scaffold(&["10.210.1.0/24".parse().unwrap()]);
+
+        assert!(scaffold.contains("ip saddr { 10.210.1.0/24 } jump coolify_intra"));
+        assert!(scaffold.contains("ip daddr { 10.210.1.0/24 } jump coolify_intra"));
+    }
 }
