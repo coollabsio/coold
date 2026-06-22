@@ -7,14 +7,15 @@ use tokio::sync::mpsc;
 use tokio::{fs, process::Command};
 use tracing::{debug, info, warn};
 
+use crate::corrosion::CorrosionClient;
 use crate::grpc::proto::{
     client_msg, response, server_msg, ApplyIngressResp, ClientMsg, ContainerSummary,
     ContainersCreateResp, ContainersDeleteResp, ContainersExecResp, ContainersHealthcheckRunResp,
     ContainersInspectResp, ContainersListResp, ContainersLogsResp, ContainersRestartResp,
-    ContainersStartResp, ContainersStopResp, CooldLogsResp, Error, FirewallAllowResp,
-    FirewallListResp, FirewallReconcileResp, FirewallRevokeResp, FirewallRule as ProtoFirewallRule,
-    ImageSummary, ImagesDeleteResp, ImagesListResp, ImagesPullResp, IngressAppConfig, Response,
-    StopIngressResp,
+    ContainersStartResp, ContainersStopResp, CooldLogsResp, CorrosionTablesResp, Error,
+    FirewallAllowResp, FirewallListResp, FirewallReconcileResp, FirewallRevokeResp,
+    FirewallRule as ProtoFirewallRule, ImageSummary, ImagesDeleteResp, ImagesListResp,
+    ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
 };
 use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
@@ -23,6 +24,7 @@ pub async fn handle(
     request_id: String,
     command: server_msg::Command,
     podman: &PodmanClient,
+    corrosion: &CorrosionClient,
     tx: mpsc::Sender<ClientMsg>,
 ) {
     match command {
@@ -241,6 +243,20 @@ pub async fn handle(
             )
             .await;
         }
+        server_msg::Command::CorrosionTables(req) => {
+            let body = match corrosion.tables_json(req.limit).await {
+                Ok(output) => response::Body::CorrosionTables(CorrosionTablesResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
         server_msg::Command::ContainersExec(req) => {
             let body = match podman.exec_container(&req.id, req.command).await {
                 Ok((exit_code, output)) => {
@@ -319,7 +335,7 @@ pub async fn handle(
         }
         server_msg::Command::FirewallAllow(req) => {
             let body = match req.rule {
-                Some(rule) => match firewall_allow(FirewallRule::from(rule)).await {
+                Some(rule) => match firewall_allow(FirewallRule::from(rule), corrosion).await {
                     Ok((id, output)) => {
                         response::Body::FirewallAllow(FirewallAllowResp { id, output })
                     }
@@ -822,9 +838,12 @@ impl From<FirewallRule> for ProtoFirewallRule {
     }
 }
 
-async fn firewall_allow(rule: FirewallRule) -> Result<(String, String)> {
+async fn firewall_allow(
+    rule: FirewallRule,
+    corrosion: &CorrosionClient,
+) -> Result<(String, String)> {
     validate_firewall_rule(&rule)?;
-    let normalized = resolve_firewall_rule(rule).await?;
+    let normalized = resolve_firewall_rule(rule, corrosion).await?;
     let id = normalized.id.clone();
     let mut rules = load_firewall_rules().await?;
     rules.retain(|existing| existing.id != id);
@@ -1094,24 +1113,51 @@ fn cidr(value: &str) -> String {
     }
 }
 
-async fn resolve_firewall_rule(rule: FirewallRule) -> Result<FirewallRule> {
+async fn resolve_firewall_rule(
+    rule: FirewallRule,
+    corrosion: &CorrosionClient,
+) -> Result<FirewallRule> {
     let network = format!("coolify-{}-mesh", rule.namespace);
 
     Ok(FirewallRule {
-        src: resolve_firewall_endpoint(&rule.src, &network).await?,
-        dst: resolve_firewall_endpoint(&rule.dst, &network).await?,
+        src: resolve_firewall_endpoint(&rule.src, &rule.namespace, &network, corrosion).await?,
+        dst: resolve_firewall_endpoint(&rule.dst, &rule.namespace, &network, corrosion).await?,
         ..rule
     })
 }
 
-async fn resolve_firewall_endpoint(value: &str, network: &str) -> Result<String> {
+async fn resolve_firewall_endpoint(
+    value: &str,
+    namespace: &str,
+    network: &str,
+    corrosion: &CorrosionClient,
+) -> Result<String> {
     if is_ip_or_cidr(value) {
         return Ok(value.trim_end_matches("/32").to_string());
+    }
+
+    let ips = corrosion
+        .query_ips_by_name(value, namespace)
+        .await
+        .with_context(|| format!("query Corrosion endpoint {value} in namespace {namespace}"))?;
+
+    if let Some(ip) = firewall_endpoint_ip(value, namespace, &ips)? {
+        return Ok(ip);
     }
 
     container_ip(value, network)
         .await
         .with_context(|| format!("resolve firewall endpoint {value} on {network}"))
+}
+
+fn firewall_endpoint_ip(value: &str, namespace: &str, ips: &[String]) -> Result<Option<String>> {
+    match ips {
+        [] => Ok(None),
+        [ip] => Ok(Some(ip.clone())),
+        _ => Err(anyhow!(
+            "firewall endpoint {value} in namespace {namespace} resolved to multiple IPs"
+        )),
+    }
 }
 
 fn is_ip_or_cidr(value: &str) -> bool {
@@ -1369,6 +1415,14 @@ mod tests {
                 "10.210.0.0/24",
                 "accept",
             ]
+        );
+    }
+
+    #[test]
+    fn firewall_endpoint_ip_uses_single_corrosion_result() {
+        assert_eq!(
+            firewall_endpoint_ip("remote-api", "default", &["10.210.1.12".into()]).unwrap(),
+            Some("10.210.1.12".into())
         );
     }
 

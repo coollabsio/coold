@@ -144,6 +144,11 @@ pub enum CommandPayload {
         #[serde(default = "default_coold_logs_tail")]
         tail: u32,
     },
+    #[serde(rename = "corrosion.tables")]
+    CorrosionTables {
+        #[serde(default = "default_corrosion_tables_limit")]
+        limit: u32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +164,10 @@ fn default_logs_stdout() -> bool {
 }
 
 fn default_coold_logs_tail() -> u32 {
+    200
+}
+
+fn default_corrosion_tables_limit() -> u32 {
     200
 }
 
@@ -303,6 +312,9 @@ impl ResponseBody {
                 data: serde_json::json!({ "output": r.output }),
             }),
             Some(Body::CooldLogs(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
+            Some(Body::CorrosionTables(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {

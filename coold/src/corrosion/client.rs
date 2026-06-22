@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::model::Endpoint;
@@ -103,6 +103,77 @@ impl CorrosionClient {
     /// Containers without a declared HEALTHCHECK report `health = 'unknown'`
     /// and must still be resolvable (same convention as k8s readinessProbe
     /// defaulting to ready when absent).
+
+    pub async fn tables_json(&self, limit: u32) -> Result<String> {
+        let limit = limit.clamp(1, 1000);
+        let table_names = self
+            .query_values(
+                "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                vec![],
+            )
+            .await?
+            .into_iter()
+            .filter_map(|row| row.first().and_then(|value| value.as_str()).map(str::to_string))
+            .collect::<Vec<_>>();
+
+        let mut tables = Vec::new();
+        for name in table_names {
+            let columns = self
+                .query_values(
+                    &format!("PRAGMA table_info({})", quote_identifier(&name)),
+                    vec![],
+                )
+                .await?
+                .into_iter()
+                .filter_map(|row| {
+                    row.get(1)
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let rows = self
+                .query_values(
+                    &format!("SELECT * FROM {} LIMIT {limit}", quote_identifier(&name)),
+                    vec![],
+                )
+                .await?
+                .into_iter()
+                .map(|values| values.into_iter().collect())
+                .collect();
+
+            tables.push(CorrosionTable {
+                name,
+                columns,
+                rows,
+            });
+        }
+
+        serde_json::to_string_pretty(&CorrosionTablesDump { limit, tables })
+            .context("serialize Corrosion tables")
+    }
+
+    async fn query_values(&self, sql: &str, params: Vec<Value>) -> Result<Vec<Vec<Value>>> {
+        let url = format!("{}/v1/queries", self.base_url);
+        let body = json!([sql, params]);
+        let res = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .with_context(|| format!("POST {url}"))?;
+        let status = res.status();
+        let bytes = res.bytes().await.context("read queries response")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "corrosion query failed: HTTP {status}: {}",
+                String::from_utf8_lossy(&bytes)
+            ));
+        }
+
+        parse_value_rows(&bytes)
+    }
+
     pub async fn query_ips_by_name(
         &self,
         container_name: &str,
@@ -163,6 +234,32 @@ fn parse_ip_column(bytes: &[u8]) -> Result<Vec<String>> {
 
 /// Corrosion `/v1/queries` returns newline-delimited JSON frames:
 /// `{"columns":[...]}`, `{"row":[id, [values...]]}`, `{"eoq":{...}}`, etc.
+fn parse_value_rows(bytes: &[u8]) -> Result<Vec<Vec<Value>>> {
+    let mut out = Vec::new();
+    for line in bytes.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(frame): std::result::Result<Frame, _> = serde_json::from_slice(line) else {
+            continue;
+        };
+        if let Some(row) = frame.row {
+            if row.len() != 2 {
+                continue;
+            }
+            let Some(values) = row[1].as_array() else {
+                continue;
+            };
+            out.push(values.clone());
+        }
+    }
+    Ok(out)
+}
+
+fn quote_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('\"', "\"\""))
+}
+
 fn parse_rows(bytes: &[u8]) -> Result<HashMap<String, Endpoint>> {
     let mut out = HashMap::new();
     for line in bytes.split(|&b| b == b'\n') {
@@ -209,4 +306,47 @@ fn string_at(values: &[Value], idx: usize) -> Result<String> {
 struct Frame {
     #[serde(default)]
     row: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Serialize)]
+struct CorrosionTablesDump {
+    limit: u32,
+    tables: Vec<CorrosionTable>,
+}
+
+#[derive(Debug, Serialize)]
+struct CorrosionTable {
+    name: String,
+    columns: Vec<String>,
+    rows: Vec<Vec<Value>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_corrosion_query_rows_as_values() {
+        let rows = parse_value_rows(
+            br#"{"columns":["container_name","container_ip"]}
+{"row":[1,["coolify-v5-nginx","10.210.0.4"]]}
+{"eoq":{}}
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![vec![json!("coolify-v5-nginx"), json!("10.210.0.4")]]
+        );
+    }
+
+    #[test]
+    fn quotes_sqlite_identifiers() {
+        assert_eq!(
+            quote_identifier("service_endpoints"),
+            "\"service_endpoints\""
+        );
+        assert_eq!(quote_identifier("weird\"table"), "\"weird\"\"table\"");
+    }
 }

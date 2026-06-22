@@ -5,9 +5,9 @@
 use coolify_proto::agent::v1::{
     server_msg, ApplyIngressReq, ContainersCreateReq, ContainersDeleteReq, ContainersExecReq,
     ContainersHealthcheckRunReq, ContainersInspectReq, ContainersListReq, ContainersLogsReq,
-    ContainersRestartReq, ContainersStartReq, ContainersStopReq, CooldLogsReq, FirewallAllowReq,
-    FirewallListReq, FirewallReconcileReq, FirewallRevokeReq, FirewallRule, ImagesDeleteReq,
-    ImagesListReq, ImagesPullReq, IngressAppConfig as ProtoIngressAppConfig,
+    ContainersRestartReq, ContainersStartReq, ContainersStopReq, CooldLogsReq, CorrosionTablesReq,
+    FirewallAllowReq, FirewallListReq, FirewallReconcileReq, FirewallRevokeReq, FirewallRule,
+    ImagesDeleteReq, ImagesListReq, ImagesPullReq, IngressAppConfig as ProtoIngressAppConfig,
     PortMapping as ProtoPortMapping, ServerMsg, StopIngressReq,
 };
 
@@ -188,6 +188,9 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
             server_msg::Command::FirewallReconcile(FirewallReconcileReq {})
         }
         CommandPayload::CooldLogs { tail } => server_msg::Command::CooldLogs(CooldLogsReq { tail }),
+        CommandPayload::CorrosionTables { limit } => {
+            server_msg::Command::CorrosionTables(CorrosionTablesReq { limit })
+        }
     };
 
     let msg = ServerMsg {
@@ -222,6 +225,7 @@ fn required_capability(command: &CommandPayload) -> &'static str {
         CommandPayload::FirewallList { .. } => "firewall.list",
         CommandPayload::FirewallReconcile => "firewall.reconcile",
         CommandPayload::CooldLogs { .. } => "coold.logs",
+        CommandPayload::CorrosionTables { .. } => "corrosion.tables",
     }
 }
 
@@ -648,6 +652,10 @@ mod tests {
                 serde_json::json!({ "type": "containers.healthcheck.run", "id": "abc" }),
             ),
             ("coold.logs", serde_json::json!({ "type": "coold.logs" })),
+            (
+                "corrosion.tables",
+                serde_json::json!({ "type": "corrosion.tables" }),
+            ),
             (
                 "ingress.apply",
                 serde_json::json!({

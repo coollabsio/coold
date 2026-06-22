@@ -12,6 +12,7 @@ use tonic::Request;
 use tracing::{info, warn};
 
 use crate::config::{Config, VERSION};
+use crate::corrosion::CorrosionClient;
 use crate::grpc::handlers::handle;
 use crate::grpc::proto::{
     agent_client::AgentClient, client_msg, server_msg, ClientMsg, Hello, Pong, ResourceStatusUpdate,
@@ -73,6 +74,7 @@ pub async fn run(
         .await
         .context("initial host JWT load")?;
 
+    let corrosion = CorrosionClient::new(&config.corrosion_url)?;
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let http = reqwest::Client::new();
     loop {
@@ -116,7 +118,15 @@ pub async fn run(
         };
 
         let connected_at = Instant::now();
-        match connect_and_serve(&url, &jwt, &config, &podman, resource_status_tx.subscribe()).await
+        match connect_and_serve(
+            &url,
+            &jwt,
+            &config,
+            &podman,
+            &corrosion,
+            resource_status_tx.subscribe(),
+        )
+        .await
         {
             Ok(()) => {
                 let (delay, next_backoff) =
@@ -213,6 +223,7 @@ fn primitive_capabilities() -> Vec<String> {
         "firewall.list",
         "firewall.reconcile",
         "coold.logs",
+        "corrosion.tables",
     ]
     .into_iter()
     .map(str::to_string)
@@ -262,6 +273,7 @@ async fn connect_and_serve(
     jwt: &str,
     config: &Config,
     podman: &PodmanClient,
+    corrosion: &CorrosionClient,
     mut resource_status_rx: broadcast::Receiver<ResourceStatusUpdate>,
 ) -> Result<()> {
     let channel = Channel::from_shared(url.to_string())
@@ -344,8 +356,9 @@ async fn connect_and_serve(
 
         let tx = tx.clone();
         let podman = podman.clone();
+        let corrosion = corrosion.clone();
         tokio::spawn(async move {
-            handle(request_id, command, &podman, tx).await;
+            handle(request_id, command, &podman, &corrosion, tx).await;
         });
     }
 

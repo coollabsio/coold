@@ -58,6 +58,7 @@ message ServerMsg {
         FirewallReconcileReq firewall_reconcile = 95;
 
         CooldLogsReq coold_logs = 96;
+        CorrosionTablesReq corrosion_tables = 97;
     }
 }
 
@@ -88,6 +89,7 @@ message Response {
         FirewallListResp firewall_list = 94;
         FirewallReconcileResp firewall_reconcile = 95;
         CooldLogsResp coold_logs = 96;
+        CorrosionTablesResp corrosion_tables = 97;
         Error error = 100;
     }
 }
@@ -209,3 +211,5 @@ message FirewallReconcileResp { string output = 1; }
 
 message CooldLogsReq { uint32 tail = 1; }
 message CooldLogsResp { string output = 1; }
+message CorrosionTablesReq { uint32 limit = 1; }
+message CorrosionTablesResp { string output = 1; }
