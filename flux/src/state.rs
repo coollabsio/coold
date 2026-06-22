@@ -17,9 +17,16 @@ pub struct StreamHandle {
     pub caps: Vec<String>,
 }
 
+struct StreamEntry {
+    tx: mpsc::Sender<ServerMsg>,
+    caps: Vec<String>,
+    last_seen_at: Instant,
+    reachable: bool,
+}
+
 /// Shared map: host_id → StreamHandle.
 #[derive(Clone)]
-pub struct Streams(Arc<DashMap<String, StreamHandle>>);
+pub struct Streams(Arc<DashMap<String, StreamEntry>>);
 
 impl Streams {
     pub fn new() -> Self {
@@ -27,7 +34,15 @@ impl Streams {
     }
 
     pub fn insert(&self, host_id: String, handle: StreamHandle) {
-        self.0.insert(host_id, handle);
+        self.0.insert(
+            host_id,
+            StreamEntry {
+                tx: handle.tx,
+                caps: handle.caps,
+                last_seen_at: Instant::now(),
+                reachable: true,
+            },
+        );
     }
 
     pub fn update_capabilities(&self, host_id: &str, caps: Vec<String>) {
@@ -41,7 +56,10 @@ impl Streams {
     }
 
     pub fn get(&self, host_id: &str) -> Option<StreamHandle> {
-        self.0.get(host_id).map(|e| e.value().clone())
+        self.0.get(host_id).map(|e| StreamHandle {
+            tx: e.value().tx.clone(),
+            caps: e.value().caps.clone(),
+        })
     }
 
     pub fn get_tx(&self, host_id: &str) -> Option<mpsc::Sender<ServerMsg>> {
@@ -68,6 +86,41 @@ impl Streams {
             .collect::<Vec<_>>();
         items.sort_by(|a, b| a.host_id.cmp(&b.host_id));
         items
+    }
+
+    pub fn touch(&self, host_id: &str) -> bool {
+        let Some(mut entry) = self.0.get_mut(host_id) else {
+            return false;
+        };
+        let restored = !entry.reachable;
+        entry.last_seen_at = Instant::now();
+        entry.reachable = true;
+        restored
+    }
+
+    pub fn ping_targets(&self) -> Vec<(String, mpsc::Sender<ServerMsg>)> {
+        self.0
+            .iter()
+            .map(|e| (e.key().clone(), e.value().tx.clone()))
+            .collect()
+    }
+
+    pub fn mark_stale(&self, timeout: Duration) -> Vec<String> {
+        let now = Instant::now();
+        let mut host_ids = self
+            .0
+            .iter_mut()
+            .filter_map(|mut entry| {
+                if entry.reachable && now.duration_since(entry.last_seen_at) >= timeout {
+                    entry.reachable = false;
+                    return Some(entry.key().clone());
+                }
+
+                None
+            })
+            .collect::<Vec<_>>();
+        host_ids.sort();
+        host_ids
     }
 }
 
@@ -453,5 +506,32 @@ mod stream_snapshot_tests {
             vec!["a", "b"]
         );
         assert_eq!(got[1].caps, vec!["containers.list"]);
+    }
+
+    #[test]
+    fn stale_streams_are_reported_once_until_touched() {
+        let streams = Streams::new();
+        let (tx, _rx) = mpsc::channel(1);
+        streams.insert(
+            "host-1".into(),
+            StreamHandle {
+                tx,
+                caps: vec!["containers.list".into()],
+            },
+        );
+
+        assert_eq!(
+            streams.mark_stale(Duration::ZERO),
+            vec!["host-1".to_string()]
+        );
+        assert!(
+            streams.mark_stale(Duration::ZERO).is_empty(),
+            "stale host should not be reported again until it recovers"
+        );
+        assert!(streams.touch("host-1"));
+        assert_eq!(
+            streams.mark_stale(Duration::ZERO),
+            vec!["host-1".to_string()]
+        );
     }
 }

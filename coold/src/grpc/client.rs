@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use crate::config::{Config, VERSION};
 use crate::grpc::handlers::handle;
 use crate::grpc::proto::{
-    agent_client::AgentClient, client_msg, ClientMsg, Hello, ResourceStatusUpdate,
+    agent_client::AgentClient, client_msg, server_msg, ClientMsg, Hello, Pong, ResourceStatusUpdate,
 };
 use crate::podman::PodmanClient;
 
@@ -212,6 +212,7 @@ fn primitive_capabilities() -> Vec<String> {
         "firewall.revoke",
         "firewall.list",
         "firewall.reconcile",
+        "coold.logs",
     ]
     .into_iter()
     .map(str::to_string)
@@ -336,6 +337,11 @@ async fn connect_and_serve(
             continue;
         };
 
+        if matches!(command, server_msg::Command::Ping(_)) {
+            tx.send(pong_for(&request_id)).await.context("send Pong")?;
+            continue;
+        }
+
         let tx = tx.clone();
         let podman = podman.clone();
         tokio::spawn(async move {
@@ -346,6 +352,14 @@ async fn connect_and_serve(
     status_forwarder.abort();
 
     Ok(())
+}
+
+fn pong_for(request_id: &str) -> ClientMsg {
+    ClientMsg {
+        payload: Some(client_msg::Payload::Pong(Pong {
+            request_id: request_id.to_string(),
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +387,18 @@ mod tests {
         let err = load_host_jwt(&p).await.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("insecure perms"), "got: {msg}");
+    }
+
+    #[test]
+    fn builds_pong_for_ping_request_id() {
+        let msg = super::pong_for("ping-1");
+
+        match msg.payload {
+            Some(super::client_msg::Payload::Pong(pong)) => {
+                assert_eq!(pong.request_id, "ping-1");
+            }
+            other => panic!("expected pong payload, got {other:?}"),
+        }
     }
 
     #[tokio::test]

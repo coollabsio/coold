@@ -11,9 +11,10 @@ use crate::grpc::proto::{
     client_msg, response, server_msg, ApplyIngressResp, ClientMsg, ContainerSummary,
     ContainersCreateResp, ContainersDeleteResp, ContainersExecResp, ContainersHealthcheckRunResp,
     ContainersInspectResp, ContainersListResp, ContainersLogsResp, ContainersRestartResp,
-    ContainersStartResp, ContainersStopResp, Error, FirewallAllowResp, FirewallListResp,
-    FirewallReconcileResp, FirewallRevokeResp, FirewallRule as ProtoFirewallRule, ImageSummary,
-    ImagesDeleteResp, ImagesListResp, ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
+    ContainersStartResp, ContainersStopResp, CooldLogsResp, Error, FirewallAllowResp,
+    FirewallListResp, FirewallReconcileResp, FirewallRevokeResp, FirewallRule as ProtoFirewallRule,
+    ImageSummary, ImagesDeleteResp, ImagesListResp, ImagesPullResp, IngressAppConfig, Response,
+    StopIngressResp,
 };
 use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
@@ -25,6 +26,9 @@ pub async fn handle(
     tx: mpsc::Sender<ClientMsg>,
 ) {
     match command {
+        server_msg::Command::Ping(_) => {
+            debug!(%request_id, "ping command reached handler after fast-path; ignoring");
+        }
         server_msg::Command::ImagesPull(req) => {
             let body = match podman.pull_image(&req.reference).await {
                 Ok((digest, output)) => {
@@ -212,6 +216,20 @@ pub async fn handle(
                 .await
             {
                 Ok(output) => response::Body::ContainersLogs(ContainersLogsResp { output }),
+                Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::CooldLogs(req) => {
+            let body = match coold_logs(req.tail).await {
+                Ok(output) => response::Body::CooldLogs(CooldLogsResp { output }),
                 Err(e) => error_body(e),
             };
             send_response(
@@ -1183,6 +1201,43 @@ async fn run_command(command: &mut Command) -> Result<String> {
             "{}",
             if combined.is_empty() {
                 format!("command exited with {}", output.status)
+            } else {
+                combined
+            }
+        ));
+    }
+
+    Ok(combined)
+}
+
+async fn coold_logs(tail: u32) -> Result<String> {
+    let tail = tail.clamp(1, 1000).to_string();
+    let output = Command::new("journalctl")
+        .args([
+            "--unit",
+            "coold",
+            "--no-pager",
+            "--output",
+            "short-iso",
+            "--lines",
+            &tail,
+        ])
+        .output()
+        .await
+        .context("read coold journal logs")?;
+
+    let combined = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .chain(String::from_utf8_lossy(&output.stderr).lines())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{}",
+            if combined.is_empty() {
+                format!("journalctl exited with {}", output.status)
             } else {
                 combined
             }

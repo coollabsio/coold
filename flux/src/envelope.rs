@@ -139,6 +139,11 @@ pub enum CommandPayload {
     },
     #[serde(rename = "firewall.reconcile")]
     FirewallReconcile,
+    #[serde(rename = "coold.logs")]
+    CooldLogs {
+        #[serde(default = "default_coold_logs_tail")]
+        tail: u32,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,6 +156,10 @@ pub struct PortMapping {
 
 fn default_logs_stdout() -> bool {
     true
+}
+
+fn default_coold_logs_tail() -> u32 {
+    200
 }
 
 #[derive(Debug, Deserialize)]
@@ -293,6 +302,9 @@ impl ResponseBody {
             Some(Body::FirewallReconcile(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
+            Some(Body::CooldLogs(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "output": r.output }),
+            }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {
                 code: e.code,
                 message: e.message,
@@ -312,7 +324,7 @@ mod tests {
         response, ContainerSummary, ContainersCreateResp, ContainersDeleteResp, ContainersExecResp,
         ContainersHealthcheckRunResp, ContainersInspectResp, ContainersListResp,
         ContainersLogsResp, ContainersRestartResp, ContainersStartResp, ContainersStopResp,
-        ImageSummary, ImagesDeleteResp, ImagesListResp, ImagesPullResp,
+        CooldLogsResp, ImageSummary, ImagesDeleteResp, ImagesListResp, ImagesPullResp,
     };
 
     fn data_for(body: response::Body) -> serde_json::Value {

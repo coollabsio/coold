@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
         unix_bridge::run(config.clone(), streams.clone(), pending.clone()),
         pending_sweeper::run(config.clone(), pending.clone()),
         registry::heartbeat_loop(config.clone(), streams.clone()),
+        coold_heartbeat::run(config.clone(), streams.clone()),
     )?;
 
     Ok(())
@@ -262,6 +263,19 @@ mod grpc_server {
             let registry = self.registry.clone();
             let resource_status = self.resource_status.clone();
             let host_id_clone = host_id.clone();
+            {
+                let publisher = resource_status.clone();
+                let host_id = host_id.clone();
+                tokio::spawn(async move {
+                    publisher
+                        .publish(coold_status_update(
+                            &host_id,
+                            "installed",
+                            "coold stream connected.",
+                        ))
+                        .await;
+                });
+            }
             if let Some(registry) = registry.clone() {
                 let host_id = host_id.clone();
                 let capabilities = hello.capabilities.clone();
@@ -298,6 +312,23 @@ mod grpc_server {
                             });
                         }
                         Ok(ClientMsg {
+                            payload: Some(client_msg::Payload::Pong(_)),
+                        }) => {
+                            if streams.touch(&host_id_clone) {
+                                let publisher = resource_status.clone();
+                                let host_id = host_id_clone.clone();
+                                tokio::spawn(async move {
+                                    publisher
+                                        .publish(coold_status_update(
+                                            &host_id,
+                                            "installed",
+                                            "coold heartbeat restored.",
+                                        ))
+                                        .await;
+                                });
+                            }
+                        }
+                        Ok(ClientMsg {
                             payload: Some(client_msg::Payload::Hello(_)),
                         }) => warn!(host_id = %host_id_clone, "duplicate Hello ignored"),
                         Ok(_) => {}
@@ -310,6 +341,13 @@ mod grpc_server {
                 }
                 info!(host_id = %host_id_clone, "coold stream disconnected");
                 streams.remove(&host_id_clone);
+                resource_status
+                    .publish(coold_status_update(
+                        &host_id_clone,
+                        "unreachable",
+                        "coold stream disconnected.",
+                    ))
+                    .await;
                 if let Some(registry) = registry {
                     if let Err(e) = registry.disconnect(&host_id_clone, disconnect_reason).await {
                         warn!(
@@ -351,9 +389,24 @@ mod grpc_server {
         pending.deliver(&request_id, data);
     }
 
+    pub(super) fn coold_status_update(
+        host_id: &str,
+        status: &str,
+        status_message: &str,
+    ) -> coolify_proto::agent::v1::ResourceStatusUpdate {
+        coolify_proto::agent::v1::ResourceStatusUpdate {
+            resource_type: "server".into(),
+            host_id: host_id.into(),
+            container_id: String::new(),
+            container_name: String::new(),
+            status: status.into(),
+            status_message: status_message.into(),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{advertised_capability_not_granted, validate_bind};
+        use super::{advertised_capability_not_granted, coold_status_update, validate_bind};
         use std::net::SocketAddr;
 
         fn parse(s: &str) -> SocketAddr {
@@ -423,6 +476,68 @@ mod grpc_server {
                 advertised_capability_not_granted(&advertised, &jwt_caps),
                 Some("ingress.apply")
             );
+        }
+
+        #[test]
+        fn builds_server_status_update_for_coold_liveness() {
+            let update =
+                coold_status_update("100.64.0.5", "unreachable", "coold heartbeat timed out.");
+
+            assert_eq!(update.resource_type, "server");
+            assert_eq!(update.host_id, "100.64.0.5");
+            assert_eq!(update.status, "unreachable");
+            assert_eq!(update.status_message, "coold heartbeat timed out.");
+        }
+    }
+}
+
+mod coold_heartbeat {
+    use anyhow::Result;
+    use coolify_proto::agent::v1::{server_msg, Ping, ServerMsg};
+    use tracing::warn;
+    use uuid::Uuid;
+
+    use crate::{
+        config::Config, grpc_server::coold_status_update, resource_status::ResourceStatusPublisher,
+        state::Streams,
+    };
+
+    pub async fn run(config: Config, streams: Streams) -> Result<()> {
+        let publisher = ResourceStatusPublisher::new(
+            config.laravel_api_url.clone(),
+            config.laravel_api_token.clone(),
+        );
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(
+            config.coold_ping_interval_secs.max(1),
+        ));
+        let timeout = std::time::Duration::from_secs(config.coold_pong_timeout_secs.max(1));
+
+        loop {
+            ticker.tick().await;
+
+            for host_id in streams.mark_stale(timeout) {
+                publisher
+                    .publish(coold_status_update(
+                        &host_id,
+                        "unreachable",
+                        "coold heartbeat timed out.",
+                    ))
+                    .await;
+            }
+
+            for (host_id, tx) in streams.ping_targets() {
+                let request_id = Uuid::new_v4().to_string();
+                if tx
+                    .send(ServerMsg {
+                        request_id,
+                        command: Some(server_msg::Command::Ping(Ping {})),
+                    })
+                    .await
+                    .is_err()
+                {
+                    warn!(%host_id, "coold heartbeat ping send failed");
+                }
+            }
         }
     }
 }

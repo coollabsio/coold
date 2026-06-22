@@ -99,6 +99,22 @@ pub struct Config {
         default_value = "10"
     )]
     pub laravel_heartbeat_interval_secs: u64,
+
+    /// Seconds between Flux ping frames sent to each connected coold stream.
+    #[arg(
+        long,
+        env = "COOLIFY_FLUX_COOLD_PING_INTERVAL_SECS",
+        default_value = "10"
+    )]
+    pub coold_ping_interval_secs: u64,
+
+    /// Seconds without a coold pong before Flux marks that server unreachable.
+    #[arg(
+        long,
+        env = "COOLIFY_FLUX_COOLD_PONG_TIMEOUT_SECS",
+        default_value = "45"
+    )]
+    pub coold_pong_timeout_secs: u64,
 }
 
 impl Config {
@@ -125,6 +141,14 @@ mod tests {
             PathBuf::from(FLUX_LOG_FILE_PATH),
             PathBuf::from("/var/www/html/storage/logs/flux.log")
         );
+    }
+
+    #[test]
+    fn defaults_coold_heartbeat_timing() {
+        let config = Config::parse_from(["flux", "--grpc-bind", "127.0.0.1:6443"]);
+
+        assert_eq!(config.coold_ping_interval_secs, 10);
+        assert_eq!(config.coold_pong_timeout_secs, 45);
     }
 
     #[test]

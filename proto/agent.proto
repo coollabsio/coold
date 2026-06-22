@@ -13,6 +13,7 @@ message ClientMsg {
         Hello hello = 1;
         Response response = 2;
         ResourceStatusUpdate resource_status_update = 3;
+        Pong pong = 4;
     }
 }
 
@@ -24,9 +25,15 @@ message Hello {
     repeated string capabilities = 5;
 }
 
+message Pong {
+    string request_id = 1;
+}
+
 message ServerMsg {
     string request_id = 1;
     oneof command {
+        Ping ping = 2;
+
         ImagesPullReq images_pull = 10;
         ImagesListReq images_list = 11;
         ImagesDeleteReq images_delete = 12;
@@ -49,8 +56,12 @@ message ServerMsg {
         FirewallRevokeReq firewall_revoke = 93;
         FirewallListReq firewall_list = 94;
         FirewallReconcileReq firewall_reconcile = 95;
+
+        CooldLogsReq coold_logs = 96;
     }
 }
+
+message Ping {}
 
 message Response {
     string request_id = 1;
@@ -76,6 +87,7 @@ message Response {
         FirewallRevokeResp firewall_revoke = 93;
         FirewallListResp firewall_list = 94;
         FirewallReconcileResp firewall_reconcile = 95;
+        CooldLogsResp coold_logs = 96;
         Error error = 100;
     }
 }
@@ -194,3 +206,6 @@ message FirewallListReq { string namespace = 1; }
 message FirewallListResp { repeated FirewallRule rules = 1; }
 message FirewallReconcileReq {}
 message FirewallReconcileResp { string output = 1; }
+
+message CooldLogsReq { uint32 tail = 1; }
+message CooldLogsResp { string output = 1; }
