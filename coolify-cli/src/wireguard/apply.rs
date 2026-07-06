@@ -628,7 +628,25 @@ pub async fn verify<R: Runner>(
     concurrency: usize,
 ) -> Vec<VerifyResult> {
     let res = for_each_server(hosts, concurrency, |host| async move {
-        let out = runner
+        // The interface's management IP is assigned with `ip addr`, and is NOT
+        // present in `wg show <iface> dump`: that dump's first line is
+        // `privkey\tpubkey\tlisten_port\tfwmark`, so field index 2 is the WG
+        // LISTEN PORT (e.g. 51820), not an address. Reading the IP from the dump
+        // stored the listen port as the mgmt IP and broke every deploy
+        // (host_id resolved to the port). Read the address from `ip addr`.
+        let addr = runner
+            .run(
+                &host,
+                user,
+                port,
+                &format!(
+                    "ip -o -4 addr show {iface} 2>/dev/null | awk '{{print $4}}' | cut -d/ -f1 | head -n1"
+                ),
+            )
+            .await?;
+        let ip = addr.stdout.lines().next().unwrap_or("").trim().to_string();
+
+        let dump = runner
             .run(
                 &host,
                 user,
@@ -636,17 +654,9 @@ pub async fn verify<R: Runner>(
                 &format!("wg show {iface} dump 2>/dev/null || true"),
             )
             .await?;
-        let mut lines = out.stdout.lines();
-        let first = lines.next().unwrap_or("");
-        let ip = first
-            .split('\t')
-            .nth(2)
-            .unwrap_or("")
-            .split('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        let peers = lines.count();
+        // First line of the dump is the interface itself; the rest are peers.
+        let peers = dump.stdout.lines().skip(1).count();
+
         Ok(VerifyResult {
             host,
             wireguard_ip: ip,
@@ -694,4 +704,57 @@ pub async fn plan_only<R: Runner>(
     )
     .await?;
     build_plan(desired, &current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::verify;
+    use crate::ssh::{RunOutput, Runner};
+    use async_trait::async_trait;
+
+    /// Returns a mgmt IP for the `ip addr` probe and a realistic `wg show dump`
+    /// (interface line + one peer) for the dump probe.
+    struct FakeRunner;
+
+    #[async_trait]
+    impl Runner for FakeRunner {
+        async fn run(
+            &self,
+            _host: &str,
+            _user: &str,
+            _port: u16,
+            cmd: &str,
+        ) -> anyhow::Result<RunOutput> {
+            let stdout = if cmd.contains("ip -o -4 addr show") {
+                "100.64.0.1\n".to_string()
+            } else if cmd.contains("wg show") && cmd.contains("dump") {
+                // Interface line first: privkey\tpubkey\tLISTEN_PORT\tfwmark.
+                // Field index 2 (51820) is the listen port and must NOT be read
+                // as the address. One peer line follows.
+                "PRIVKEY\tPUBKEY\t51820\toff\n\
+                 PEERPUB\t(none)\t203.0.113.9:51820\t10.64.0.2/32\t0\t0\t0\n"
+                    .to_string()
+            } else {
+                String::new()
+            };
+
+            Ok(RunOutput {
+                stdout,
+                stderr: String::new(),
+                status: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn verify_reads_mgmt_ip_from_ip_addr_not_wg_listen_port() {
+        let results = verify(&FakeRunner, &["node-a".into()], "coolify", 22, "wg0", 1).await;
+
+        assert_eq!(results.len(), 1);
+        // The bug stored the WG listen port (51820) as the mgmt IP.
+        assert_eq!(results[0].wireguard_ip, "100.64.0.1");
+        assert_ne!(results[0].wireguard_ip, "51820");
+        assert_eq!(results[0].peer_count, 1);
+        assert_eq!(results[0].status, "ok");
+    }
 }
