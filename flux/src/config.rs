@@ -115,10 +115,15 @@ pub struct Config {
     /// #3: on-disk JSON file persisting the JWT `jti` revocation denylist so
     /// revocations survive a flux restart. Loaded at startup (expired entries
     /// pruned); written on every revoke/unrevoke.
+    ///
+    /// Default lives under the Laravel storage dir (same base as the log file),
+    /// which is writable by the `www-data` user flux runs as inside the Coolify
+    /// container — unlike `/var/lib/coolify`, which is root-owned there and made
+    /// revocation persistence silently fail.
     #[arg(
         long,
         env = "COOLIFY_FLUX_REVOCATION_PATH",
-        default_value = "/var/lib/coolify/flux/revocations.json"
+        default_value = "/var/www/html/storage/app/flux/revocations.json"
     )]
     pub revocation_path: PathBuf,
 
