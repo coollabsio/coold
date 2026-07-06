@@ -8,23 +8,54 @@ use tokio::{fs, process::Command};
 use tracing::{debug, info, warn};
 
 use crate::corrosion::CorrosionClient;
+use crate::grpc::host_jwt;
 use crate::grpc::proto::{
     client_msg, response, server_msg, ApplyIngressResp, ClientMsg, ContainerSummary,
     ContainersCreateResp, ContainersDeleteResp, ContainersExecResp, ContainersHealthcheckRunResp,
     ContainersInspectResp, ContainersListResp, ContainersLogsResp, ContainersRestartResp,
     ContainersStartResp, ContainersStopResp, CooldLogsResp, CorrosionTablesResp, Error,
     FirewallAllowResp, FirewallListResp, FirewallReconcileResp, FirewallRevokeResp,
-    FirewallRule as ProtoFirewallRule, ImageSummary, ImagesDeleteResp, ImagesListResp,
-    ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
+    FirewallRule as ProtoFirewallRule, HostJwtSetResp, ImageSummary, ImagesDeleteResp,
+    ImagesListResp, ImagesPullResp, IngressAppConfig, Response, StopIngressResp,
 };
 use crate::podman::client::{CreateContainerInput, CreatePortMapping};
 use crate::podman::PodmanClient;
+
+/// Read-side endpoint owner-enforcement policy for firewall resolution (S5).
+///
+/// `firewall.allow` is dispatched to the host that runs the rule's `dst`
+/// container (coold is the sole kernel writer there), so a truthful
+/// `service_endpoints` row for `dst` must be owned by this host. Carrying the
+/// local host's mgmt IP lets [`resolve_firewall_rule`] bind `dst` resolution to
+/// that owner and drop rows forged by a compromised mesh peer.
+#[derive(Debug, Clone)]
+pub struct EndpointOwnerCheck {
+    host_mgmt_ip: String,
+    strict: bool,
+}
+
+impl EndpointOwnerCheck {
+    pub fn new(host_mgmt_ip: impl Into<String>, strict: bool) -> Self {
+        Self {
+            host_mgmt_ip: host_mgmt_ip.into(),
+            strict,
+        }
+    }
+
+    /// Expected owner for a firewall `dst` endpoint, or `None` when enforcement
+    /// is disabled (`COOLIFY_COOLD_STRICT_ENDPOINT_OWNER=false`).
+    fn dst_owner(&self) -> Option<&str> {
+        self.strict.then_some(self.host_mgmt_ip.as_str())
+    }
+}
 
 pub async fn handle(
     request_id: String,
     command: server_msg::Command,
     podman: &PodmanClient,
     corrosion: &CorrosionClient,
+    host_jwt_path: &Path,
+    owner_check: &EndpointOwnerCheck,
     tx: mpsc::Sender<ClientMsg>,
 ) {
     let command_type = command_type(&command);
@@ -338,12 +369,14 @@ pub async fn handle(
         }
         server_msg::Command::FirewallAllow(req) => {
             let body = match req.rule {
-                Some(rule) => match firewall_allow(FirewallRule::from(rule), corrosion).await {
-                    Ok((id, output)) => {
-                        response::Body::FirewallAllow(FirewallAllowResp { id, output })
+                Some(rule) => {
+                    match firewall_allow(FirewallRule::from(rule), corrosion, owner_check).await {
+                        Ok((id, output)) => {
+                            response::Body::FirewallAllow(FirewallAllowResp { id, output })
+                        }
+                        Err(e) => error_body(e),
                     }
-                    Err(e) => error_body(e),
-                },
+                }
                 None => error_body(anyhow!("missing firewall rule")),
             };
             send_response(
@@ -389,6 +422,29 @@ pub async fn handle(
             let body = match firewall_reconcile().await {
                 Ok(output) => response::Body::FirewallReconcile(FirewallReconcileResp { output }),
                 Err(e) => error_body(e),
+            };
+            send_response(
+                &tx,
+                Response {
+                    request_id,
+                    body: Some(body),
+                },
+            )
+            .await;
+        }
+        server_msg::Command::HostJwtSet(req) => {
+            // Seamless token rotation: validate + atomically write the pushed
+            // JWT. coold does NOT reconnect here — the new token is picked up on
+            // the next reconnect, driven by the current token's exp.
+            let body = match host_jwt::apply_host_jwt(&req.jwt, host_jwt_path).await {
+                Ok(()) => {
+                    info!(%request_id, "host JWT rotated via stream");
+                    response::Body::HostJwtSet(HostJwtSetResp { applied: true })
+                }
+                Err(e) => {
+                    warn!(%request_id, error = %format!("{e:#}"), "host JWT rotation rejected");
+                    error_body(e)
+                }
             };
             send_response(
                 &tx,
@@ -448,6 +504,7 @@ fn command_type(command: &server_msg::Command) -> &'static str {
         server_msg::Command::FirewallReconcile(_) => "firewall.reconcile",
         server_msg::Command::CooldLogs(_) => "coold.logs",
         server_msg::Command::CorrosionTables(_) => "corrosion.tables",
+        server_msg::Command::HostJwtSet(_) => "host.jwt.set",
     }
 }
 
@@ -474,6 +531,7 @@ fn response_body_type(body: Option<&response::Body>) -> &'static str {
         Some(response::Body::FirewallReconcile(_)) => "firewall.reconcile",
         Some(response::Body::CooldLogs(_)) => "coold.logs",
         Some(response::Body::CorrosionTables(_)) => "corrosion.tables",
+        Some(response::Body::HostJwtSet(_)) => "host.jwt.set",
         Some(response::Body::Error(_)) => "error",
         None => "none",
     }
@@ -904,9 +962,10 @@ impl From<FirewallRule> for ProtoFirewallRule {
 async fn firewall_allow(
     rule: FirewallRule,
     corrosion: &CorrosionClient,
+    owner_check: &EndpointOwnerCheck,
 ) -> Result<(String, String)> {
     validate_firewall_rule(&rule)?;
-    let normalized = resolve_firewall_rule(rule, corrosion).await?;
+    let normalized = resolve_firewall_rule(rule, corrosion, owner_check).await?;
     let id = normalized.id.clone();
     let mut rules = load_firewall_rules().await?;
     rules.retain(|existing| existing.id != id);
@@ -1179,12 +1238,26 @@ fn cidr(value: &str) -> String {
 async fn resolve_firewall_rule(
     rule: FirewallRule,
     corrosion: &CorrosionClient,
+    owner_check: &EndpointOwnerCheck,
 ) -> Result<FirewallRule> {
     let network = format!("coolify-{}-mesh", rule.namespace);
 
     Ok(FirewallRule {
-        src: resolve_firewall_endpoint(&rule.src, &rule.namespace, &network, corrosion).await?,
-        dst: resolve_firewall_endpoint(&rule.dst, &rule.namespace, &network, corrosion).await?,
+        // `src` is the allowed source and is legitimately on a different host
+        // (e.g. an ingress proxy or an app on a peer), so it stays permissive
+        // (cross-host discovery). `dst` runs on THIS host (the rule is applied
+        // on the dst host — see ARCHITECTURE T8), so its endpoint row must be
+        // owned by us (S5); a forged row from another host is dropped.
+        src: resolve_firewall_endpoint(&rule.src, &rule.namespace, &network, corrosion, None)
+            .await?,
+        dst: resolve_firewall_endpoint(
+            &rule.dst,
+            &rule.namespace,
+            &network,
+            corrosion,
+            owner_check.dst_owner(),
+        )
+        .await?,
         ..rule
     })
 }
@@ -1194,13 +1267,14 @@ async fn resolve_firewall_endpoint(
     namespace: &str,
     network: &str,
     corrosion: &CorrosionClient,
+    expected_owner: Option<&str>,
 ) -> Result<String> {
     if is_ip_or_cidr(value) {
         return Ok(value.trim_end_matches("/32").to_string());
     }
 
     let ips = corrosion
-        .query_ips_by_name(value, namespace)
+        .query_ips_by_name_owned(value, namespace, expected_owner)
         .await
         .with_context(|| format!("query Corrosion endpoint {value} in namespace {namespace}"))?;
 
@@ -1479,6 +1553,23 @@ mod tests {
                 "accept",
             ]
         );
+    }
+
+    #[test]
+    fn strict_owner_check_binds_firewall_dst_to_local_host() {
+        // S5: with enforcement on, a firewall `dst` name must resolve to a row
+        // owned by this host — so `query_ips_by_name_owned` is called with the
+        // local mgmt IP and forged rows from other hosts are dropped.
+        let check = EndpointOwnerCheck::new("100.64.0.5", true);
+        assert_eq!(check.dst_owner(), Some("100.64.0.5"));
+    }
+
+    #[test]
+    fn disabled_owner_check_leaves_firewall_dst_permissive() {
+        // Escape hatch: COOLIFY_COOLD_STRICT_ENDPOINT_OWNER=false disables the
+        // dst cross-check, restoring the permissive cross-host behavior.
+        let check = EndpointOwnerCheck::new("100.64.0.5", false);
+        assert_eq!(check.dst_owner(), None);
     }
 
     #[test]

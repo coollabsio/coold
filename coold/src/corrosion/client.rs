@@ -3,8 +3,19 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::warn;
 
 use crate::model::Endpoint;
+
+/// One `service_endpoints` row as seen by a read-side resolver (S5): the
+/// container IP together with the `host_mgmt_ip` that owns/gossiped it. The
+/// owner is carried so callers can cross-check it against an expected host and
+/// reject forged rows gossiped by a compromised mesh peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceEndpoint {
+    pub container_ip: String,
+    pub host_mgmt_ip: String,
+}
 
 /// One SQL statement with its positional bind parameters, accepted by the
 /// Corrosion HTTP API's `/v1/transactions` endpoint as `[sql, [params...]]`.
@@ -174,14 +185,21 @@ impl CorrosionClient {
         parse_value_rows(&bytes)
     }
 
-    pub async fn query_ips_by_name(
+    /// Resolve healthy endpoints for `(container_name, namespace)` across the
+    /// whole mesh, each tagged with its owning `host_mgmt_ip` (S5).
+    ///
+    /// Reads carry the owner so callers can bind a row to an expected host and
+    /// reject forged rows. Selecting across all hosts is intentional — mesh
+    /// service discovery is cross-host and a service may legitimately have
+    /// replicas on several hosts.
+    pub async fn query_endpoints_by_name(
         &self,
         container_name: &str,
         namespace: &str,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<ServiceEndpoint>> {
         let url = format!("{}/v1/queries", self.base_url);
         let body = json!([
-            "SELECT container_ip FROM service_endpoints \
+            "SELECT container_ip, host_mgmt_ip FROM service_endpoints \
              WHERE container_name = ? \
                AND namespace = ? \
                AND state = 'running' \
@@ -203,12 +221,100 @@ impl CorrosionClient {
                 String::from_utf8_lossy(&bytes)
             ));
         }
-        parse_ip_column(&bytes)
+        parse_endpoint_rows(&bytes)
+    }
+
+    /// Resolve endpoint IPs for `(container_name, namespace)` (S5).
+    ///
+    /// When `expected_owner` is `Some`, only rows owned by that host are
+    /// returned — this is the cross-check that defeats a compromised peer
+    /// gossiping a forged row for another host's service. When `None`
+    /// (unrestricted cross-host discovery), all healthy IPs are returned, but a
+    /// warning is logged if they span multiple owners so poisoning attempts are
+    /// still observable.
+    ///
+    /// RESIDUAL TRUST: with `expected_owner == None` a forged row from a
+    /// compromised mesh peer is still trusted. Closing that gap requires
+    /// authenticating Corrosion gossip (owned by the coolify-cli agent); this
+    /// read-side check only binds rows to a host when the expected owner is
+    /// known and surfaces multi-owner results otherwise.
+    pub async fn query_ips_by_name(
+        &self,
+        container_name: &str,
+        namespace: &str,
+    ) -> Result<Vec<String>> {
+        self.query_ips_by_name_owned(container_name, namespace, None)
+            .await
+    }
+
+    /// Owner-aware variant of [`Self::query_ips_by_name`].
+    pub async fn query_ips_by_name_owned(
+        &self,
+        container_name: &str,
+        namespace: &str,
+        expected_owner: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let rows = self
+            .query_endpoints_by_name(container_name, namespace)
+            .await?;
+        Ok(select_endpoint_ips(
+            &rows,
+            expected_owner,
+            container_name,
+            namespace,
+        ))
     }
 }
 
-/// Parse the single-column `container_ip` result from `/v1/queries` NDJSON.
-fn parse_ip_column(bytes: &[u8]) -> Result<Vec<String>> {
+/// Choose which endpoint IPs to trust from the gossiped rows (S5).
+///
+/// See [`CorrosionClient::query_ips_by_name`] for the trust model. Logs a
+/// warning when rows owned by an unexpected host are dropped, or when an
+/// unrestricted lookup spans multiple owners.
+fn select_endpoint_ips(
+    rows: &[ServiceEndpoint],
+    expected_owner: Option<&str>,
+    container_name: &str,
+    namespace: &str,
+) -> Vec<String> {
+    match expected_owner {
+        Some(owner) => {
+            let (matching, forged): (Vec<_>, Vec<_>) =
+                rows.iter().partition(|row| row.host_mgmt_ip == owner);
+            if !forged.is_empty() {
+                warn!(
+                    container_name,
+                    namespace,
+                    expected_owner = owner,
+                    dropped = forged.len(),
+                    "dropped service_endpoints rows owned by an unexpected host (possible gossip poisoning)"
+                );
+            }
+            matching
+                .into_iter()
+                .map(|row| row.container_ip.clone())
+                .collect()
+        }
+        None => {
+            let mut owners: Vec<&str> = rows.iter().map(|row| row.host_mgmt_ip.as_str()).collect();
+            owners.sort_unstable();
+            owners.dedup();
+            if owners.len() > 1 {
+                warn!(
+                    container_name,
+                    namespace,
+                    owners = owners.len(),
+                    "service resolves to endpoints on multiple hosts; \
+                     trusting all (unauthenticated gossip — residual trust)"
+                );
+            }
+            rows.iter().map(|row| row.container_ip.clone()).collect()
+        }
+    }
+}
+
+/// Parse `(container_ip, host_mgmt_ip)` rows from `/v1/queries` NDJSON (S5).
+fn parse_endpoint_rows(bytes: &[u8]) -> Result<Vec<ServiceEndpoint>> {
     let mut out = Vec::new();
     for line in bytes.split(|&b| b == b'\n') {
         if line.is_empty() {
@@ -224,9 +330,16 @@ fn parse_ip_column(bytes: &[u8]) -> Result<Vec<String>> {
             let Some(values) = row[1].as_array() else {
                 continue;
             };
-            if let Some(ip) = values.first().and_then(|v| v.as_str()) {
-                out.push(ip.to_string());
-            }
+            let (Some(ip), Some(owner)) = (
+                values.first().and_then(|v| v.as_str()),
+                values.get(1).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            out.push(ServiceEndpoint {
+                container_ip: ip.to_string(),
+                host_mgmt_ip: owner.to_string(),
+            });
         }
     }
     Ok(out)
@@ -338,6 +451,78 @@ mod tests {
         assert_eq!(
             rows,
             vec![vec![json!("coolify-v5-nginx"), json!("10.210.0.4")]]
+        );
+    }
+
+    fn rows() -> Vec<ServiceEndpoint> {
+        vec![
+            ServiceEndpoint {
+                container_ip: "10.210.0.2".into(),
+                host_mgmt_ip: "100.64.0.5".into(),
+            },
+            ServiceEndpoint {
+                container_ip: "10.210.0.9".into(),
+                host_mgmt_ip: "100.64.0.9".into(), // forged / different owner
+            },
+        ]
+    }
+
+    #[test]
+    fn parses_endpoint_rows_with_owner() {
+        let parsed = parse_endpoint_rows(
+            br#"{"columns":["container_ip","host_mgmt_ip"]}
+{"row":[1,["10.210.0.4","100.64.0.5"]]}
+{"eoq":{}}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            vec![ServiceEndpoint {
+                container_ip: "10.210.0.4".into(),
+                host_mgmt_ip: "100.64.0.5".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn expected_owner_cross_check_drops_forged_rows() {
+        // Firewall path (S5): the dst host is known, so a row gossiped by
+        // another host (100.64.0.9) is dropped as a forgery.
+        let ips = select_endpoint_ips(&rows(), Some("100.64.0.5"), "web", "default");
+        assert_eq!(ips, vec!["10.210.0.2".to_string()]);
+    }
+
+    #[test]
+    fn expected_owner_keeps_all_legitimately_owned_rows() {
+        // Two healthy replicas, both truthfully owned by the expected host —
+        // enforcement must keep every legitimate IP.
+        let rows = vec![
+            ServiceEndpoint {
+                container_ip: "10.210.0.2".into(),
+                host_mgmt_ip: "100.64.0.5".into(),
+            },
+            ServiceEndpoint {
+                container_ip: "10.210.0.3".into(),
+                host_mgmt_ip: "100.64.0.5".into(),
+            },
+        ];
+        let ips = select_endpoint_ips(&rows, Some("100.64.0.5"), "web", "default");
+        assert_eq!(
+            ips,
+            vec!["10.210.0.2".to_string(), "10.210.0.3".to_string()]
+        );
+    }
+
+    #[test]
+    fn no_expected_owner_keeps_all_for_cross_host_discovery() {
+        // DNS path (S5): a cluster query may legitimately resolve to whichever
+        // host runs the container, so with no expected owner every healthy IP
+        // is returned (multi-owner spans are logged, not blocked).
+        let ips = select_endpoint_ips(&rows(), None, "web", "default");
+        assert_eq!(
+            ips,
+            vec!["10.210.0.2".to_string(), "10.210.0.9".to_string()]
         );
     }
 

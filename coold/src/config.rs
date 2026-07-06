@@ -45,6 +45,18 @@ impl<'a> IntoIterator for &'a Namespaces {
     }
 }
 
+/// Newtype around `Vec<PathBuf>` of allowed host bind-mount source prefixes.
+/// Wrapped for the same reason as [`Namespaces`]: clap treats a bare `Vec<T>`
+/// `value_parser` as per-value and would collect into `Vec<Vec<T>>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MountSources(pub Vec<PathBuf>);
+
+impl MountSources {
+    pub fn as_slice(&self) -> &[PathBuf] {
+        &self.0
+    }
+}
+
 pub const VERSION: &str = match option_env!("COOLIFY_COOLD_VERSION") {
     Some(v) => v,
     None => concat!(env!("CARGO_PKG_VERSION"), "-dev"),
@@ -152,6 +164,56 @@ pub struct Config {
     /// Useful for alpha hosts that are not yet enrolled with central.
     #[arg(long, env = "COOLIFY_COOLD_GRPC_DISABLED", default_value = "false")]
     pub grpc_disabled: bool,
+
+    /// Colon/comma-separated allow-list of host directory prefixes that may be
+    /// bind-mounted into `containers.create` containers (S4). DENY BY DEFAULT:
+    /// when empty (the default) NO host bind mount is permitted — the secure,
+    /// documented posture. Each source is canonicalized (symlinks + `..`
+    /// resolved) before being matched against these prefixes, so tricks like
+    /// `/var/run/podman` (the `/var/run`→`/run` symlink) or `../` traversal
+    /// cannot slip past. Named volumes (non-absolute sources) are unaffected.
+    ///
+    /// Example: `COOLIFY_COOLD_ALLOWED_MOUNT_SOURCES=/data/coolify:/srv/shared`.
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_ALLOWED_MOUNT_SOURCES",
+        value_parser = parse_mount_sources,
+        default_value = "",
+    )]
+    pub allowed_mount_sources: MountSources,
+
+    /// Path to a PEM-encoded certificate/CA used to pin the flux gRPC TLS
+    /// connection (S1). The mechanism is OPT-IN and only ACTIVE when the file
+    /// exists: present → the flux channel is dialed over TLS pinned to this
+    /// certificate; absent → coold keeps today's plaintext (WireGuard-
+    /// protected) behavior. If the flux URL is `https://` but no pin file is
+    /// present, coold fails closed rather than trusting system roots.
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_FLUX_TLS_PIN_PATH",
+        default_value = "/etc/coolify/flux.pin"
+    )]
+    pub flux_tls_pin_path: PathBuf,
+
+    /// Enforce the read-side endpoint owner cross-check when resolving a
+    /// firewall rule's `dst` service name to an IP (S5). `firewall.allow` is
+    /// always dispatched to the host that runs the `dst` container (coold is
+    /// the sole kernel writer there), so a truthful `service_endpoints` row for
+    /// `dst` must be owned by THIS host (`host_mgmt_ip`). When enabled (the
+    /// default) any row gossiped by another host for that name is dropped,
+    /// defeating a compromised mesh peer that forges a row to redirect a
+    /// firewall allow at a container it does not own. Set to `false` only as an
+    /// escape hatch if a legitimate cluster topology ever trips the check.
+    ///
+    /// The `src` endpoint and cluster DNS stay permissive: both are
+    /// legitimately cross-host and have no independent expected-owner signal.
+    #[arg(
+        long,
+        env = "COOLIFY_COOLD_STRICT_ENDPOINT_OWNER",
+        default_value = "true",
+        action = clap::ArgAction::Set,
+    )]
+    pub strict_endpoint_owner: bool,
 }
 
 impl Config {
@@ -163,6 +225,19 @@ impl Config {
 
 fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
+}
+
+/// Parse a colon/comma-separated list of allowed host bind-mount source
+/// prefixes (S4). Empty input yields an empty allow-list, which denies every
+/// host bind mount — the intended secure default.
+fn parse_mount_sources(raw: &str) -> Result<MountSources> {
+    let out = raw
+        .split([',', ':'])
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    Ok(MountSources(out))
 }
 
 /// Parse `<name>:<network>:<gateway-ip>,<name>:<network>:<gateway-ip>,...`.
@@ -256,6 +331,52 @@ mod tests {
             config.host_infra_reconcile_interval,
             Duration::from_secs(60)
         );
+    }
+
+    #[test]
+    fn allowed_mount_sources_default_empty_denies_all() {
+        let config = Config::parse_from(["coold", "--host-mgmt-ip", "100.64.0.5"]);
+        assert!(config.allowed_mount_sources.as_slice().is_empty());
+    }
+
+    #[test]
+    fn allowed_mount_sources_split_on_colon_and_comma() {
+        let got = parse_mount_sources("/data/coolify:/srv/shared , /opt/x").unwrap();
+        assert_eq!(
+            got.as_slice(),
+            [
+                PathBuf::from("/data/coolify"),
+                PathBuf::from("/srv/shared"),
+                PathBuf::from("/opt/x"),
+            ]
+        );
+    }
+
+    #[test]
+    fn flux_tls_pin_path_defaults_to_etc_coolify() {
+        let config = Config::parse_from(["coold", "--host-mgmt-ip", "100.64.0.5"]);
+        assert_eq!(
+            config.flux_tls_pin_path,
+            PathBuf::from("/etc/coolify/flux.pin")
+        );
+    }
+
+    #[test]
+    fn strict_endpoint_owner_defaults_to_true() {
+        let config = Config::parse_from(["coold", "--host-mgmt-ip", "100.64.0.5"]);
+        assert!(config.strict_endpoint_owner);
+    }
+
+    #[test]
+    fn strict_endpoint_owner_can_be_disabled() {
+        let config = Config::parse_from([
+            "coold",
+            "--host-mgmt-ip",
+            "100.64.0.5",
+            "--strict-endpoint-owner",
+            "false",
+        ]);
+        assert!(!config.strict_endpoint_owner);
     }
 
     #[test]

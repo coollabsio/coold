@@ -336,6 +336,7 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                 desired.corrosion_gossip_port,
                 desired.corrosion_api_port,
                 &peers,
+                desired.corrosion_gossip_tls.is_some(),
             );
             let cfg_drift = state.corrosion_config_hash != sha256_hex(&cfg);
             if cfg_drift {
@@ -370,7 +371,11 @@ pub fn build_plan(desired: &DesiredMesh, current: &MeshState) -> Result<Plan> {
                     bridge_gateway: machine_ip(subnets[ns][host]),
                 })
                 .collect::<Vec<_>>();
-            let coold_unit = services::coold::service_unit(mgmt_ip, &ns_configs, None);
+            let coold_unit = services::coold::service_unit(
+                mgmt_ip,
+                &ns_configs,
+                desired.coold_flux_config().as_ref(),
+            );
             let coold_unit_drift = state.coold_unit_sha256 != sha256_hex(coold_unit.as_bytes());
             if !state.corrosion_active || cfg_drift || corrosion_drift || schema_drift {
                 push(
@@ -439,6 +444,11 @@ mod tests {
             corrosion_version: "v1".into(),
             corrosion_gossip_port: 8787,
             corrosion_api_port: 8080,
+            coold_sha256: None,
+            corrosion_sha256: None,
+            corrosion_gossip_tls: None,
+            flux_tls: None,
+            flux_tls_url: None,
             intent: Intent::Upgrade,
             new_nodes: vec![],
             allow_replace: false,

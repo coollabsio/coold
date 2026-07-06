@@ -27,6 +27,7 @@ ipnet = { version = "2", features = ["serde"] }
 async-trait = "0.1"
 base64 = "0.22"
 shell-escape = "0.1"
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 
 [dev-dependencies]
 tempfile = "3"

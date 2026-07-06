@@ -1,5 +1,6 @@
 mod client;
 mod handlers;
+mod host_jwt;
 
 pub use client::run;
 

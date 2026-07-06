@@ -101,15 +101,53 @@ pub struct DesiredMesh {
     pub corrosion_version: String,
     pub corrosion_gossip_port: u16,
     pub corrosion_api_port: u16,
+    /// S1-adjacent: optional pinned SHA-256 for the coold release tarball.
+    pub coold_sha256: Option<String>,
+    /// S1-adjacent: optional pinned SHA-256 for the corrosion release tarball.
+    pub corrosion_sha256: Option<String>,
+    /// S5 (opt-in): shared self-signed cert provisioned to every node to run
+    /// Corrosion gossip over mutual TLS. `None` = default plaintext gossip.
+    pub corrosion_gossip_tls: Option<crate::services::tls::SelfSignedCert>,
+    /// S1 (opt-in): self-signed cert for the flux↔coold channel. `None` = keep
+    /// default plaintext-over-WireGuard.
+    pub flux_tls: Option<crate::services::tls::SelfSignedCert>,
+    /// S1 (opt-in): `https://<flux-mesh-ip-or-host>:<port>` gRPC URL wired into
+    /// coold's unit when `--enable-flux-tls` is set, so coold dials flux over
+    /// pinned TLS. `None` = flux URL not managed by the CLI (coold stays on its
+    /// default plaintext path).
+    pub flux_tls_url: Option<String>,
     pub intent: crate::wireguard::intent::Intent,
     pub new_nodes: Vec<String>,
     pub allow_replace: bool,
     pub allow_nightly: bool,
 }
 
+/// Conventional path coold reads the pinned flux cert from
+/// (`COOLIFY_COOLD_FLUX_TLS_PIN_PATH` default). Matches the pin file `apply`
+/// drops when `--enable-flux-tls` is set.
+pub const FLUX_PIN_PATH: &str = "/etc/coolify/flux.pin";
+/// Conventional path to the per-host JWT coold uses to authenticate the
+/// outbound flux gRPC stream (`COOLIFY_COOLD_HOST_JWT_PATH` default).
+pub const HOST_JWT_PATH: &str = "/etc/coolify/host-jwt";
+
 impl DesiredMesh {
     pub fn is_node(&self, host: &str) -> bool {
         self.nodes.iter().any(|h| h == host)
+    }
+
+    /// S1 (opt-in): the flux config to bake into coold's systemd unit. `Some`
+    /// only when `--enable-flux-tls` wired an `https://` URL — coold then dials
+    /// flux over pinned TLS (`flux.pin`) with the host JWT. Both `plan` (drift
+    /// hashing) and `apply` (unit write) MUST use this so the generated unit is
+    /// identical; otherwise the coold unit would look permanently drifted.
+    pub fn coold_flux_config(&self) -> Option<crate::services::coold::FluxConfig> {
+        self.flux_tls_url
+            .as_ref()
+            .map(|url| crate::services::coold::FluxConfig {
+                url: url.clone(),
+                jwt_path: HOST_JWT_PATH.to_string(),
+                tls_pin_path: Some(FLUX_PIN_PATH.to_string()),
+            })
     }
 
     pub fn sorted_namespaces(&self) -> Vec<String> {

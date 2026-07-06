@@ -1,13 +1,15 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use ipnet::Ipv4Net;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use crate::{
     cli::OutputFormat,
-    meshnet::{validate_namespaces, MeshNetMultiFlags},
+    meshnet::{validate_interface, validate_namespaces, validate_version, MeshNetMultiFlags},
     output,
+    services::tls,
     ssh::SshMeshFlags,
     wireguard::{
         apply,
@@ -56,6 +58,39 @@ pub struct BaseInitFlags {
     pub corrosion_gossip_port: u16,
     #[arg(long, default_value_t = 8080)]
     pub corrosion_api_port: u16,
+    /// S1-adjacent: pin the expected SHA-256 of the coold release tarball.
+    /// When set, install aborts on mismatch; when unset, a published
+    /// `<url>.sha256` sidecar is used if available.
+    #[arg(long)]
+    pub coold_sha256: Option<String>,
+    /// S1-adjacent: pin the expected SHA-256 of the corrosion release tarball.
+    #[arg(long)]
+    pub corrosion_sha256: Option<String>,
+    /// S5 (opt-in, default OFF): run Corrosion gossip over mutual TLS using a
+    /// shared self-signed cert provisioned to every node, instead of the
+    /// default plaintext gossip (which relies on WireGuard mesh membership
+    /// alone). Verify against your Corrosion version before relying on it.
+    #[arg(long)]
+    pub enable_corrosion_gossip_tls: bool,
+    /// S1 (opt-in, default OFF): generate a self-signed cert for the flux↔coold
+    /// channel and drop the pin file coold reads (`/etc/coolify/flux.pin`) on
+    /// every node. The flux cert/key are written locally for manual install on
+    /// the flux host (see --flux-tls-out-dir). Default provisioning stays on
+    /// plaintext-over-WireGuard.
+    #[arg(long)]
+    pub enable_flux_tls: bool,
+    /// Subject alternative names (IPs or DNS) for the generated flux cert —
+    /// typically the flux WireGuard mgmt IP and/or its hostname. REQUIRED (and
+    /// must include a non-localhost entry) when --enable-flux-tls is set.
+    #[arg(long, value_delimiter = ',')]
+    pub flux_tls_san: Vec<String>,
+    /// Port coold dials the flux gRPC channel on. Used to build the `https://`
+    /// `COOLIFY_COOLD_FLUX_URL` baked into each node's unit when flux TLS is on.
+    #[arg(long, default_value_t = 6443)]
+    pub flux_port: u16,
+    /// Where to write the generated flux cert/key for manual install on flux.
+    #[arg(long, default_value = "./coolify-flux-tls")]
+    pub flux_tls_out_dir: PathBuf,
     #[arg(short = 'y', long)]
     pub yes: bool,
 }
@@ -204,6 +239,13 @@ async fn run_apply(
         );
     }
     let desired = build_desired(&base, intent, new_nodes, allow_replace, allow_nightly)?;
+    if let Some(cert) = &desired.flux_tls {
+        write_flux_tls_output(
+            &base.flux_tls_out_dir,
+            cert,
+            desired.flux_tls_url.as_deref(),
+        )?;
+    }
     let client = base.ssh.client();
     eprintln!("{header}");
     eprintln!("Probing {} mesh host(s)...", desired.hosts.len());
@@ -280,6 +322,62 @@ async fn run_apply(
     }
 }
 
+/// True for SANs that only a colocated process could reach — rejected as the
+/// sole flux SAN because remote coold nodes must dial the flux host by a real
+/// mesh address.
+fn is_localhost_san(san: &str) -> bool {
+    matches!(
+        san.trim().to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "0.0.0.0" | ""
+    )
+}
+
+/// S1 (opt-in): write the generated flux cert/key locally and print the exact
+/// remaining MANUAL steps. The CLI has already wired the NODE side: each node's
+/// coold unit now dials `flux_url` (`https://…`, `COOLIFY_COOLD_FLUX_URL`) with
+/// the pin path env set, and the pin file (`/etc/coolify/flux.pin`) was dropped
+/// on every node. What the CLI CANNOT do (it does not manage the central flux
+/// process or mint host JWTs) is left for the operator.
+fn write_flux_tls_output(
+    out_dir: &std::path::Path,
+    cert: &tls::SelfSignedCert,
+    flux_url: Option<&str>,
+) -> Result<()> {
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("create flux TLS output dir {}", out_dir.display()))?;
+    let cert_path = out_dir.join("cert.pem");
+    let key_path = out_dir.join("key.pem");
+    std::fs::write(&cert_path, &cert.cert_pem).context("write flux cert.pem")?;
+    std::fs::write(&key_path, &cert.key_pem).context("write flux key.pem")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600))
+            .context("chmod flux key.pem")?;
+    }
+    let url = flux_url.unwrap_or("https://<flux-mesh-ip>:6443");
+    eprintln!(
+        "flux TLS enabled.\n\
+         \x20 Automatic (node side): each coold unit dials {url} over pinned TLS\n\
+         \x20   (COOLIFY_COOLD_FLUX_URL + COOLIFY_COOLD_FLUX_TLS_PIN_PATH), and the pin\n\
+         \x20   file {pin} was dropped on every node.\n\
+         \x20 Wrote {cert} and {key}.\n\
+         \x20 Remaining MANUAL steps (CLI does not manage flux or host JWTs):\n\
+         \x20   1. Copy cert.pem/key.pem to the flux host.\n\
+         \x20   2. Start flux with COOLIFY_FLUX_TLS_CERT_PATH={cert} \\\n\
+         \x20        COOLIFY_FLUX_TLS_KEY_PATH={key}\n\
+         \x20      (flux must bind its mesh IP — the SAN above — not localhost).\n\
+         \x20   3. Install each node's per-host JWT at {jwt} — coold exits at boot\n\
+         \x20      if the flux URL is set but the JWT file is missing.",
+        url = url,
+        pin = crate::wireguard::state::FLUX_PIN_PATH,
+        jwt = crate::wireguard::state::HOST_JWT_PATH,
+        cert = cert_path.display(),
+        key = key_path.display(),
+    );
+    Ok(())
+}
+
 fn build_desired(
     base: &BaseInitFlags,
     intent: Intent,
@@ -289,6 +387,46 @@ fn build_desired(
 ) -> Result<DesiredMesh> {
     base.ssh.validate_ssh_access()?;
     validate_namespaces(&base.mesh.namespaces)?;
+    // S-cli: reject shell/systemd-injection payloads in operator-supplied
+    // interface and version strings before they are interpolated into remote
+    // commands and unit files.
+    validate_interface(&base.wg_interface)?;
+    validate_version("--coold-version", &base.coold_version)?;
+    validate_version("--corrosion-version", &base.corrosion_version)?;
+    // S5 / S1: generate opt-in TLS material once so the same shared cert is
+    // provisioned to every node in this run. Default (flags off) => None, and
+    // provisioning is byte-identical to plaintext-over-WireGuard.
+    let corrosion_gossip_tls = if base.enable_corrosion_gossip_tls {
+        Some(
+            tls::generate_self_signed("coolify-corrosion-gossip", &[])
+                .context("generate corrosion gossip TLS cert")?,
+        )
+    } else {
+        None
+    };
+    // S1 (opt-in): when flux TLS is on, the operator MUST name the flux host's
+    // reachable mesh IP/hostname so (a) the cert carries a matching SAN and
+    // (b) coold can dial a real `https://` URL. A localhost-only SAN would only
+    // work for a flux colocated on one node — remote coold nodes could never
+    // reach it — so reject it with a clear error rather than silently wiring an
+    // unreachable URL.
+    let (flux_tls, flux_tls_url) = if base.enable_flux_tls {
+        let sans = clean_hosts(&base.flux_tls_san);
+        let Some(flux_host) = sans.iter().find(|s| !is_localhost_san(s)).cloned() else {
+            bail!(
+                "--enable-flux-tls requires --flux-tls-san to include the flux host's mesh IP or \
+                 hostname (got {:?}); a localhost-only SAN cannot be reached by remote coold \
+                 nodes over TLS",
+                base.flux_tls_san
+            );
+        };
+        let cert =
+            tls::generate_self_signed("coolify-flux", &sans).context("generate flux TLS cert")?;
+        let url = format!("https://{flux_host}:{}", base.flux_port);
+        (Some(cert), Some(url))
+    } else {
+        (None, None)
+    };
     let nodes = clean_hosts(&base.ssh.nodes);
     let new_nodes = clean_hosts(&new_nodes);
     if nodes.is_empty() {
@@ -315,6 +453,11 @@ fn build_desired(
         corrosion_version: base.corrosion_version.clone(),
         corrosion_gossip_port: base.corrosion_gossip_port,
         corrosion_api_port: base.corrosion_api_port,
+        coold_sha256: base.coold_sha256.clone(),
+        corrosion_sha256: base.corrosion_sha256.clone(),
+        corrosion_gossip_tls,
+        flux_tls,
+        flux_tls_url,
         intent,
         new_nodes,
         allow_replace,
@@ -417,6 +560,106 @@ fn render_plan(format: OutputFormat, desired: &DesiredMesh, plan: &Plan) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn base_flags() -> BaseInitFlags {
+        BaseInitFlags {
+            ssh: SshMeshFlags {
+                nodes: vec!["node-a".into()],
+                ssh_key: None,
+                ssh_config: Some(PathBuf::from("/dev/null")),
+                ssh_user: "root".into(),
+                ssh_port: 22,
+                ssh_passphrase_prompt: false,
+                concurrency: 10,
+                ssh_timeout: "30s".into(),
+            },
+            mesh: crate::meshnet::MeshNetMultiFlags {
+                namespaces: vec!["default".into()],
+                container_pool: "10.210.0.0/16".into(),
+                container_prefix: 24,
+            },
+            wg_mgmt_pool: "100.64.0.0/16".into(),
+            wg_interface: "wg0".into(),
+            wg_listen_port: 51820,
+            wg_listen_port_overrides: vec![],
+            wg_endpoint_overrides: vec![],
+            skip_default_deny: false,
+            coold_version: "nightly".into(),
+            corrosion_version: "v1.0.0".into(),
+            corrosion_gossip_port: 8787,
+            corrosion_api_port: 8080,
+            coold_sha256: None,
+            corrosion_sha256: None,
+            enable_corrosion_gossip_tls: false,
+            enable_flux_tls: false,
+            flux_tls_san: vec![],
+            flux_port: 6443,
+            flux_tls_out_dir: PathBuf::from("./coolify-flux-tls"),
+            yes: true,
+        }
+    }
+
+    #[test]
+    fn is_localhost_san_matches_local_only_addresses() {
+        for s in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "",
+            " LocalHost ",
+        ] {
+            assert!(is_localhost_san(s), "{s:?} should be localhost");
+        }
+        for s in ["100.64.0.1", "flux.internal", "10.0.0.5"] {
+            assert!(!is_localhost_san(s), "{s:?} should NOT be localhost");
+        }
+    }
+
+    #[test]
+    fn flux_tls_off_leaves_url_unset() {
+        let d = build_desired(&base_flags(), Intent::Bootstrap, vec![], false, false).unwrap();
+        assert!(d.flux_tls.is_none());
+        assert!(d.flux_tls_url.is_none());
+        assert!(d.coold_flux_config().is_none());
+    }
+
+    #[test]
+    fn flux_tls_on_wires_https_url_and_pin_env() {
+        let mut base = base_flags();
+        base.enable_flux_tls = true;
+        base.flux_tls_san = vec!["100.64.0.1".into()];
+        let d = build_desired(&base, Intent::Bootstrap, vec![], false, false).unwrap();
+        assert!(d.flux_tls.is_some());
+        assert_eq!(d.flux_tls_url.as_deref(), Some("https://100.64.0.1:6443"));
+        let flux = d.coold_flux_config().expect("flux config present");
+        assert_eq!(flux.url, "https://100.64.0.1:6443");
+        assert_eq!(flux.tls_pin_path.as_deref(), Some("/etc/coolify/flux.pin"));
+        // The generated coold unit must dial TLS and set the pin path env.
+        let unit =
+            crate::services::coold::service_unit("100.64.0.5".parse().unwrap(), &[], Some(&flux));
+        assert!(unit.contains("Environment=COOLIFY_COOLD_FLUX_URL=https://100.64.0.1:6443"));
+        assert!(unit.contains("Environment=COOLIFY_COOLD_FLUX_TLS_PIN_PATH=/etc/coolify/flux.pin"));
+    }
+
+    #[test]
+    fn flux_tls_on_requires_non_localhost_san() {
+        for sans in [
+            vec![],
+            vec!["localhost".to_string()],
+            vec!["127.0.0.1".to_string()],
+        ] {
+            let mut base = base_flags();
+            base.enable_flux_tls = true;
+            base.flux_tls_san = sans.clone();
+            let err = build_desired(&base, Intent::Bootstrap, vec![], false, false)
+                .expect_err("localhost-only SAN must be rejected");
+            assert!(
+                err.to_string().contains("flux-tls-san"),
+                "unexpected error for {sans:?}: {err}"
+            );
+        }
+    }
 
     #[test]
     fn mesh_hosts_keeps_node_order() {

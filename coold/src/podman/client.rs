@@ -1,4 +1,4 @@
-use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, convert::Infallible, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
@@ -6,13 +6,14 @@ use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::{body::Incoming, Method, Request, Response};
 use hyper_util::client::legacy::{Client, ResponseFuture};
 use hyperlocal::{UnixClientExt, UnixConnector};
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
 
 use super::types::{
     Container, ContainerCreateResponse, ContainerCreateSpec, ContainerInspect, ExecCreateResponse,
-    Image, ImagePullReport, PortMappingSpec,
+    ExecInspect, Image, ImagePullReport, PortMappingSpec,
 };
 
 type HttpBody = BoxBody<Bytes, Infallible>;
@@ -26,6 +27,9 @@ pub struct PodmanClient {
 struct Inner {
     socket: PathBuf,
     http: HyperClient,
+    /// Allow-list of host directory prefixes that may be bind-mounted into
+    /// created containers (S4). Empty = deny every host bind mount.
+    allowed_mount_sources: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -55,10 +59,14 @@ pub struct CreatePortMapping {
 }
 
 impl PodmanClient {
-    pub fn new(socket: PathBuf) -> Self {
+    pub fn new(socket: PathBuf, allowed_mount_sources: Vec<PathBuf>) -> Self {
         let http: HyperClient = Client::unix();
         Self {
-            inner: Arc::new(Inner { socket, http }),
+            inner: Arc::new(Inner {
+                socket,
+                http,
+                allowed_mount_sources,
+            }),
         }
     }
 
@@ -121,6 +129,9 @@ impl PodmanClient {
     }
 
     pub async fn pull_image(&self, reference: &str) -> Result<(String, String)> {
+        if !is_safe_podman_ref(reference) {
+            return Err(anyhow!("images.pull denied invalid image reference"));
+        }
         let path = format!(
             "/v5.0.0/libpod/images/pull?reference={}",
             url_escape(reference)
@@ -143,6 +154,9 @@ impl PodmanClient {
     }
 
     pub async fn delete_image(&self, reference: &str, force: bool) -> Result<String> {
+        if !is_safe_podman_ref(reference) {
+            return Err(anyhow!("images.delete denied invalid image reference"));
+        }
         self.delete_empty(&format!(
             "/v5.0.0/libpod/images/{}?force={}",
             url_escape(reference),
@@ -176,7 +190,10 @@ impl PodmanClient {
     }
 
     pub async fn create_container(&self, input: CreateContainerInput) -> Result<String> {
-        validate_create_container(&input)?;
+        if !is_safe_podman_ref(&input.image) || !is_safe_podman_ref(&input.name) {
+            return Err(anyhow!("containers.create denied invalid image or name"));
+        }
+        validate_create_container(&input, &self.inner.allowed_mount_sources)?;
         let spec = create_spec(input);
         let response: ContainerCreateResponse = self
             .post_json(
@@ -275,7 +292,30 @@ impl PodmanClient {
                 url_escape(&create.id)
             ))
             .await?;
-        Ok((0, output))
+        // R2: the /start endpoint returns the exec output but not the exit
+        // status. Poll the exec inspect endpoint until the process is no
+        // longer running, then return its real ExitCode instead of a
+        // hard-coded 0 (which masked every command failure).
+        let exit_code = self.wait_exec_exit_code(&create.id).await?;
+        Ok((exit_code, output))
+    }
+
+    /// Poll `exec/{id}/json` until the exec session reports `Running=false`,
+    /// then return its `ExitCode`. Handles the race where inspect runs before
+    /// the process has finished (R2).
+    async fn wait_exec_exit_code(&self, exec_id: &str) -> Result<i32> {
+        const POLL_INTERVAL: Duration = Duration::from_millis(50);
+        const MAX_ATTEMPTS: u32 = 1200; // ~60s ceiling before giving up.
+
+        let path = format!("/v5.0.0/libpod/exec/{}/json", url_escape(exec_id));
+        for _ in 0..MAX_ATTEMPTS {
+            let inspect: ExecInspect = self.get_json(&path).await?;
+            if let Some(code) = finished_exec_exit_code(&inspect) {
+                return Ok(code);
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+        Err(anyhow!("exec {exec_id} did not finish within timeout"))
     }
 
     pub async fn run_healthcheck(&self, id: &str) -> Result<String> {
@@ -287,12 +327,17 @@ impl PodmanClient {
     }
 }
 
-fn validate_create_container(input: &CreateContainerInput) -> Result<()> {
+fn validate_create_container(
+    input: &CreateContainerInput,
+    allowed_mount_sources: &[PathBuf],
+) -> Result<()> {
     if input.privileged {
         return Err(anyhow!("containers.create denied privileged mode"));
     }
-    if input.network_mode.eq_ignore_ascii_case("host") || input.networks.iter().any(|n| n == "host")
-    {
+    // S4: reject host networking and namespace-join forms. `container:<id>`
+    // and `ns:<path>` join another container's / an arbitrary network
+    // namespace, escaping mesh isolation just like `host` does.
+    if is_denied_network_mode(&input.network_mode) || input.networks.iter().any(|n| n == "host") {
         return Err(anyhow!("containers.create denied host networking"));
     }
     if !input.capabilities.is_empty() {
@@ -302,14 +347,62 @@ fn validate_create_container(input: &CreateContainerInput) -> Result<()> {
         let Some((source, _target)) = volume.split_once(':') else {
             continue;
         };
-        if source == "/"
-            || source.starts_with("/run/podman")
-            || source.starts_with("/var/run/docker")
-        {
-            return Err(anyhow!("containers.create denied unsafe host mount"));
-        }
+        validate_mount_source(source, allowed_mount_sources)?;
     }
     Ok(())
+}
+
+/// True for `network_mode` values that break mesh isolation: literal `host`
+/// plus the namespace-join forms `container:<id>` and `ns:<path>` (S4).
+fn is_denied_network_mode(mode: &str) -> bool {
+    let mode = mode.trim().to_ascii_lowercase();
+    mode == "host" || mode.starts_with("container:") || mode.starts_with("ns:")
+}
+
+/// Validate a bind-mount source against the allow-list (S4).
+///
+/// Deny-by-default: with an empty allow-list NO host bind mount is permitted.
+/// Named volumes (sources that are not absolute host paths) are always allowed
+/// — they are managed by Podman and cannot reference arbitrary host state.
+/// Absolute sources are canonicalized (symlinks + `..` resolved) before being
+/// matched so `/var/run/podman` (via the `/var/run`→`/run` symlink) and `..`
+/// traversal cannot bypass the list. A source that cannot be canonicalized
+/// (e.g. does not exist) is rejected — we fail closed rather than guess.
+fn validate_mount_source(source: &str, allowed_mount_sources: &[PathBuf]) -> Result<()> {
+    if !is_host_path_source(source) {
+        return Ok(());
+    }
+
+    if allowed_mount_sources.is_empty() {
+        return Err(anyhow!(
+            "containers.create denied host bind mount {source:?}: host bind mounts are disabled \
+             (set COOLIFY_COOLD_ALLOWED_MOUNT_SOURCES to permit specific prefixes)"
+        ));
+    }
+
+    let canonical = std::fs::canonicalize(source).map_err(|e| {
+        anyhow!("containers.create denied host bind mount {source:?}: cannot canonicalize ({e})")
+    })?;
+
+    let permitted = allowed_mount_sources.iter().any(|prefix| {
+        let prefix = std::fs::canonicalize(prefix).unwrap_or_else(|_| prefix.clone());
+        canonical.starts_with(&prefix)
+    });
+
+    if permitted {
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "containers.create denied host bind mount {source:?}: not under an allowed prefix"
+        ))
+    }
+}
+
+/// A bind-mount source is treated as a host path (subject to the allow-list)
+/// when it is absolute or contains path separators / `..` traversal. Bare
+/// tokens like `web-data` are named volumes and are left to Podman.
+fn is_host_path_source(source: &str) -> bool {
+    source.starts_with('/') || source.contains('/') || source.contains("..")
 }
 
 fn create_spec(input: CreateContainerInput) -> ContainerCreateSpec {
@@ -419,8 +512,32 @@ async fn body_bytes(res: Response<Incoming>, path: &str) -> Result<Bytes> {
         .map(|body| body.to_bytes())
 }
 
+/// Percent-encode set for values interpolated into libpod request paths and
+/// query strings (S6). Encodes everything except the RFC 3986 unreserved set
+/// (`A-Za-z0-9-._~`), so `&`, `?`, `#`, spaces, control characters, `/`, `:`,
+/// etc. can no longer inject extra path segments or query parameters into the
+/// podman API call.
+const PODMAN_ENCODE: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'.')
+    .remove(b'_')
+    .remove(b'~');
+
+/// Return true when a reference/id contains only characters that are safe to
+/// place in a podman API path/query. Control characters and whitespace are
+/// rejected outright; everything else is percent-encoded by [`url_escape`].
+fn is_safe_podman_ref(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| !c.is_control() && !c.is_whitespace())
+}
+
 fn url_escape(value: &str) -> String {
-    value.replace('/', "%2F").replace(':', "%3A")
+    percent_encoding::utf8_percent_encode(value, PODMAN_ENCODE).to_string()
+}
+
+/// When the exec session has stopped running, return its real exit code; while
+/// it is still running return `None` so the caller keeps polling (R2).
+fn finished_exec_exit_code(inspect: &ExecInspect) -> Option<i32> {
+    (!inspect.running).then_some(inspect.exit_code)
 }
 
 #[cfg(test)]
@@ -466,7 +583,7 @@ mod tests {
         let mut input = base_input();
         input.privileged = true;
 
-        let err = validate_create_container(&input).unwrap_err();
+        let err = validate_create_container(&input, &[]).unwrap_err();
 
         assert!(format!("{err:#}").contains("privileged"));
     }
@@ -476,18 +593,118 @@ mod tests {
         let mut input = base_input();
         input.network_mode = "host".into();
 
-        let err = validate_create_container(&input).unwrap_err();
+        let err = validate_create_container(&input, &[]).unwrap_err();
 
         assert!(format!("{err:#}").contains("host networking"));
     }
 
     #[test]
-    fn create_filter_denies_unsafe_mounts() {
+    fn create_filter_denies_network_namespace_join_forms() {
+        for mode in ["container:abc123", "NS:/proc/1/ns/net", "Container:web"] {
+            let mut input = base_input();
+            input.network_mode = mode.into();
+            let err = validate_create_container(&input, &[]).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("host networking"),
+                "mode {mode} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn create_filter_denies_all_host_mounts_by_default() {
+        // Deny-by-default (empty allow-list): /etc, the podman socket via the
+        // /var/run symlink, and `..` traversal are all rejected (S4).
+        for source in [
+            "/etc",
+            "/etc/coolify",
+            "/var/run/podman/podman.sock",
+            "/data/coolify/../../etc",
+        ] {
+            let mut input = base_input();
+            input.volumes = vec![format!("{source}:/target")];
+            let err = validate_create_container(&input, &[]).unwrap_err();
+            assert!(
+                format!("{err:#}").contains("host bind mounts are disabled"),
+                "source {source} should be denied"
+            );
+        }
+    }
+
+    #[test]
+    fn create_filter_allows_source_under_explicit_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().to_path_buf()];
+        let sub = dir.path().join("data");
+        std::fs::create_dir(&sub).unwrap();
+
         let mut input = base_input();
-        input.volumes = vec!["/run/podman/podman.sock:/sock".into()];
+        input.volumes = vec![format!("{}:/data", sub.display())];
 
-        let err = validate_create_container(&input).unwrap_err();
+        assert!(validate_create_container(&input, &allowed).is_ok());
+    }
 
-        assert!(format!("{err:#}").contains("unsafe host mount"));
+    #[test]
+    fn create_filter_rejects_traversal_escaping_allowed_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let allowed = vec![dir.path().join("safe")];
+        std::fs::create_dir(dir.path().join("safe")).unwrap();
+        std::fs::create_dir(dir.path().join("secret")).unwrap();
+
+        // Escapes the allowed prefix via `..` — canonicalization resolves it
+        // and the prefix check rejects it.
+        let escape = dir.path().join("safe").join("..").join("secret");
+        let mut input = base_input();
+        input.volumes = vec![format!("{}:/data", escape.display())];
+
+        let err = validate_create_container(&input, &allowed).unwrap_err();
+        assert!(format!("{err:#}").contains("not under an allowed prefix"));
+    }
+
+    #[test]
+    fn create_filter_allows_named_volumes() {
+        let mut input = base_input();
+        input.volumes = vec!["web-data:/data".into()];
+        assert!(validate_create_container(&input, &[]).is_ok());
+    }
+
+    #[test]
+    fn url_escape_neutralizes_injection_chars() {
+        let escaped = url_escape("nginx&force=true?x=#frag zone");
+        assert!(!escaped.contains('&'));
+        assert!(!escaped.contains('?'));
+        assert!(!escaped.contains('#'));
+        assert!(!escaped.contains(' '));
+    }
+
+    #[test]
+    fn url_escape_leaves_unreserved_refs_unchanged() {
+        assert_eq!(url_escape("nginx-alpine_1.2~x"), "nginx-alpine_1.2~x");
+        assert_eq!(
+            url_escape("docker.io/library/nginx"),
+            "docker.io%2Flibrary%2Fnginx"
+        );
+    }
+
+    #[test]
+    fn rejects_refs_with_control_or_whitespace() {
+        assert!(!is_safe_podman_ref("nginx alpine"));
+        assert!(!is_safe_podman_ref("nginx\n"));
+        assert!(!is_safe_podman_ref(""));
+        assert!(is_safe_podman_ref("docker.io/library/nginx:alpine"));
+    }
+
+    #[test]
+    fn exec_exit_code_reported_when_finished() {
+        let failed: ExecInspect =
+            serde_json::from_str(r#"{"Running": false, "ExitCode": 1}"#).unwrap();
+        assert_eq!(finished_exec_exit_code(&failed), Some(1));
+
+        let ok: ExecInspect = serde_json::from_str(r#"{"Running": false, "ExitCode": 0}"#).unwrap();
+        assert_eq!(finished_exec_exit_code(&ok), Some(0));
+
+        let running: ExecInspect =
+            serde_json::from_str(r#"{"Running": true, "ExitCode": 0}"#).unwrap();
+        assert_eq!(finished_exec_exit_code(&running), None);
     }
 }

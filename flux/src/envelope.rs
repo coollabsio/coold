@@ -149,6 +149,8 @@ pub enum CommandPayload {
         #[serde(default = "default_corrosion_tables_limit")]
         limit: u32,
     },
+    #[serde(rename = "host.jwt.set")]
+    HostJwtSet { jwt: String },
 }
 
 impl CommandPayload {
@@ -175,6 +177,7 @@ impl CommandPayload {
             Self::FirewallReconcile => "firewall.reconcile",
             Self::CooldLogs { .. } => "coold.logs",
             Self::CorrosionTables { .. } => "corrosion.tables",
+            Self::HostJwtSet { .. } => "host.jwt.set",
         }
     }
 }
@@ -345,6 +348,9 @@ impl ResponseBody {
             Some(Body::CorrosionTables(r)) => Some(ResponseBody::Ok {
                 data: serde_json::json!({ "output": r.output }),
             }),
+            Some(Body::HostJwtSet(r)) => Some(ResponseBody::Ok {
+                data: serde_json::json!({ "applied": r.applied }),
+            }),
             Some(Body::Error(e)) => Some(ResponseBody::Error {
                 code: e.code,
                 message: e.message,
@@ -366,6 +372,21 @@ mod tests {
         ContainersLogsResp, ContainersRestartResp, ContainersStartResp, ContainersStopResp,
         CooldLogsResp, ImageSummary, ImagesDeleteResp, ImagesListResp, ImagesPullResp,
     };
+
+    #[test]
+    fn host_jwt_set_deserializes_from_dotted_json_and_maps_to_verb() {
+        let cmd: CommandPayload = serde_json::from_value(serde_json::json!({
+            "type": "host.jwt.set",
+            "jwt": "a.b.c"
+        }))
+        .expect("valid host.jwt.set command");
+
+        match &cmd {
+            CommandPayload::HostJwtSet { jwt } => assert_eq!(jwt, "a.b.c"),
+            other => panic!("expected HostJwtSet, got {other:?}"),
+        }
+        assert_eq!(cmd.kind(), "host.jwt.set");
+    }
 
     fn data_for(body: response::Body) -> serde_json::Value {
         match ResponseBody::try_from_proto(ProtoResponse {

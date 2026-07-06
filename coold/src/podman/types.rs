@@ -129,6 +129,16 @@ pub struct ExecCreateResponse {
     pub id: String,
 }
 
+/// Result of `GET /exec/{id}/json`. Used to recover the real exec exit status
+/// after `POST /exec/{id}/start`, which returns output but no exit code (R2).
+#[derive(Debug, Default, Deserialize)]
+pub struct ExecInspect {
+    #[serde(default, rename = "ExitCode")]
+    pub exit_code: i32,
+    #[serde(default, rename = "Running")]
+    pub running: bool,
+}
+
 /// One line of the `GET /events` NDJSON stream.
 #[derive(Debug, Deserialize)]
 pub struct Event {

@@ -59,6 +59,8 @@ message ServerMsg {
 
         CooldLogsReq coold_logs = 96;
         CorrosionTablesReq corrosion_tables = 97;
+
+        HostJwtSetReq host_jwt_set = 30;
     }
 }
 
@@ -90,6 +92,7 @@ message Response {
         FirewallReconcileResp firewall_reconcile = 95;
         CooldLogsResp coold_logs = 96;
         CorrosionTablesResp corrosion_tables = 97;
+        HostJwtSetResp host_jwt_set = 98;
         Error error = 100;
     }
 }
@@ -211,5 +214,11 @@ message FirewallReconcileResp { string output = 1; }
 
 message CooldLogsReq { uint32 tail = 1; }
 message CooldLogsResp { string output = 1; }
+
+// Push a rotated host JWT to coold over the existing gRPC stream. coold
+// validates and atomically writes it to its on-disk jwt file; the new token is
+// picked up on the next reconnect (driven by the current token's exp).
+message HostJwtSetReq { string jwt = 1; }
+message HostJwtSetResp { bool applied = 1; }
 message CorrosionTablesReq { uint32 limit = 1; }
 message CorrosionTablesResp { string output = 1; }

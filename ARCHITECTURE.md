@@ -94,9 +94,24 @@ dns.stats
 host.info             (podman info, kernel, wg state, load)
 host.containers       (podman ps -a)
 host.stats            (podman stats snapshot)
+
+# Host token rotation (delivered over the existing stream; gated by host.jwt.set cap)
+host.jwt.set          {jwt}  -> {applied}   # validate + atomically write host JWT
 ```
 
 This list must stay aligned with the protobuf wire surface and Coolify docs. If you add or change a verb here, update the proto, Flux routing, coold handlers, and Coolify client code together.
+
+**Host JWT rotation (`host.jwt.set`).** Central rotates a host token while the
+current one is still valid and pushes the new token down the open stream
+(`{"type":"host.jwt.set","jwt":"<JWT>"}`) instead of over SSH. coold validates
+before writing (non-empty, structurally a JWT of three base64url segments, and —
+when it can read its current token — the new token's `sub` must match its own
+host; the signature is not verified because Flux already authenticated the
+dispatch), then writes the token atomically to `COOLIFY_COOLD_HOST_JWT_PATH`
+(temp file, mode 0600, `rename`). coold does **not** reconnect on receipt: the
+new token is picked up on the next reconnect, which the current token's `exp`
+drives (Flux drops the stream at `exp`; coold re-reads the file every reconnect).
+SSH delivery remains central's fallback for when the stream is down.
 
 ## 4. Transports
 
@@ -124,8 +139,13 @@ refuses the following by default:
 
 - `--privileged`, `--cap-add=SYS_ADMIN/NET_ADMIN` unless the host is marked
   `allow_privileged=true` in coold config.
-- Host-path bind mounts outside a configurable allowlist (default: none).
-- Host netns (`--net=host`) unless the container is coold itself.
+- Host-path bind mounts outside a configurable allowlist
+  (`COOLIFY_COOLD_ALLOWED_MOUNT_SOURCES`, default: none = all host bind mounts
+  denied). Sources are canonicalized (symlinks + `..` resolved) before the
+  prefix check, so tricks like `/var/run/podman` (via the `/var/run`→`/run`
+  symlink) or `..` traversal cannot bypass the list.
+- Host netns (`--net=host`) and the namespace-join forms `container:<id>` /
+  `ns:<path>`, unless the container is coold itself.
 
 Rejections return `403` with the offending field so central can surface a
 readable error.
@@ -303,7 +323,18 @@ Before re-enabling builder, add an ADR/API covering:
 
 ## 13. Security boundary
 
-- **Authn**: per-host JWT for the outbound stream, issued at enrollment.
+- **Authn**: per-host JWT for the outbound stream, issued at enrollment. At the
+  flux terminator the token is additionally **host-bound** (#2): the token `sub`
+  (host id) must match the connection's transport peer IP (strongest — a stolen
+  token replayed from another host IP is rejected), falling back to the
+  Hello-advertised `host_mgmt_ip` when the peer address is unavailable
+  (`COOLIFY_FLUX_REQUIRE_HOST_BINDING`, default on). The token must also carry a
+  non-empty `team_id` **tenant** claim (`COOLIFY_FLUX_REQUIRE_TEAM_ID`, default
+  on), scoping every stream to a tenant. **Per-cluster signing keys** are
+  scaffolded via the existing `kid` key-selection path (Laravel mints
+  `kid=cluster-<id>`, flux loads `cluster-<id>.pub` from
+  `COOLIFY_FLUX_JWT_KEYS_DIR`); the remaining step is key **distribution** into
+  each flux's keys dir, an ops/provisioning task not yet built.
 - **No secret storage**: secrets enter via `POST /containers` env/mounts at
   deploy time; coold passes through and forgets.
 - **No business audit**: coold keeps an ops/debug request log (request id,
@@ -445,9 +476,66 @@ Single central VM. No load balancer required.
   without a TCP hop or auth handshake.
 - Laravel runs on `:80` / `:443` via nginx. No port conflict.
 - TLS on flux gRPC only: Let's Encrypt cert (if domain available) or
-  self-signed generated at `coolify init`, pinned in
-  `/etc/coolify/flux.pin`.
+  self-signed generated at `coolify init --enable-flux-tls` (opt-in; writes
+  `cert.pem`/`key.pem` locally for manual install on the flux host and drops
+  the pin on every node), pinned in
+  `/etc/coolify/flux.pin`. coold consumes this pin via
+  `COOLIFY_COOLD_FLUX_TLS_PIN_PATH` (default `/etc/coolify/flux.pin`): when the
+  file exists coold dials the flux over TLS pinned to that certificate;
+  when absent it keeps the plaintext (WireGuard-protected) transport. A
+  `https://` flux URL with no pin present fails closed rather than falling back
+  to system roots. When `--enable-flux-tls` is set the CLI now **wires the node
+  side automatically**: each node's coold unit is generated with
+  `COOLIFY_COOLD_FLUX_URL=https://<flux-tls-san>:<flux-port>` and the pin-path
+  env, so coold dials TLS out of the box. `--enable-flux-tls` requires a
+  non-localhost `--flux-tls-san` (a localhost-only SAN is unreachable by remote
+  nodes and is rejected). Still manual: installing the cert/key on the flux host
+  and provisioning each node's `/etc/coolify/host-jwt` (coold exits at boot if
+  the flux URL is set but the JWT is absent). Default (flag off) leaves coold's
+  flux URL unset and the transport plaintext-over-WireGuard, unchanged.
 - Firewall: open port `6443` inbound for coold connections.
+- Corrosion gossip (S5): the gossip listener binds each host's WireGuard mgmt
+  IP only (never `0.0.0.0`) — enforced on the single config-generation path
+  (`assert_mesh_bind` inside `config_bytes`, shared by plan + apply) — and is
+  **plaintext by default**. This bind is the enforced trust boundary: only mesh
+  members reach the port, and every host on the mesh is trusted to write truthful
+  `service_endpoints` rows (a forged row is cluster-wide DNS/firewall poisoning).
+  `coolify init --enable-corrosion-gossip-tls` (opt-in) adds a QUIC/TLS
+  **encryption** layer using a shared self-signed cert provisioned to
+  `/etc/corrosion/tls/` on every node. Verified against Corrosion **v1.0.0**
+  (`corro-types/src/config.rs`, `corro-agent/src/api/peer/mod.rs`), the generated
+  config is encryption-only (`insecure = true`, no `ca_file`, no
+  `[gossip.tls.client]`) — the only shared-cert shape v1.0.0 will load and
+  handshake cross-node, since a no-SAN shared cert cannot pass server-name
+  verification. It adds **no per-node authentication** (the client verifier only
+  checks CA membership and every node shares one cert), so it does not change the
+  trust model — only WireGuard membership does. Real per-node gossip auth would
+  need per-node IP-SAN certs signed by a shared CA plus a live cluster to
+  validate; out of scope. Verify `corrosion agent` starts and members converge on
+  your Corrosion version before relying on it.
+- Read-side owner cross-check (S5): until gossip is authenticated, coold defends
+  against a forged `service_endpoints` row on the **read** side. Every endpoint
+  read carries the owning `host_mgmt_ip`, and `query_ips_by_name_owned` can bind
+  a lookup to an expected owner.
+  - **Firewall `dst` is enforced.** `firewall.allow` is dispatched to the host
+    that runs the rule's `dst` container (T8, coold = sole kernel writer there),
+    so a truthful row for `dst` must be owned by THIS host. coold resolves `dst`
+    with `expected_owner = host_mgmt_ip`; a row forged by another host is dropped
+    with a `warn!`. The `src` endpoint is legitimately cross-host (ingress proxy
+    / peer app) and stays permissive. Toggle via
+    `COOLIFY_COOLD_STRICT_ENDPOINT_OWNER` (default `true`).
+  - **DNS stays permissive (by design).** A cluster query may legitimately
+    resolve to whichever host runs the container, and a service may have replicas
+    on several hosts, so there is no independent expected-owner signal — a hard
+    filter would break normal discovery. DNS looks up with no expected owner:
+    all healthy IPs are returned, with a warning when they span multiple owners.
+  - RESIDUAL TRUST: closing the gap fully still needs authenticated Corrosion
+    gossip (the `coolify-cli` provisioning job above); the read-side check only
+    binds rows when the expected owner is known.
+- coold `systemd` sandbox (S7): the generated `coold.service` keeps root +
+  ambient `CAP_NET_*` (Podman socket, iptables/nft, DNS bind) but adds
+  `NoNewPrivileges`, `ProtectSystem=strict` (tight `ReadWritePaths`),
+  `ProtectHome`, and `PrivateTmp` as defense-in-depth.
 
 ### Assignment mode / multi-flux
 
@@ -550,21 +638,39 @@ Build dispatch:
 3. `Pending::insert_waiting` reserves a slot (capped at
    `COOLIFY_FLUX_PENDING_MAX`, default 10 000; overflow → 503).
 4. Handler calls `Pending::park(request_id)` → `oneshot::Receiver`, then
-   pushes `ServerMsg` into the host's `mpsc::Sender<ServerMsg>` feeding
-   the open `Agent.Stream` response half.
+   `try_send`s `ServerMsg` into the host's bounded `mpsc::Sender<ServerMsg>`
+   (capacity 64) feeding the open `Agent.Stream` response half. A full queue
+   (wedged coold) returns a fast 503 (C2) — the php-fpm worker is never blocked
+   waiting for capacity.
 5. coold executes the command against `/run/podman/podman.sock` and
    writes `Response { request_id, body }` back on the same stream.
 6. Flux `grpc_server::deliver_response` looks up the pending entry by
    `request_id`, translates the proto body to `ResponseBody` via
    `ResponseBody::try_from_proto`, and `Pending::deliver` fires every
-   parked oneshot sink, then transitions the entry to `Landed` with a
-   30 s TTL (`LANDED_TTL_SECS`) so a late poller on the build lane can
-   still claim results.
+   parked oneshot sink. With a live parked handler the entry is dropped
+   immediately (C1); the `Landed` 30 s TTL (`LANDED_TTL_SECS`) is kept only
+   for the late-poll race (response beat the parker).
 7. HTTP handler receives the body and returns `ResponseEnvelope` to
-   Laravel. No response within 10 s (`DISPATCH_TIMEOUT_SECS`, hard-coded
-   in `state.rs`) → sweeper evicts the entry, handler returns 504.
+   Laravel. No response within `COOLIFY_FLUX_DISPATCH_TIMEOUT_SECS`
+   (default 30 s) → sweeper evicts the entry, handler returns 504.
 
 Unknown `host_id` → 404. Host stream dropped mid-dispatch → 503.
+
+### Stream auth + lifecycle (security)
+
+At stream open flux verifies the JWT (`auth::verify_jwt`): alg pinned to
+ES256/RS256/PS* (HMAC/`none`/EdDSA rejected — key-confusion defense), header
+`kid` selects the verification key (default `flux-default`, or a rotation key
+from `COOLIFY_FLUX_JWT_KEYS_DIR`; unknown `kid` rejected), the `jti` must not be
+on the revocation denylist, and the remaining lifetime must not exceed
+`COOLIFY_FLUX_MAX_TOKEN_LIFETIME_SECS`. The `caps` claim is authoritative:
+flux authorizes only `caps ∩ advertised` (S2). Wildcard profiles grant nothing
+unless `COOLIFY_FLUX_ALLOW_WILDCARD_CAPABILITIES=1`. At Hello, coold's advertised
+schema range must overlap flux's (`1..=1`) or the stream is rejected (R6). The
+per-host stream task drops the stream at the token `exp` (#4) so coold
+re-authenticates with a fresh JWT. Laravel revokes a token via
+`POST /v1/tokens/revoke {jti, expires_at?}` on the UDS (persisted to
+`COOLIFY_FLUX_REVOCATION_PATH`).
 
 ### Flux config (env vars)
 
@@ -585,8 +691,13 @@ All sourced from `flux/src/config.rs`:
 | `COOLIFY_FLUX_UNIX_SOCKET_PATH` | `/run/coolify/flux.sock` | Laravel UDS. |
 | `COOLIFY_FLUX_UNIX_SOCKET_GROUP` | unset (mode `0600`) | PHP-FPM group grants `0660`. |
 | `COOLIFY_FLUX_PENDING_MAX` | `10000` | cap on in-flight + landed pendings. |
-| `COOLIFY_FLUX_DISPATCH_TIMEOUT_SECS` | `30` | **currently unused** — handler uses the 10 s `DISPATCH_TIMEOUT_SECS` const in `state.rs`. TODO: wire the flag through. |
-| `COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | verifies coold stream JWT. |
+| `COOLIFY_FLUX_DISPATCH_TIMEOUT_SECS` | `30` | seconds a coold-lane dispatch waits before the sweeper evicts it → 504. |
+| `COOLIFY_FLUX_JWT_PUBLIC_KEY_PATH` | `/etc/coolify/jwt.pub` | default JWT verification key (kid `flux-default`). |
+| `COOLIFY_FLUX_JWT_KEYS_DIR` | unset | optional dir of `<kid>.pub` rotation keys (S3); token header `kid` selects one, unknown `kid` rejected. |
+| `COOLIFY_FLUX_ALLOW_WILDCARD_CAPABILITIES` | unset (false) | S2 escape hatch: true = wildcard-profile tokens expand to all advertised caps; default false = caps claim authoritative, wildcards grant nothing. |
+| `COOLIFY_FLUX_MAX_TOKEN_LIFETIME_SECS` | `3600` | #4 clamp: reject at connect any JWT whose remaining lifetime exceeds this (`0` disables). |
+| `COOLIFY_FLUX_REVOCATION_PATH` | `/var/lib/coolify/flux/revocations.json` | #3 persisted JWT `jti` revocation denylist. |
+| `COOLIFY_FLUX_TLS_CERT_PATH` / `COOLIFY_FLUX_TLS_KEY_PATH` | unset | S1 optional gRPC TLS (defense-in-depth); on only when both set, else plaintext over WireGuard. |
 | `COOLIFY_FLUX_LOG_LEVEL` | `info` | `tracing` EnvFilter. |
 
 ### coold config rename

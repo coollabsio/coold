@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -25,16 +28,25 @@ use crate::{
 };
 
 pub async fn run(config: Config) -> Result<()> {
-    let podman = PodmanClient::new(config.podman_socket.clone());
+    let podman = PodmanClient::new(
+        config.podman_socket.clone(),
+        config.allowed_mount_sources.as_slice().to_vec(),
+    );
     let corrosion = CorrosionClient::new(&config.corrosion_url)?;
     let (tx, rx) = mpsc::channel::<EventMessage>(256);
     let (resource_status_tx, _) = broadcast::channel(256);
+    // R1: shared flag that forces the next reconcile to re-emit a full
+    // container-status snapshot. Raised when a flux stream (re)connects or the
+    // broadcast lagged, so status truth converges after any flux/Laravel
+    // downtime instead of being lost with the advanced snapshot.
+    let resync_signal = ResyncSignal::default();
     let ctx = Arc::new(SyncContext {
         config,
         podman,
         corrosion,
         container_status_snapshot: Mutex::new(HashMap::new()),
         resource_status_tx,
+        resync_signal: resync_signal.clone(),
     });
 
     let events_handle = {
@@ -71,7 +83,10 @@ pub async fn run(config: Config) -> Result<()> {
         let config = ctx.config.clone();
         let podman = ctx.podman.clone();
         let resource_status_tx = ctx.resource_status_tx.clone();
-        tokio::spawn(async move { crate::grpc::run(config, podman, resource_status_tx).await })
+        let resync_signal = resync_signal.clone();
+        tokio::spawn(async move {
+            crate::grpc::run(config, podman, resource_status_tx, resync_signal).await
+        })
     };
 
     drop(tx);
@@ -116,6 +131,27 @@ struct SyncContext {
     corrosion: CorrosionClient,
     container_status_snapshot: Mutex<HashMap<String, ContainerStatus>>,
     resource_status_tx: broadcast::Sender<ResourceStatusUpdate>,
+    resync_signal: ResyncSignal,
+}
+
+/// Cross-task flag (R1) that forces the next reconcile to re-emit the full
+/// container-status snapshot. The gRPC client raises it whenever a stream
+/// (re)connects or its broadcast receiver lags, guaranteeing Laravel receives
+/// current truth for every container after any flux/Laravel outage — instead
+/// of a delta that was dropped while there were no subscribers.
+#[derive(Clone, Default)]
+pub struct ResyncSignal(Arc<AtomicBool>);
+
+impl ResyncSignal {
+    /// Request a full status resync on the next reconcile.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Consume the pending request, returning whether one was set.
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
 }
 
 async fn run_event_trigger(
@@ -152,23 +188,22 @@ async fn reconcile_once(ctx: &SyncContext) -> Result<usize> {
     let all_containers = desired_container_statuses(ctx)
         .await
         .context("fetch all podman container statuses")?;
+    let force_resync = ctx.resync_signal.take();
     let container_status_deltas = {
+        // R1: hold the snapshot lock across the broadcast so the snapshot only
+        // advances after every delta was actually enqueued. `broadcast::send`
+        // is synchronous, so this cannot deadlock. If there are no subscribers
+        // (flux down) the send fails and the snapshot stays put, so the same
+        // transition is re-emitted on the next reconcile once flux reconnects.
         let mut current = ctx.container_status_snapshot.lock().await;
-        let deltas = diff_container_statuses(&all_containers, &current);
-        if !deltas.is_empty() {
-            *current = all_containers;
-        }
-        deltas
+        reconcile_container_status_snapshot(
+            &mut current,
+            all_containers,
+            force_resync,
+            &ctx.config.host_mgmt_ip,
+            |update| ctx.resource_status_tx.send(update).is_ok(),
+        )
     };
-
-    for update in container_resource_status_updates_from_deltas(
-        &ctx.config.host_mgmt_ip,
-        &container_status_deltas,
-    ) {
-        if ctx.resource_status_tx.send(update).is_err() {
-            debug!("no flux status subscribers; container status update dropped");
-        }
-    }
 
     let desired = desired_endpoints(ctx).await.context("fetch podman state")?;
     let current = ctx
@@ -322,6 +357,49 @@ async fn desired_endpoints(ctx: &SyncContext) -> Result<HashMap<String, Endpoint
     Ok(out)
 }
 
+/// Reconcile the container-status snapshot and emit deltas to flux (R1).
+///
+/// - When `force_resync` is set the snapshot baseline is cleared first, so the
+///   full current truth is re-emitted (used on flux (re)connect and on
+///   broadcast lag).
+/// - The snapshot only advances to `all_containers` when *every* emitted
+///   update was accepted (`emit` returned `true`). If flux has no subscribers
+///   the emit fails and the baseline is left unchanged, so the same deltas are
+///   re-emitted on the next reconcile and Laravel eventually converges.
+///
+/// `emit` returns `true` when the update was enqueued/broadcast successfully.
+fn reconcile_container_status_snapshot(
+    snapshot: &mut HashMap<String, ContainerStatus>,
+    all_containers: HashMap<String, ContainerStatus>,
+    force_resync: bool,
+    host_mgmt_ip: &str,
+    mut emit: impl FnMut(ResourceStatusUpdate) -> bool,
+) -> Vec<ContainerStatusDelta> {
+    if force_resync {
+        snapshot.clear();
+    }
+
+    let deltas = diff_container_statuses(&all_containers, snapshot);
+    if deltas.is_empty() {
+        return deltas;
+    }
+
+    let mut all_emitted = true;
+    for update in container_resource_status_updates_from_deltas(host_mgmt_ip, &deltas) {
+        if !emit(update) {
+            all_emitted = false;
+        }
+    }
+
+    if all_emitted {
+        *snapshot = all_containers;
+    } else {
+        debug!("no flux status subscribers; snapshot held for re-emit on next reconcile");
+    }
+
+    deltas
+}
+
 fn container_resource_status_updates_from_deltas(
     host_mgmt_ip: &str,
     deltas: &[ContainerStatusDelta],
@@ -421,5 +499,96 @@ mod resource_status_tests {
         assert_eq!(updates[0].status, "exited");
         assert_eq!(updates[1].resource_type, "container");
         assert_eq!(updates[1].status, "removed");
+    }
+
+    fn one_container() -> HashMap<String, ContainerStatus> {
+        let mut m = HashMap::new();
+        m.insert("abc".into(), container_status("abc", "web", "running"));
+        m
+    }
+
+    #[test]
+    fn failed_broadcast_re_emits_same_delta_next_reconcile() {
+        let mut snapshot = HashMap::new();
+
+        // First reconcile with NO subscribers (emit fails): delta produced but
+        // snapshot must NOT advance.
+        let mut emitted = Vec::new();
+        let deltas = reconcile_container_status_snapshot(
+            &mut snapshot,
+            one_container(),
+            false,
+            "100.64.0.5",
+            |u| {
+                emitted.push(u);
+                false // no subscribers
+            },
+        );
+        assert_eq!(deltas.len(), 1);
+        assert!(
+            snapshot.is_empty(),
+            "snapshot must not advance on failed send"
+        );
+
+        // Second reconcile, still same truth: the same delta is re-emitted
+        // because the baseline never moved. This time a subscriber accepts it.
+        let mut emitted2 = Vec::new();
+        let deltas2 = reconcile_container_status_snapshot(
+            &mut snapshot,
+            one_container(),
+            false,
+            "100.64.0.5",
+            |u| {
+                emitted2.push(u);
+                true // subscriber present
+            },
+        );
+        assert_eq!(deltas2.len(), 1);
+        assert_eq!(emitted2[0].container_id, "abc");
+        assert_eq!(snapshot.len(), 1, "snapshot advances after successful send");
+
+        // Third reconcile: nothing changed and snapshot is current → no delta.
+        let deltas3 = reconcile_container_status_snapshot(
+            &mut snapshot,
+            one_container(),
+            false,
+            "100.64.0.5",
+            |_| true,
+        );
+        assert!(deltas3.is_empty());
+    }
+
+    #[test]
+    fn reconnect_forces_full_snapshot_re_emit() {
+        // Snapshot already reflects current truth (no pending deltas).
+        let mut snapshot = one_container();
+
+        // Without a resync, nothing is re-emitted.
+        let none = reconcile_container_status_snapshot(
+            &mut snapshot,
+            one_container(),
+            false,
+            "100.64.0.5",
+            |_| true,
+        );
+        assert!(none.is_empty());
+
+        // On (re)connect force_resync clears the baseline and the full current
+        // truth is re-emitted for every container.
+        let mut emitted = Vec::new();
+        let deltas = reconcile_container_status_snapshot(
+            &mut snapshot,
+            one_container(),
+            true,
+            "100.64.0.5",
+            |u| {
+                emitted.push(u);
+                true
+            },
+        );
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].container_id, "abc");
+        assert_eq!(emitted[0].status, "running");
     }
 }

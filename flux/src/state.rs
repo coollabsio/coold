@@ -289,23 +289,41 @@ impl Pending {
         }
     }
 
-    /// Deliver a response body. Fans out to all parked sinks and then
-    /// transitions the entry to `Landed` with `LANDED_TTL_SECS` TTL so a
-    /// late poller can still claim the body.
+    /// Deliver a response body. Fans out to all parked sinks.
+    ///
+    /// C1: when at least one live handler was parked, the entry is dropped
+    /// immediately after fan-out instead of lingering as `Landed` for
+    /// `LANDED_TTL_SECS` — a delivered-to-a-live-sink response has no late
+    /// poller to serve, so keeping it only inflates `pending_max` occupancy.
+    /// The `Landed` TTL is retained ONLY for the late-poll race where the
+    /// response arrived before any handler parked (`sinks` empty).
     pub fn deliver(&self, request_id: &str, body: ResponseData) {
         // `oneshot::Sender::send` is non-blocking, so fanning out under the
         // shard lock is safe and closes the park/deliver TOCTOU window.
-        let Some(mut entry) = self.0.get_mut(request_id) else {
-            return;
-        };
-        let new_state = PendingState::Landed {
-            body: body.clone(),
-            until: Instant::now() + Duration::from_secs(LANDED_TTL_SECS),
-        };
-        if let PendingState::Waiting { sinks } = std::mem::replace(&mut entry.state, new_state) {
-            for sink in sinks {
-                let _ = sink.send(body.clone());
+        let fanned_out_to_live_sink = {
+            let Some(mut entry) = self.0.get_mut(request_id) else {
+                return;
+            };
+            let new_state = PendingState::Landed {
+                body: body.clone(),
+                until: Instant::now() + Duration::from_secs(LANDED_TTL_SECS),
+            };
+            match std::mem::replace(&mut entry.state, new_state) {
+                PendingState::Waiting { sinks } => {
+                    let had_live_sink = !sinks.is_empty();
+                    for sink in sinks {
+                        let _ = sink.send(body.clone());
+                    }
+                    had_live_sink
+                }
+                PendingState::Landed { .. } => false,
             }
+        };
+        // Drop the ref (above scope) before removing to avoid a same-shard
+        // self-deadlock. If a late poller claimed the Landed body in the
+        // meantime the entry is already gone and this is a no-op.
+        if fanned_out_to_live_sink {
+            self.0.remove(request_id);
         }
     }
 
@@ -378,6 +396,33 @@ mod tests {
             }
             _ => panic!("wrong body"),
         }
+    }
+
+    #[tokio::test]
+    async fn deliver_to_live_sink_drops_entry_immediately() {
+        // C1: a response delivered to a parked handler must not linger as a
+        // Landed entry occupying pending_max.
+        let p = Pending::new();
+        let _ = p.insert_waiting("r1".into(), "H".into(), PendingKind::Coold, 16);
+        let rx = match p.park("r1") {
+            ParkResult::Parked(rx) => rx,
+            _ => panic!("expected Parked"),
+        };
+
+        p.deliver(
+            "r1",
+            ResponseData::Coold(ResponseBody::Ok {
+                data: serde_json::json!({"k": "v"}),
+            }),
+        );
+
+        // Handler still receives the body …
+        assert!(rx.await.is_ok());
+        // … but the pending entry is gone right away (no 30s Landed lingering).
+        assert!(
+            p.get("r1").is_none(),
+            "entry should be dropped after live delivery"
+        );
     }
 
     #[tokio::test]

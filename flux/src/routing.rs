@@ -7,8 +7,9 @@ use coolify_proto::agent::v1::{
     ContainersHealthcheckRunReq, ContainersInspectReq, ContainersListReq, ContainersLogsReq,
     ContainersRestartReq, ContainersStartReq, ContainersStopReq, CooldLogsReq, CorrosionTablesReq,
     FirewallAllowReq, FirewallListReq, FirewallReconcileReq, FirewallRevokeReq, FirewallRule,
-    ImagesDeleteReq, ImagesListReq, ImagesPullReq, IngressAppConfig as ProtoIngressAppConfig,
-    PortMapping as ProtoPortMapping, ServerMsg, StopIngressReq,
+    HostJwtSetReq, ImagesDeleteReq, ImagesListReq, ImagesPullReq,
+    IngressAppConfig as ProtoIngressAppConfig, PortMapping as ProtoPortMapping, ServerMsg,
+    StopIngressReq,
 };
 
 use crate::envelope::{CommandPayload, DispatchEnvelope};
@@ -191,6 +192,9 @@ pub fn route_coold(streams: &Streams, env: DispatchEnvelope) -> RouteOutcome {
         CommandPayload::CorrosionTables { limit } => {
             server_msg::Command::CorrosionTables(CorrosionTablesReq { limit })
         }
+        CommandPayload::HostJwtSet { jwt } => {
+            server_msg::Command::HostJwtSet(HostJwtSetReq { jwt })
+        }
     };
 
     let msg = ServerMsg {
@@ -226,6 +230,7 @@ fn required_capability(command: &CommandPayload) -> &'static str {
         CommandPayload::FirewallReconcile => "firewall.reconcile",
         CommandPayload::CooldLogs { .. } => "coold.logs",
         CommandPayload::CorrosionTables { .. } => "corrosion.tables",
+        CommandPayload::HostJwtSet { .. } => "host.jwt.set",
     }
 }
 
@@ -399,6 +404,7 @@ mod tests {
                 "containers.healthcheck.run",
                 "ingress.apply",
                 "ingress.stop",
+                "host.jwt.set",
             ],
         );
         let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
@@ -586,6 +592,38 @@ mod tests {
     }
 
     #[test]
+    fn routes_host_jwt_set_from_dotted_json_name() {
+        assert!(matches!(
+            route_command(serde_json::json!({
+                "type": "host.jwt.set",
+                "jwt": "a.b.c"
+            })),
+            server_msg::Command::HostJwtSet(HostJwtSetReq { jwt }) if jwt == "a.b.c"
+        ));
+    }
+
+    #[test]
+    fn route_coold_rejects_host_jwt_set_without_capability() {
+        let streams = Streams::new();
+        let _rx = insert_host(&streams, "H", &["containers.list"]);
+
+        let env = serde_json::from_value::<DispatchEnvelope>(serde_json::json!({
+            "host_id": "H",
+            "request_id": "r1",
+            "command": { "type": "host.jwt.set", "jwt": "a.b.c" },
+        }))
+        .expect("valid dispatch envelope");
+
+        match route_coold(&streams, env) {
+            RouteOutcome::PushError { code, message } => {
+                assert_eq!(code, 501);
+                assert!(message.contains("host.jwt.set"), "got: {message}");
+            }
+            other => panic!("expected PushError, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn every_primitive_requires_its_matching_capability() {
         let cases = [
             (
@@ -691,6 +729,10 @@ mod tests {
             (
                 "firewall.reconcile",
                 serde_json::json!({ "type": "firewall.reconcile" }),
+            ),
+            (
+                "host.jwt.set",
+                serde_json::json!({ "type": "host.jwt.set", "jwt": "a.b.c" }),
             ),
         ];
 

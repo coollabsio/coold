@@ -222,7 +222,17 @@ async fn phase1<R: Runner>(
         .await?;
     }
     if !st.keys_exist && should_run(planned, host, ActionType::GenKeyPair, "") {
-        step(runner, host, user, port, &mut out, ActionType::GenKeyPair, "", "mkdir -p /etc/wireguard && wg genkey | tee /etc/wireguard/privatekey | wg pubkey | tee /etc/wireguard/publickey && chmod 600 /etc/wireguard/privatekey".into()).await?;
+        step(
+            runner,
+            host,
+            user,
+            port,
+            &mut out,
+            ActionType::GenKeyPair,
+            "",
+            super::config::genkey_command(),
+        )
+        .await?;
     }
     if desired.is_node(host) && desired.install_podman {
         if !st.podman_installed && should_run(planned, host, ActionType::InstallPodman, "") {
@@ -429,7 +439,10 @@ async fn phase3<R: Runner>(
             &mut out,
             ActionType::InstallCorrosion,
             "",
-            services::corrosion::install_command(&desired.corrosion_version),
+            services::corrosion::install_command(
+                &desired.corrosion_version,
+                desired.corrosion_sha256.as_deref(),
+            ),
         )
         .await?;
     }
@@ -442,7 +455,10 @@ async fn phase3<R: Runner>(
             &mut out,
             ActionType::InstallCoold,
             "",
-            services::coold::install_command(&desired.coold_version),
+            services::coold::install_command(
+                &desired.coold_version,
+                desired.coold_sha256.as_deref(),
+            ),
         )
         .await?;
     }
@@ -458,8 +474,33 @@ async fn phase3<R: Runner>(
             desired.corrosion_gossip_port,
             desired.corrosion_api_port,
             &peers,
+            desired.corrosion_gossip_tls.is_some(),
         ))
         .unwrap();
+        // S5 (opt-in): when gossip TLS is enabled, provision the shared
+        // cert/key the config references (encryption-only shape — no CA file;
+        // see services::corrosion::gossip_tls_toml). The same material is
+        // written on every node so the QUIC/TLS layer wraps all mesh gossip.
+        let tls_provision = desired
+            .corrosion_gossip_tls
+            .as_ref()
+            .map(|tls| {
+                format!(
+                    "mkdir -p {dir} && {} && {} && ",
+                    heredoc(
+                        services::corrosion::GOSSIP_TLS_CERT_PATH,
+                        &tls.cert_pem,
+                        "0644"
+                    ),
+                    heredoc(
+                        services::corrosion::GOSSIP_TLS_KEY_PATH,
+                        &tls.key_pem,
+                        "0600"
+                    ),
+                    dir = services::corrosion::GOSSIP_TLS_DIR,
+                )
+            })
+            .unwrap_or_default();
         step(
             runner,
             host,
@@ -469,7 +510,7 @@ async fn phase3<R: Runner>(
             ActionType::WriteCorrosionConfig,
             "",
             format!(
-                "mkdir -p /etc/corrosion && {}",
+                "mkdir -p /etc/corrosion && {tls_provision}{}",
                 heredoc("/etc/corrosion/config.toml", &cfg, "0644")
             ),
         )
@@ -525,6 +566,19 @@ async fn phase3<R: Runner>(
                 bridge_gateway: machine_ip(subnets[n][host]),
             })
             .collect::<Vec<_>>();
+        // S1 (opt-in): when flux TLS is enabled, drop the pin file coold reads
+        // (`/etc/coolify/flux.pin`) so coold pins the flux cert. The pin is the
+        // flux certificate itself (self-signed → it is its own trust anchor).
+        let flux_pin = desired
+            .flux_tls
+            .as_ref()
+            .map(|tls| {
+                format!(
+                    "{} && ",
+                    heredoc("/etc/coolify/flux.pin", &tls.cert_pem, "0644")
+                )
+            })
+            .unwrap_or_default();
         step(
             runner,
             host,
@@ -534,7 +588,9 @@ async fn phase3<R: Runner>(
             ActionType::InstallCooldService,
             "",
             format!(
-                "rm -f /etc/systemd/resolved.conf.d/coolify-internal.conf && {} && {} && {} && systemctl daemon-reload && systemctl enable --now {} {} coold",
+                // S7: pre-create the dirs coold's hardened unit bind-mounts
+                // read-write (`ProtectSystem=strict`) before it can write there.
+                "mkdir -p /etc/coolify /data/coolify && {flux_pin}rm -f /etc/systemd/resolved.conf.d/coolify-internal.conf && {} && {} && {} && systemctl daemon-reload && systemctl enable --now {} {} coold",
                 heredoc(
                     "/etc/systemd/system/coolify-mesh-dns-anchor.service",
                     &services::coold::mesh_dns_anchor_unit(&ns),
@@ -547,7 +603,11 @@ async fn phase3<R: Runner>(
                 ),
                 heredoc(
                     "/etc/systemd/system/coold.service",
-                    &services::coold::service_unit(mgmt[host], &ns, None),
+                    &services::coold::service_unit(
+                        mgmt[host],
+                        &ns,
+                        desired.coold_flux_config().as_ref()
+                    ),
                     "0644"
                 ),
                 services::coold::MESH_DNS_ANCHOR_SERVICE,

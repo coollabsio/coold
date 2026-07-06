@@ -9,6 +9,19 @@ pub struct PeerConfig {
     pub container_subnets: Vec<Ipv4Net>,
 }
 
+/// S1-adjacent: generate the WireGuard keypair with a private-key file that is
+/// never world-readable, even for an instant.
+///
+/// The previous `wg genkey | tee /etc/wireguard/privatekey` created the file at
+/// the process umask (commonly `0022` → `0644`) and only tightened it with a
+/// follow-up `chmod 600`, leaving a window in which the private key was
+/// world-readable on disk. Running the pipeline under `umask 077` creates
+/// `privatekey` (and `publickey`) as `0600`/`0640` from the outset; the trailing
+/// `chmod 600` is retained as belt-and-suspenders.
+pub fn genkey_command() -> String {
+    "mkdir -p /etc/wireguard && (umask 077; wg genkey | tee /etc/wireguard/privatekey | wg pubkey | tee /etc/wireguard/publickey) && chmod 600 /etc/wireguard/privatekey".to_string()
+}
+
 pub fn allowed_ips_line(p: &PeerConfig) -> String {
     let mut parts = vec![format!("{}/32", p.mgmt_ip)];
     parts.extend(p.container_subnets.iter().map(ToString::to_string));
@@ -54,6 +67,17 @@ pub fn write_config_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn genkey_command_closes_umask_window() {
+        let cmd = genkey_command();
+        assert!(cmd.contains("umask 077"));
+        // umask must wrap the genkey pipeline that creates privatekey.
+        let umask_at = cmd.find("umask 077").unwrap();
+        let tee_at = cmd.find("tee /etc/wireguard/privatekey").unwrap();
+        assert!(umask_at < tee_at, "umask must precede key creation");
+        assert!(cmd.contains("chmod 600 /etc/wireguard/privatekey"));
+    }
+
     #[test]
     fn allowed_ips_include_mgmt_and_subnets() {
         let p = PeerConfig {

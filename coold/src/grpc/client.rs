@@ -7,17 +7,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::MetadataValue;
-use tonic::transport::Channel;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use tonic::Request;
 use tracing::{info, warn};
 
 use crate::config::{Config, VERSION};
 use crate::corrosion::CorrosionClient;
-use crate::grpc::handlers::handle;
+use crate::grpc::handlers::{handle, EndpointOwnerCheck};
 use crate::grpc::proto::{
     agent_client::AgentClient, client_msg, server_msg, ClientMsg, Hello, Pong, ResourceStatusUpdate,
 };
 use crate::podman::PodmanClient;
+use crate::sync::ResyncSignal;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AssignmentRequest {
@@ -62,6 +63,7 @@ pub async fn run(
     config: Config,
     podman: PodmanClient,
     resource_status_tx: broadcast::Sender<ResourceStatusUpdate>,
+    resync_signal: ResyncSignal,
 ) -> Result<()> {
     if config.grpc_disabled || (config.flux_url.is_none() && config.assignment_url.is_none()) {
         info!("grpc transport disabled; skipping");
@@ -125,6 +127,7 @@ pub async fn run(
             &podman,
             &corrosion,
             resource_status_tx.subscribe(),
+            &resync_signal,
         )
         .await
         {
@@ -224,6 +227,7 @@ fn primitive_capabilities() -> Vec<String> {
         "firewall.reconcile",
         "coold.logs",
         "corrosion.tables",
+        "host.jwt.set",
     ]
     .into_iter()
     .map(str::to_string)
@@ -275,12 +279,18 @@ async fn connect_and_serve(
     podman: &PodmanClient,
     corrosion: &CorrosionClient,
     mut resource_status_rx: broadcast::Receiver<ResourceStatusUpdate>,
+    resync_signal: &ResyncSignal,
 ) -> Result<()> {
-    let channel = Channel::from_shared(url.to_string())
-        .context("invalid flux URL")?
-        .connect()
-        .await
-        .context("connect to flux")?;
+    let mut endpoint = Channel::from_shared(url.to_string()).context("invalid flux URL")?;
+
+    // S1: pin the flux TLS certificate when a pin file is present. Absent →
+    // keep plaintext (WireGuard-protected) behavior. https:// without a pin
+    // fails closed rather than trusting system roots.
+    if let Some(tls) = flux_tls_config(url, &config.flux_tls_pin_path).await? {
+        endpoint = endpoint.tls_config(tls).context("configure flux TLS pin")?;
+    }
+
+    let channel = endpoint.connect().await.context("connect to flux")?;
 
     let bearer: MetadataValue<_> = format!("Bearer {jwt}")
         .parse()
@@ -316,7 +326,13 @@ async fn connect_and_serve(
 
     info!(flux_url = url, "grpc stream established");
 
+    // R1: a fresh stream means flux/Laravel just (re)attached. Force the next
+    // reconcile to re-emit the full container-status snapshot so any state
+    // transitions dropped while there were no subscribers are replayed.
+    resync_signal.request();
+
     let status_tx = tx.clone();
+    let lag_resync = resync_signal.clone();
     let status_forwarder = tokio::spawn(async move {
         loop {
             match resource_status_rx.recv().await {
@@ -332,10 +348,13 @@ async fn connect_and_serve(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    // R1: dropped deltas on lag would leave Laravel stale.
+                    // Force a full resync instead of silently losing them.
                     warn!(
                         skipped,
-                        "lagged while forwarding resource status updates to flux"
+                        "lagged while forwarding resource status updates to flux; forcing resync"
                     );
+                    lag_resync.request();
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
@@ -357,14 +376,91 @@ async fn connect_and_serve(
         let tx = tx.clone();
         let podman = podman.clone();
         let corrosion = corrosion.clone();
+        let host_jwt_path = config.host_jwt_path.clone();
+        let owner_check =
+            EndpointOwnerCheck::new(config.host_mgmt_ip.clone(), config.strict_endpoint_owner);
         tokio::spawn(async move {
-            handle(request_id, command, &podman, &corrosion, tx).await;
+            handle(
+                request_id,
+                command,
+                &podman,
+                &corrosion,
+                &host_jwt_path,
+                &owner_check,
+                tx,
+            )
+            .await;
         });
     }
 
     status_forwarder.abort();
 
     Ok(())
+}
+
+/// Build the optional TLS config for the flux channel (S1).
+///
+/// - Pin file present → dial over TLS pinned to that PEM certificate/CA, with
+///   the SNI/verification domain taken from the flux URL host.
+/// - Pin file absent + `http(s)` URL is plaintext → `None` (today's behavior).
+/// - Pin file absent + `https://` URL → error (fail closed; we refuse to fall
+///   back to system roots for a connection that is meant to be pinned).
+async fn flux_tls_config(url: &str, pin_path: &Path) -> Result<Option<ClientTlsConfig>> {
+    let pem = match tokio::fs::read(pin_path).await {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(anyhow!("read flux TLS pin {}: {e}", pin_path.display())),
+    };
+
+    match require_flux_tls(url, pem.is_some())? {
+        false => Ok(None),
+        true => {
+            let pem = pem.expect("require_flux_tls only returns true when a pin is present");
+            let mut tls = ClientTlsConfig::new().ca_certificate(Certificate::from_pem(pem));
+            if let Some(domain) = flux_tls_domain(url) {
+                tls = tls.domain_name(domain);
+            }
+            Ok(Some(tls))
+        }
+    }
+}
+
+/// Decide whether TLS must be configured for `url` given whether a pin file is
+/// present. Returns `Ok(true)` to pin, `Ok(false)` for plaintext, or an error
+/// when the URL is `https://` but no pin is available (fail closed).
+fn require_flux_tls(url: &str, pin_present: bool) -> Result<bool> {
+    if pin_present {
+        return Ok(true);
+    }
+    if url
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("https://")
+    {
+        return Err(anyhow!(
+            "flux URL {url} is https but no TLS pin file is present; \
+             refusing to connect without a pinned certificate"
+        ));
+    }
+    Ok(false)
+}
+
+/// Extract the host portion of the flux URL for TLS SNI / verification.
+fn flux_tls_domain(url: &str) -> Option<String> {
+    let without_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+    // Strip userinfo and port.
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let host = host.split(':').next().unwrap_or(host);
+    let host = host.trim();
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 
 fn pong_for(request_id: &str) -> ClientMsg {
@@ -429,6 +525,48 @@ mod tests {
         let p = write_jwt(dir.path(), "host-jwt", "  abc.def.ghi\n", 0o600);
         let jwt = load_host_jwt(&p).await.unwrap();
         assert_eq!(jwt, "abc.def.ghi");
+    }
+
+    #[tokio::test]
+    async fn reconnect_reads_updated_token_from_disk() {
+        // The reconnect loop calls load_host_jwt on every attempt (never caches
+        // the first read), so a rotated token is picked up without a restart.
+        let dir = tempfile::tempdir().unwrap();
+        let p = write_jwt(dir.path(), "host-jwt", "first.token.value", 0o600);
+        assert_eq!(load_host_jwt(&p).await.unwrap(), "first.token.value");
+
+        // Simulate an external rotator swapping the file before expiry.
+        write_jwt(dir.path(), "host-jwt", "second.token.value", 0o600);
+        assert_eq!(load_host_jwt(&p).await.unwrap(), "second.token.value");
+    }
+
+    #[test]
+    fn tls_required_when_pin_present() {
+        assert!(super::require_flux_tls("http://flux:6443", true).unwrap());
+        assert!(super::require_flux_tls("https://flux:6443", true).unwrap());
+    }
+
+    #[test]
+    fn plaintext_when_no_pin_and_http_url() {
+        assert!(!super::require_flux_tls("http://10.0.0.1:6443", false).unwrap());
+    }
+
+    #[test]
+    fn https_without_pin_fails_closed() {
+        let err = super::require_flux_tls("https://flux.example.com:6443", false).unwrap_err();
+        assert!(format!("{err:#}").contains("no TLS pin"));
+    }
+
+    #[test]
+    fn extracts_tls_domain_from_url() {
+        assert_eq!(
+            super::flux_tls_domain("https://flux.example.com:6443/path"),
+            Some("flux.example.com".to_string())
+        );
+        assert_eq!(
+            super::flux_tls_domain("http://10.0.0.1:6443"),
+            Some("10.0.0.1".to_string())
+        );
     }
 
     #[tokio::test]

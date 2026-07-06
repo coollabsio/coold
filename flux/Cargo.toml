@@ -13,7 +13,10 @@ path = "src/main.rs"
 [dependencies]
 proto = { path = "../proto" }
 tokio = { workspace = true }
-tonic = { workspace = true }
+# S1: `tls` enables optional defense-in-depth TLS on the gRPC listener (off by
+# default; runtime-gated on COOLIFY_FLUX_TLS_CERT_PATH/KEY_PATH). The workspace
+# tonic enables `channel`; features are additive so this keeps that.
+tonic = { workspace = true, features = ["tls"] }
 prost = { workspace = true }
 tokio-stream = { workspace = true }
 anyhow = { workspace = true }

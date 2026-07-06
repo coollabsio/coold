@@ -12,23 +12,26 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use axum::{
-    extract::State,
+    extract::{Path as PathParam, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use hyper::body::Incoming;
 use hyper::Request;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
+use serde::Deserialize;
 use tokio::net::UnixListener;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use tower::Service;
 use tracing::{info, warn};
 
 use crate::config::Config;
 use crate::envelope::{DispatchEnvelope, ResponseBody, ResponseEnvelope};
+use crate::revocation::RevocationStore;
 use crate::routing::{route_coold, RouteOutcome};
 use crate::state::{InsertOutcome, ParkResult, Pending, PendingKind, ResponseData, Streams};
 
@@ -38,20 +41,35 @@ struct AppState {
     pending: Pending,
     pending_max: usize,
     dispatch_timeout: Duration,
+    revocations: RevocationStore,
 }
 
-pub async fn run(config: Config, streams: Streams, pending: Pending) -> Result<()> {
+pub async fn run(
+    config: Config,
+    streams: Streams,
+    pending: Pending,
+    revocations: RevocationStore,
+) -> Result<()> {
     let state = AppState {
         streams,
         pending,
         pending_max: config.pending_max,
         dispatch_timeout: Duration::from_secs(config.dispatch_timeout_secs),
+        revocations,
     };
 
     let app = Router::new()
         .route("/v1/health", get(health))
         .route("/v1/streams", get(stream_inventory))
         .route("/v1/coold/dispatch", post(coold_dispatch))
+        // #3: JWT revocation denylist management (Laravel calls these on server
+        // destroy / re-home). Auth is the same filesystem-perm boundary as the
+        // rest of the UDS lane — no extra bearer.
+        .route(
+            "/v1/tokens/revoke",
+            post(revoke_token).get(list_revocations),
+        )
+        .route("/v1/tokens/revoke/:jti", delete(unrevoke_token))
         .with_state(state);
 
     let listener = bind(
@@ -178,10 +196,22 @@ async fn coold_dispatch(State(st): State<AppState>, Json(env): Json<DispatchEnve
                 st.pending.remove(&request_id);
                 return coold_err(&request_id, 503, "host stream gone");
             };
-            if tx.send(msg).await.is_err() {
-                st.pending.remove(&request_id);
-                warn!(%request_id, host_id = %target, %command_type, "coold dispatch stream send failed");
-                return coold_err(&request_id, 503, "host stream send failed");
+            // C2: never block the calling php-fpm worker on a wedged coold. The
+            // per-host command channel is bounded (64); a full queue means that
+            // host is not draining, so fail fast with 503 instead of awaiting
+            // capacity (which would tie up the UDS request indefinitely).
+            match tx.try_send(msg) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    st.pending.remove(&request_id);
+                    warn!(%request_id, host_id = %target, %command_type, "coold command queue full; rejecting");
+                    return coold_err(&request_id, 503, "host command queue full");
+                }
+                Err(TrySendError::Closed(_)) => {
+                    st.pending.remove(&request_id);
+                    warn!(%request_id, host_id = %target, %command_type, "coold dispatch stream send failed");
+                    return coold_err(&request_id, 503, "host stream send failed");
+                }
             }
 
             info!(%request_id, host_id = %target, %command_type, "coold dispatch forwarded to stream");
@@ -242,4 +272,72 @@ fn code_to_status(code: u32) -> StatusCode {
         500..=599 => StatusCode::from_u16(code as u16).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+// ─── #3: revocation endpoints ────────────────────────────────────────────────
+
+/// Body of `POST /v1/tokens/revoke`. `expires_at` (the token `exp`, seconds
+/// since epoch) is optional — when given, the sweeper prunes the entry once it
+/// can no longer matter.
+#[derive(Debug, Deserialize)]
+struct RevokeRequest {
+    jti: String,
+    #[serde(default)]
+    expires_at: Option<u64>,
+}
+
+/// `POST /v1/tokens/revoke` — add a `jti` to the denylist (persisted).
+async fn revoke_token(State(st): State<AppState>, Json(req): Json<RevokeRequest>) -> Response {
+    if req.jti.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "jti is required" })),
+        )
+            .into_response();
+    }
+    match st.revocations.revoke(req.jti.clone(), req.expires_at) {
+        Ok(()) => {
+            info!(jti = %req.jti, "JWT jti revoked");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "revoked": req.jti })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            warn!(jti = %req.jti, error = format!("{e:#}"), "persist revocation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to persist revocation" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `DELETE /v1/tokens/revoke/:jti` — remove a `jti` from the denylist.
+async fn unrevoke_token(State(st): State<AppState>, PathParam(jti): PathParam<String>) -> Response {
+    match st.revocations.unrevoke(&jti) {
+        Ok(removed) => {
+            info!(%jti, removed, "JWT jti unrevoked");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "jti": jti, "removed": removed })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            warn!(%jti, error = format!("{e:#}"), "persist unrevocation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "failed to persist revocation" })),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/tokens/revoke` — list current denylist entries.
+async fn list_revocations(State(st): State<AppState>) -> impl IntoResponse {
+    Json(st.revocations.list())
 }
