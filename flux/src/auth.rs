@@ -27,8 +27,32 @@ struct Claims {
     /// Tenant (team) the host belongs to (#2). Laravel mints this; flux
     /// requires it (behind `COOLIFY_FLUX_REQUIRE_TEAM_ID`) so every stream is
     /// scoped to a tenant and the binding is auditable.
-    #[serde(default)]
+    ///
+    /// Deserialized flexibly (string OR integer): Laravel's `team_id` is a
+    /// bigint and has been minted as a JSON integer, which would otherwise fail
+    /// the whole token with a type error and break the mesh. Defense-in-depth so
+    /// a numeric mint can never break stream auth.
+    #[serde(default, deserialize_with = "deserialize_flexible_id")]
     team_id: Option<String>,
+}
+
+/// Accept an identifier claim as a JSON string, a JSON integer, or null, and
+/// normalize it to `Option<String>`. Rejects other JSON types (bool, array,
+/// object) so a malformed claim is still caught.
+fn deserialize_flexible_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+
+    match Option::<serde_json::Value>::deserialize(deserializer)? {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s)),
+        Some(serde_json::Value::Number(n)) => Ok(Some(n.to_string())),
+        Some(other) => Err(D::Error::custom(format!(
+            "identifier claim must be a string or integer, got {other}"
+        ))),
+    }
 }
 
 pub struct VerifiedJwt {
@@ -362,6 +386,32 @@ mod tests {
             jti: None,
             team_id: Some("team-1".into()),
         }
+    }
+
+    #[test]
+    fn team_id_claim_accepts_integer_string_and_null() {
+        // Integer (Laravel's bigint minted as a JSON number) → normalized to string.
+        let c: super::Claims =
+            serde_json::from_str(r#"{"sub":"h","exp":9999999999,"team_id":42}"#).unwrap();
+        assert_eq!(c.team_id.as_deref(), Some("42"));
+
+        // String form → kept as-is.
+        let c: super::Claims =
+            serde_json::from_str(r#"{"sub":"h","exp":9999999999,"team_id":"42"}"#).unwrap();
+        assert_eq!(c.team_id.as_deref(), Some("42"));
+
+        // Absent and explicit null → None.
+        let c: super::Claims = serde_json::from_str(r#"{"sub":"h","exp":9999999999}"#).unwrap();
+        assert_eq!(c.team_id, None);
+        let c: super::Claims =
+            serde_json::from_str(r#"{"sub":"h","exp":9999999999,"team_id":null}"#).unwrap();
+        assert_eq!(c.team_id, None);
+
+        // Other JSON types (bool) are still rejected.
+        assert!(serde_json::from_str::<super::Claims>(
+            r#"{"sub":"h","exp":9999999999,"team_id":true}"#
+        )
+        .is_err());
     }
 
     /// Revocation checker backed by a fixed set of revoked jtis.
